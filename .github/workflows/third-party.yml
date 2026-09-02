@@ -1,0 +1,129 @@
+name: Third-party binaries
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      rebuild_third_party:
+        description: Rebuild Tor and Caddy even when their caches exist
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build ${{ matrix.component }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        component:
+          - tor
+          - caddy
+    env:
+      TORKITTEN_BUILD_ROOT: ${{ runner.temp }}/torkitten-build
+      TORKITTEN_SOURCE_ROOT: ${{ github.workspace }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Verify vendored source
+        run: ./tools/verify-vendor.sh
+
+      - name: Derive versioned identity
+        id: identity
+        env:
+          COMPONENT: ${{ matrix.component }}
+        run: |
+          source tools/build/common.sh
+          build_key=$(component_build_key "$COMPONENT")
+          release=$(lock_value "$COMPONENT" release)
+          tree=$(lock_value "$COMPONENT" tree)
+          {
+            echo "build_key=$build_key"
+            echo "cache_key=third-party-$COMPONENT-$build_key"
+            echo "artifact_name=third-party-$COMPONENT-$release-${tree:0:12}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Restore completed binary bundle
+        id: binary-cache
+        if: ${{ !inputs.rebuild_third_party }}
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/torkitten-build/artifacts/third-party/${{ matrix.component }}
+          key: ${{ steps.identity.outputs.cache_key }}
+
+      - name: Build pinned release
+        if: ${{ steps.binary-cache.outputs.cache-hit != 'true' }}
+        env:
+          COMPONENT: ${{ matrix.component }}
+        run: |
+          docker build \
+            --file tools/build/Containerfile \
+            --tag torkitten-builder:ubuntu-24.04 \
+            tools/build
+          docker run --rm \
+            --volume "$GITHUB_WORKSPACE:/src:ro" \
+            --volume "$TORKITTEN_BUILD_ROOT:/work:rw" \
+            --env TORKITTEN_SOURCE_ROOT=/src \
+            --env TORKITTEN_BUILD_ROOT=/work \
+            --env TORKITTEN_BUILD_JOBS="$(nproc)" \
+            torkitten-builder:ubuntu-24.04 \
+            /src/tools/build-third-party.sh "$COMPONENT"
+
+      - name: Verify binary bundle
+        id: bundle
+        env:
+          COMPONENT: ${{ matrix.component }}
+          EXPECTED_KEY: ${{ steps.identity.outputs.build_key }}
+        run: |
+          artifact_dir="$TORKITTEN_BUILD_ROOT/artifacts/third-party/$COMPONENT/$EXPECTED_KEY"
+          test -f "$artifact_dir/.complete"
+          test -s "$artifact_dir/BUILD-METADATA"
+          test "$(sed -n 's/^component=//p' "$artifact_dir/BUILD-METADATA")" = "$COMPONENT"
+          test "$(sed -n 's/^build_key=//p' "$artifact_dir/BUILD-METADATA")" = "$EXPECTED_KEY"
+          binary_sha=$(sed -n 's/^binary_sha256=//p' "$artifact_dir/BUILD-METADATA")
+          binary="$artifact_dir/usr/bin/$COMPONENT"
+          test -x "$binary"
+          test "$(sha256sum "$binary" | cut -d ' ' -f 1)" = "$binary_sha"
+          test -s "$artifact_dir/usr/share/doc/torkitten/third-party/$COMPONENT/LICENSE"
+          echo "artifact_dir=$artifact_dir" >> "$GITHUB_OUTPUT"
+
+      - name: Upload reusable binary bundle
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+        with:
+          name: ${{ steps.identity.outputs.artifact_name }}
+          path: ${{ steps.bundle.outputs.artifact_dir }}
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 90
+
+  consume:
+    name: Consume reusable bundles
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Download this run's Tor and Caddy bundles
+        uses: actions/download-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          pattern: third-party-*
+          path: ${{ runner.temp }}/third-party
+
+      - name: Verify downstream inputs
+        run: |
+          mapfile -t metadata < <(find "$RUNNER_TEMP/third-party" -name BUILD-METADATA -type f | sort)
+          test "${#metadata[@]}" -eq 2
+          for metadata_file in "${metadata[@]}"; do
+            component=$(sed -n 's/^component=//p' "$metadata_file")
+            binary_sha=$(sed -n 's/^binary_sha256=//p' "$metadata_file")
+            bundle_dir=$(dirname "$metadata_file")
+            test "$(sha256sum "$bundle_dir/usr/bin/$component" | cut -d ' ' -f 1)" = "$binary_sha"
+            sed -n '/^component=/p; /^release=/p; /^source_commit=/p; /^binary_sha256=/p' "$metadata_file"
+          done
