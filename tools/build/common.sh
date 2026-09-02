@@ -26,12 +26,14 @@ lock_value() {
 
 component_recipe_hash() {
     local component=$1
-    sha256sum \
-        "$source_real/third-party/${component}.upstream.toml" \
-        "$source_real/tools/build/Containerfile" \
-        "$source_real/tools/build/common.sh" \
-        "$source_real/tools/build/${component}.sh" |
-        sha256sum | cut -d ' ' -f 1
+    (
+        cd "$source_real"
+        sha256sum \
+            "third-party/${component}.upstream.toml" \
+            tools/build/Containerfile \
+            tools/build/common.sh \
+            "tools/build/${component}.sh"
+    ) | sha256sum | cut -d ' ' -f 1
 }
 
 component_build_key() {
