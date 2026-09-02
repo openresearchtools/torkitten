@@ -1,0 +1,8 @@
+name = "caddy"
+release = "v2.11.4"
+upstream = "https://github.com/caddyserver/caddy.git"
+tag_object = "8ec11a4b7e39a5fd00da2fc5cb9b543e31fd7926"
+commit = "e2eee6a7fce366321294c9c2a79f3146891dcbdf"
+tree = "89190a02601c918d8de199c16a9d7d778ba204fa"
+license_file = "third-party/caddy/LICENSE"
+imported = "2026-09-02"
