@@ -78,4 +78,4 @@ The optional OCI image is headless and designed for an explicit Podman/Docker de
 
 Keep changes aligned with this architecture, prefer small auditable components, validate all trust-boundary inputs, and accompany security-sensitive behavior with integration tests.
 
-Vendored standalone dependencies remain pristine under `third-party/`, with exact upstream identities in adjacent manifests. Build recipes and all generated files remain outside those source trees. Use Ubuntu 24.04 as the binary baseline, keep local Podman state and outputs on the Data drive, and give each independently reusable component its own version-derived CI cache and artifact.
+Vendored standalone dependencies remain pristine under `third-party/`, with exact upstream identities in adjacent manifests. Build recipes and all generated files remain outside those source trees. Use Ubuntu 24.04 as the binary baseline, keep local Podman state and outputs on the Data drive, and give each independently reusable component its own version-derived CI cache and artifact. Complete features in small independently revertible commits and push each commit to `origin`.
