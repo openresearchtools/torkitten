@@ -1,0 +1,32 @@
+FROM docker.io/library/golang:1.25.1-bookworm@sha256:c423747fbd96fd8f0b1102d947f51f9b266060217478e5f9bf86f145969562ee AS go-toolchain
+
+FROM docker.io/library/ubuntu:24.04@sha256:33ceb71981b602c1a7443a53469e4dba065f7503eab3078a2d7a57a2ab987517
+
+ARG DEBIAN_FRONTEND=noninteractive
+
+COPY --from=go-toolchain /usr/local/go /usr/local/go
+
+ENV PATH=/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends \
+        autoconf \
+        automake \
+        build-essential \
+        ca-certificates \
+        file \
+        git \
+        libcap-dev \
+        libevent-dev \
+        liblzma-dev \
+        libseccomp-dev \
+        libssl-dev \
+        libsystemd-dev \
+        libzstd-dev \
+        pkg-config \
+        python3 \
+        zlib1g-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /work
+
