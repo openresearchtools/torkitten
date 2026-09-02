@@ -25,11 +25,13 @@ C Tor provides the persistent v3 onion identity, restricted-discovery client key
 Dedicated onion virtual ports are the compatibility-first route mode:
 
 ```text
+http://name.onion:80/<temporary-certificate-path> -> temporary certificate bootstrap
+https://name.onion:443/*   -> Torkitten login and route portal
 https://name.onion:8443/* -> Caddy -> http://127.0.0.1:3000/*
 https://name.onion:8444/* -> Caddy -> http://127.0.0.1:5000/*
 ```
 
-The complete request path is preserved, so applications continue to own `/`, `/assets`, `/api`, and `/ws`. Different ports are different browser origins, while a hostname-wide secure session cookie supplies one login across them. Prefix routes such as `/webui/` are available for applications with explicit base-path support. A separate onion identity is the strongest optional isolation mode.
+The complete request path is preserved, so applications continue to own `/`, `/assets`, `/api`, and `/ws`. Different ports are different browser origins, while a hostname-wide secure session cookie supplies one login across them. Torkitten does not publish applications under path prefixes. A separate onion identity is the strongest optional isolation mode.
 
 ## Rust workspace
 
@@ -54,7 +56,9 @@ Every published route passes Caddy forward authentication. Auth-service failure 
 
 The local administration API uses a mode-restricted Unix socket and peer credentials. Adding routes or shares, creating API credentials, rotating identities, changing authentication, and enrolling clients are local administration actions. The remote emergency action writes a persistent disabled latch, stops publication cleanly, and requires local re-enablement.
 
-The TLS hierarchy uses a private root, an onion-name-constrained intermediate, and renewable leaf certificates for the exact onion hostname. Runtime storage holds only the material needed for normal operation; encrypted recovery material supports identity recovery and rotation. Enrollment produces QR codes for the onion address, Tor client credential, and temporary certificate/bootstrap workflow.
+The TLS hierarchy uses a private root, an onion-name-constrained intermediate, and renewable leaf certificates for the exact onion hostname. Runtime storage holds only the material needed for normal operation; encrypted recovery material supports identity recovery and rotation. Enrollment produces QR codes for the onion address and Tor client credential.
+
+Certificate bootstrap is a separate temporary HTTP listener mapped from onion virtual port 80. Initial onboarding opens it for 15 minutes; afterward it can be reopened only through the local GTK client or `torkittenctl`, and it closes automatically. It bypasses web login because no password, session, or second factor may cross HTTP; Tor client authorization is its authentication boundary. A generated enrollment path accepts only `GET` and `HEAD` for the public CA certificate/profile and static instructions. Every other path returns 404. It never serves private keys or administration functions, and Secure session cookies never travel over it.
 
 Logs contain bounded operational metadata with credentials, authorization headers, cookies, request bodies, uploads, chat content, and secret keys redacted.
 
@@ -73,3 +77,5 @@ The optional OCI image is headless and designed for an explicit Podman/Docker de
 5. Package and verify crash recovery, fail-closed behavior, origin isolation, upgrades, backup recovery, and security boundaries.
 
 Keep changes aligned with this architecture, prefer small auditable components, validate all trust-boundary inputs, and accompany security-sensitive behavior with integration tests.
+
+Vendored standalone dependencies remain pristine under `third-party/`, with exact upstream identities in adjacent manifests. Build recipes and all generated files remain outside those source trees. Use Ubuntu 24.04 as the binary baseline, keep local Podman state and outputs on the Data drive, and give each independently reusable component its own version-derived CI cache and artifact.
