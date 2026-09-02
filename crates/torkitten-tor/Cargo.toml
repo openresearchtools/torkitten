@@ -1,0 +1,21 @@
+[package]
+name = "torkitten-tor"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+data-encoding.workspace = true
+getrandom.workspace = true
+thiserror.workspace = true
+torkitten-core = { path = "../torkitten-core" }
+x25519-dalek.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true
