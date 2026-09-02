@@ -1,0 +1,8 @@
+name = "tor"
+release = "tor-0.4.9.11"
+upstream = "https://gitlab.torproject.org/tpo/core/tor.git"
+tag_object = "75a560c75680a45c62aac5be928a21b9936f7e2e"
+commit = "f3d28b2e0978ca075ec324834bec077673478ded"
+tree = "a77de259ff32eedfc96730ba5e5e1f3fda4054e9"
+license_file = "third-party/tor/LICENSE"
+imported = "2026-09-02"
