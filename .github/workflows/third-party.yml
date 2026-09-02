@@ -27,12 +27,14 @@ jobs:
           - tor
           - caddy
     env:
-      TORKITTEN_BUILD_ROOT: ${{ runner.temp }}/torkitten-build
       TORKITTEN_SOURCE_ROOT: ${{ github.workspace }}
 
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Keep build data outside the checkout
+        run: echo "TORKITTEN_BUILD_ROOT=$RUNNER_TEMP/torkitten-build" >> "$GITHUB_ENV"
 
       - name: Verify vendored source
         run: ./tools/verify-vendor.sh
