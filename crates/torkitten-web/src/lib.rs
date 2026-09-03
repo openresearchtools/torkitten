@@ -11,7 +11,7 @@ use std::{
 
 use askama::Template;
 use axum::{
-    Router,
+    Json, Router,
     body::Body,
     extract::{Form, Path as AxumPath, State},
     http::{
@@ -25,7 +25,7 @@ use axum::{
     routing::{get, post},
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -196,9 +196,20 @@ fn portal_router(state: SiteState) -> Router {
     Router::new()
         .route("/", get(portal))
         .route("/assets/app.css", get(stylesheet))
+        .route("/assets/app.js", get(javascript))
         .route("/login", post(login))
+        .route("/passkey/start", post(start_passkey_login))
+        .route("/passkey/finish", post(finish_passkey_login))
         .route("/logout", post(logout))
         .route("/enroll/{token}", get(enrollment).post(complete_enrollment))
+        .route(
+            "/enroll/{token}/passkey/start",
+            post(start_passkey_enrollment),
+        )
+        .route(
+            "/enroll/{token}/passkey/finish",
+            post(finish_passkey_enrollment),
+        )
         .fallback(not_found)
         .layer(middleware::from_fn(security_headers))
         .with_state(state)
@@ -325,6 +336,73 @@ async fn complete_enrollment(
     authenticated_response(&session, expires_unix, Some(page))
 }
 
+#[derive(Serialize)]
+struct PasskeyOptions {
+    ceremony: String,
+    public_key: serde_json::Value,
+}
+
+async fn start_passkey_enrollment(
+    State(state): State<SiteState>,
+    AxumPath(token): AxumPath<String>,
+    headers: HeaderMap,
+) -> WebResult<Json<PasskeyOptions>> {
+    validate_header_mutation(&state, &headers)?;
+    let response = request_daemon(
+        &state.daemon_socket,
+        RemoteCommand::StartPasskeyEnrollment {
+            site_id: state.site_id.clone(),
+            token: SensitiveString::new(token),
+        },
+    )
+    .await?;
+    let RemoteResponse::PasskeyRegistrationStarted {
+        ceremony,
+        public_key,
+    } = response
+    else {
+        return Err(WebError::from_response(response));
+    };
+    Ok(Json(PasskeyOptions {
+        ceremony: ceremony.expose().to_owned(),
+        public_key,
+    }))
+}
+
+#[derive(Deserialize)]
+struct FinishPasskeyInput {
+    ceremony: SensitiveString,
+    credential: serde_json::Value,
+}
+
+async fn finish_passkey_enrollment(
+    State(state): State<SiteState>,
+    AxumPath(token): AxumPath<String>,
+    headers: HeaderMap,
+    Json(input): Json<FinishPasskeyInput>,
+) -> WebResult<Response> {
+    validate_header_mutation(&state, &headers)?;
+    let response = request_daemon(
+        &state.daemon_socket,
+        RemoteCommand::FinishPasskeyEnrollment {
+            site_id: state.site_id.clone(),
+            token: SensitiveString::new(token),
+            ceremony: input.ceremony,
+            credential: SensitiveString::new(input.credential.to_string()),
+        },
+    )
+    .await?;
+    let RemoteResponse::EnrollmentCompleted {
+        session,
+        expires_unix,
+        ..
+    } = response
+    else {
+        return Err(WebError::from_response(response));
+    };
+    authenticated_response(&session, expires_unix, None)
+}
+
 #[derive(Deserialize)]
 struct LoginInput {
     guest_id: String,
@@ -352,6 +430,71 @@ async fn login(
             guest_id: GuestId::new(input.guest_id).map_err(WebError::Validation)?,
             password: input.password,
             second_factor,
+        },
+    )
+    .await?;
+    let RemoteResponse::GuestAuthenticated {
+        session,
+        expires_unix,
+    } = response
+    else {
+        return Err(WebError::from_response(response));
+    };
+    authenticated_response(&session, expires_unix, None)
+}
+
+#[derive(Deserialize)]
+struct PasskeyGuestInput {
+    guest_id: String,
+}
+
+async fn start_passkey_login(
+    State(state): State<SiteState>,
+    headers: HeaderMap,
+    Json(input): Json<PasskeyGuestInput>,
+) -> WebResult<Json<PasskeyOptions>> {
+    validate_header_mutation(&state, &headers)?;
+    let response = request_daemon(
+        &state.daemon_socket,
+        RemoteCommand::StartPasskeyAuthentication {
+            site_id: state.site_id.clone(),
+            guest_id: GuestId::new(input.guest_id).map_err(WebError::Validation)?,
+        },
+    )
+    .await?;
+    let RemoteResponse::PasskeyAuthenticationStarted {
+        ceremony,
+        public_key,
+    } = response
+    else {
+        return Err(WebError::from_response(response));
+    };
+    Ok(Json(PasskeyOptions {
+        ceremony: ceremony.expose().to_owned(),
+        public_key,
+    }))
+}
+
+#[derive(Deserialize)]
+struct FinishPasskeyLoginInput {
+    guest_id: String,
+    ceremony: SensitiveString,
+    credential: serde_json::Value,
+}
+
+async fn finish_passkey_login(
+    State(state): State<SiteState>,
+    headers: HeaderMap,
+    Json(input): Json<FinishPasskeyLoginInput>,
+) -> WebResult<Response> {
+    validate_header_mutation(&state, &headers)?;
+    let response = request_daemon(
+        &state.daemon_socket,
+        RemoteCommand::FinishPasskeyAuthentication {
+            site_id: state.site_id.clone(),
+            guest_id: GuestId::new(input.guest_id).map_err(WebError::Validation)?,
+            ceremony: input.ceremony,
+            credential: SensitiveString::new(input.credential.to_string()),
         },
     )
     .await?;
@@ -566,6 +709,13 @@ async fn stylesheet() -> impl IntoResponse {
     )
 }
 
+async fn javascript() -> impl IntoResponse {
+    (
+        [(CONTENT_TYPE, "text/javascript; charset=utf-8")],
+        include_str!("../assets/app.js"),
+    )
+}
+
 async fn not_found() -> StatusCode {
     StatusCode::NOT_FOUND
 }
@@ -576,7 +726,7 @@ async fn security_headers(request: axum::http::Request<Body>, next: Next) -> Res
     headers.insert(
         "content-security-policy",
         HeaderValue::from_static(
-            "default-src 'self'; base-uri 'none'; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; img-src 'self' data:; object-src 'none'; script-src 'none'; style-src 'self'",
+            "default-src 'self'; base-uri 'none'; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; img-src 'self' data:; object-src 'none'; script-src 'self'; style-src 'self'",
         ),
     );
     headers.insert(
@@ -637,6 +787,14 @@ fn validate_mutation(
     } else {
         Err(WebError::Forbidden)
     }
+}
+
+fn validate_header_mutation(state: &SiteState, headers: &HeaderMap) -> WebResult<()> {
+    let candidate = headers
+        .get("x-csrf-token")
+        .and_then(|value| value.to_str().ok())
+        .ok_or(WebError::Forbidden)?;
+    validate_mutation(state, headers, candidate)
 }
 
 fn required_header<'a>(headers: &'a HeaderMap, name: &str) -> WebResult<&'a str> {
@@ -1013,6 +1171,8 @@ mod tests {
         let body = response.into_body().collect().await.unwrap().to_bytes();
         let body = String::from_utf8(body.to_vec()).unwrap();
         assert!(body.contains(&format!("https://{ONION}:8443/")));
+        assert!(body.contains("/assets/app.js"));
+        assert!(body.contains("data-logout"));
         assert!(!body.contains("127.0.0.1"));
         assert!(matches!(
             daemon.await.unwrap(),
@@ -1090,5 +1250,151 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn logout_accepts_the_portal_form_and_expires_the_session_cookie() {
+        let temporary = tempfile::tempdir().unwrap();
+        let socket = temporary.path().join("daemon.sock");
+        let daemon = mock_daemon(&socket, &RemoteResponse::LoggedOut);
+        let csrf = CsrfToken::generate().unwrap();
+        let session = SessionToken::generate().unwrap();
+        let body = format!("csrf={}", csrf.expose());
+        let response = portal_router(site_state(socket))
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/logout")
+                    .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .header(ORIGIN, format!("https://{ONION}"))
+                    .header(
+                        COOKIE,
+                        format!(
+                            "{CSRF_COOKIE}={}; {SESSION_COOKIE}={}",
+                            csrf.expose(),
+                            session.expose()
+                        ),
+                    )
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert_eq!(
+            response.headers().get(LOCATION).unwrap(),
+            &format!("https://{ONION}/")
+        );
+        let cookies = response
+            .headers()
+            .get_all(SET_COOKIE)
+            .iter()
+            .map(|value| value.to_str().unwrap())
+            .collect::<Vec<_>>();
+        assert!(cookies.iter().any(|cookie| {
+            cookie.starts_with("__Host-torkitten_session=;") && cookie.contains("Max-Age=0")
+        }));
+        assert!(matches!(
+            daemon.await.unwrap(),
+            RemoteCommand::LogoutGuest { site_id, session: received }
+                if site_id.as_str() == "alpha" && received.expose() == session.expose()
+        ));
+    }
+
+    #[tokio::test]
+    async fn passkey_enrollment_start_is_origin_and_csrf_bound() {
+        let temporary = tempfile::tempdir().unwrap();
+        let socket = temporary.path().join("daemon.sock");
+        let ceremony = SessionToken::generate().unwrap();
+        let daemon = mock_daemon(
+            &socket,
+            &RemoteResponse::PasskeyRegistrationStarted {
+                ceremony: SensitiveString::new(ceremony.expose()),
+                public_key: serde_json::json!({
+                    "publicKey": {"rp": {"id": ONION}, "challenge": "AQID"}
+                }),
+            },
+        );
+        let csrf = CsrfToken::generate().unwrap();
+        let response = portal_router(site_state(socket))
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/enroll/one-time-token/passkey/start")
+                    .header(ORIGIN, format!("https://{ONION}"))
+                    .header(COOKIE, format!("{CSRF_COOKIE}={}", csrf.expose()))
+                    .header("x-csrf-token", csrf.expose())
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["ceremony"], ceremony.expose());
+        assert_eq!(body["public_key"]["publicKey"]["rp"]["id"], ONION);
+        assert!(matches!(
+            daemon.await.unwrap(),
+            RemoteCommand::StartPasskeyEnrollment { site_id, token }
+                if site_id.as_str() == "alpha" && token.expose() == "one-time-token"
+        ));
+    }
+
+    #[tokio::test]
+    async fn passkey_login_finish_sets_the_secure_session_cookie() {
+        let temporary = tempfile::tempdir().unwrap();
+        let socket = temporary.path().join("daemon.sock");
+        let session = SessionToken::generate().unwrap();
+        let daemon = mock_daemon(
+            &socket,
+            &RemoteResponse::GuestAuthenticated {
+                session: SensitiveString::new(session.expose()),
+                expires_unix: 2_000_000_000,
+            },
+        );
+        let csrf = CsrfToken::generate().unwrap();
+        let ceremony = SessionToken::generate().unwrap();
+        let body = serde_json::json!({
+            "guest_id": "family",
+            "ceremony": ceremony.expose(),
+            "credential": {"id": "credential", "signature": "secret-assertion"}
+        });
+        let response = portal_router(site_state(socket))
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/passkey/finish")
+                    .header(CONTENT_TYPE, "application/json")
+                    .header(ORIGIN, format!("https://{ONION}"))
+                    .header(COOKIE, format!("{CSRF_COOKIE}={}", csrf.expose()))
+                    .header("x-csrf-token", csrf.expose())
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let set_cookie = response
+            .headers()
+            .get(SET_COOKIE)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(set_cookie.starts_with("__Host-torkitten_session="));
+        assert!(set_cookie.contains("; Secure; HttpOnly; SameSite=Strict"));
+        let command = daemon.await.unwrap();
+        assert!(matches!(
+            &command,
+            RemoteCommand::FinishPasskeyAuthentication {
+                guest_id,
+                ceremony: received_ceremony,
+                credential,
+                ..
+            } if guest_id.as_str() == "family"
+                && received_ceremony.expose() == ceremony.expose()
+                && credential.expose().contains("secret-assertion")
+        ));
+        assert!(!format!("{command:?}").contains("secret-assertion"));
     }
 }

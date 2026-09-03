@@ -259,11 +259,31 @@ pub enum RemoteCommand {
         password: SensitiveString,
         totp_code: SensitiveString,
     },
+    StartPasskeyEnrollment {
+        site_id: SiteId,
+        token: SensitiveString,
+    },
+    FinishPasskeyEnrollment {
+        site_id: SiteId,
+        token: SensitiveString,
+        ceremony: SensitiveString,
+        credential: SensitiveString,
+    },
     AuthenticateGuest {
         site_id: SiteId,
         guest_id: GuestId,
         password: SensitiveString,
         second_factor: GuestSecondFactor,
+    },
+    StartPasskeyAuthentication {
+        site_id: SiteId,
+        guest_id: GuestId,
+    },
+    FinishPasskeyAuthentication {
+        site_id: SiteId,
+        guest_id: GuestId,
+        ceremony: SensitiveString,
+        credential: SensitiveString,
     },
     LogoutGuest {
         site_id: SiteId,
@@ -336,6 +356,14 @@ pub enum RemoteResponse {
         expires_unix: i64,
         recovery_codes: Vec<SensitiveString>,
     },
+    PasskeyRegistrationStarted {
+        ceremony: SensitiveString,
+        public_key: serde_json::Value,
+    },
+    PasskeyAuthenticationStarted {
+        ceremony: SensitiveString,
+        public_key: serde_json::Value,
+    },
     LoggedOut,
     BootstrapCertificate {
         certificate_pem: String,
@@ -396,5 +424,19 @@ mod tests {
         let debug = format!("{command:?}");
         assert!(!debug.contains("password secret"));
         assert!(!debug.contains("123456"));
+    }
+
+    #[test]
+    fn passkey_ceremony_and_credential_are_redacted() {
+        let command = RemoteCommand::FinishPasskeyAuthentication {
+            site_id: SiteId::new("personal").unwrap(),
+            guest_id: GuestId::new("family").unwrap(),
+            ceremony: SensitiveString::new("ceremony secret"),
+            credential: SensitiveString::new("credential assertion secret"),
+        };
+        let debug = format!("{command:?}");
+        assert!(!debug.contains("ceremony secret"));
+        assert!(!debug.contains("credential assertion secret"));
+        assert_eq!(debug.matches("[REDACTED]").count(), 2);
     }
 }

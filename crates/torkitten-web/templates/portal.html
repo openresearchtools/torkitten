@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>{{ display_name }} · Torkitten</title>
   <link rel="stylesheet" href="/assets/app.css">
+  <script src="/assets/app.js" defer></script>
 </head>
 <body>
   <main>
@@ -25,25 +26,35 @@
             {% endfor %}
             </ul>
           {% endif %}
-          <form method="post" action="/logout">
+          <form method="post" action="/logout" data-logout>
             <input type="hidden" name="csrf" value="{{ csrf }}">
             <button type="submit">Sign out</button>
+            <p class="status" data-logout-status role="status" aria-live="polite"></p>
           </form>
         </section>
       {% when None %}
         <section class="card">
           <h2>Guest sign-in required</h2>
           <p>This site requires its Tor client key, private certificate authority, and a Torkitten guest session.</p>
-          <form method="post" action="/login">
+          <div class="passkey-panel">
             <input type="hidden" name="csrf" value="{{ csrf }}">
-            <label>Guest ID <input name="guest_id" required maxlength="64" autocomplete="username"></label>
-            <label>Password <input type="password" name="password" required autocomplete="current-password"></label>
-            <label>Second factor
-              <select name="factor_kind"><option value="totp">Authenticator code</option><option value="recovery">Recovery code</option></select>
-            </label>
-            <label>Code <input name="factor" required autocomplete="one-time-code"></label>
-            <button type="submit">Sign in</button>
-          </form>
+            <label>Guest ID <input data-passkey-guest required maxlength="64" autocomplete="username"></label>
+            <button type="button" data-passkey-login>Sign in with a passkey</button>
+            <p class="status" data-passkey-status role="status" aria-live="polite"></p>
+          </div>
+          <details>
+            <summary>Use password and a second factor</summary>
+            <form method="post" action="/login">
+              <input type="hidden" name="csrf" value="{{ csrf }}">
+              <label>Guest ID <input name="guest_id" required maxlength="64" autocomplete="username"></label>
+              <label>Password <input type="password" name="password" required autocomplete="current-password"></label>
+              <label>Second factor
+                <select name="factor_kind"><option value="totp">Authenticator code</option><option value="recovery">Recovery code</option></select>
+              </label>
+              <label>Code <input name="factor" required autocomplete="one-time-code"></label>
+              <button type="submit" class="secondary">Sign in with password</button>
+            </form>
+          </details>
         </section>
     {% endmatch %}
   </main>

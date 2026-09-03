@@ -23,8 +23,9 @@ use tokio::{
     net::{UnixListener, UnixStream},
 };
 use torkitten_auth::{
-    CsrfToken, EnrollmentToken, RecoveryCode, SessionToken, generate_recovery_codes, hash_password,
-    verify_password,
+    CsrfToken, EnrollmentToken, PasskeyError, PasskeyService, PublicKeyCredential, RecoveryCode,
+    RegisterPublicKeyCredential, SessionToken, generate_recovery_codes, hash_password,
+    passkey_credential_id, verify_password,
 };
 use torkitten_core::{
     AccountOwner, AdminCommand, AdminResponse, ComponentAction, ComponentState, Device, DeviceId,
@@ -36,7 +37,7 @@ use torkitten_proxy::{CaddyError, CaddyInstance, CaddyPaths, ProxyConfig, ProxyS
 use torkitten_tor::{
     ClientAuthError, ClientKeyPair, ClientName, OnionIdentity, TorError, TorInstance, TorPaths,
 };
-use torkitten_vault::{PkiError, Store, StoreError, TlsAuthority};
+use torkitten_vault::{DeviceEnrollmentRecord, PkiError, Store, StoreError, TlsAuthority};
 use uuid::Uuid;
 
 const MAX_BOOTSTRAP_SECONDS: u32 = 3_600;
@@ -47,6 +48,8 @@ const CANDIDATE_LIFETIME_SECONDS: i64 = 300;
 const DEVICE_ENROLLMENT_SECONDS: i64 = 15 * 60;
 const ADMIN_SESSION_SECONDS: i64 = 30 * 86_400;
 const FRESH_AUTHENTICATION_SECONDS: i64 = 600;
+const PASSKEY_CEREMONY_SECONDS: i64 = 300;
+const MAXIMUM_PENDING_PASSKEY_CEREMONIES: usize = 1024;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DaemonPaths {
@@ -227,6 +230,9 @@ pub struct Daemon<S> {
     active_proxy_config: Option<ProxyConfig>,
     maintenance_enabled: bool,
     candidates: HashMap<[u8; 32], GeneratedCandidate>,
+    passkey_services: HashMap<SiteId, SitePasskeyService>,
+    pending_passkey_enrollments: HashMap<[u8; 32], PendingPasskeyEnrollment>,
+    pending_passkey_authentications: HashMap<[u8; 32], PendingPasskeyAuthentication>,
 }
 
 #[derive(Clone, Debug)]
@@ -237,6 +243,29 @@ struct BootstrapWindow {
 
 struct GeneratedCandidate {
     identity: OnionIdentity,
+    expires_unix: i64,
+}
+
+struct SitePasskeyService {
+    onion_hostname: String,
+    relying_party_name: String,
+    service: PasskeyService,
+}
+
+struct PendingPasskeyEnrollment {
+    site_id: SiteId,
+    guest_id: GuestId,
+    device_id: DeviceId,
+    token_digest: [u8; 32],
+    account_id: Uuid,
+    account_was_new: bool,
+    expires_unix: i64,
+}
+
+struct PendingPasskeyAuthentication {
+    site_id: SiteId,
+    guest_id: GuestId,
+    account_id: Uuid,
     expires_unix: i64,
 }
 
@@ -282,6 +311,9 @@ impl<S: ServiceControl> Daemon<S> {
             active_proxy_config: None,
             maintenance_enabled: false,
             candidates: HashMap::new(),
+            passkey_services: HashMap::new(),
+            pending_passkey_enrollments: HashMap::new(),
+            pending_passkey_authentications: HashMap::new(),
         })
     }
 
@@ -425,6 +457,47 @@ impl<S: ServiceControl> Daemon<S> {
                     expires_unix: window.expires_unix,
                 })
             }
+            command => self.handle_remote_passkey(command, now_unix),
+        }
+    }
+
+    fn handle_remote_passkey(
+        &mut self,
+        command: RemoteCommand,
+        now_unix: i64,
+    ) -> Result<RemoteResponse, DaemonError> {
+        match command {
+            RemoteCommand::StartPasskeyEnrollment { site_id, token } => {
+                self.start_passkey_enrollment(&site_id, token.expose(), now_unix)
+            }
+            RemoteCommand::FinishPasskeyEnrollment {
+                site_id,
+                token,
+                ceremony,
+                credential,
+            } => self.finish_passkey_enrollment(
+                &site_id,
+                token.expose(),
+                ceremony.expose(),
+                credential.expose(),
+                now_unix,
+            ),
+            RemoteCommand::StartPasskeyAuthentication { site_id, guest_id } => {
+                self.start_passkey_authentication(&site_id, &guest_id, now_unix)
+            }
+            RemoteCommand::FinishPasskeyAuthentication {
+                site_id,
+                guest_id,
+                ceremony,
+                credential,
+            } => self.finish_passkey_authentication(
+                &site_id,
+                &guest_id,
+                ceremony.expose(),
+                credential.expose(),
+                now_unix,
+            ),
+            _ => unreachable!("non-passkey command dispatched to passkey handler"),
         }
     }
 
@@ -645,6 +718,366 @@ impl<S: ServiceControl> Daemon<S> {
                 .map(|code| torkitten_core::SensitiveString::new(code.expose()))
                 .collect(),
         })
+    }
+
+    fn start_passkey_enrollment(
+        &mut self,
+        site_id: &SiteId,
+        encoded_token: &str,
+        now_unix: i64,
+    ) -> Result<RemoteResponse, DaemonError> {
+        self.purge_pending_passkey_ceremonies(now_unix);
+        if self.pending_passkey_enrollments.len() >= MAXIMUM_PENDING_PASSKEY_CEREMONIES {
+            return Err(PasskeyError::TooManyCeremonies.into());
+        }
+        let site = self.required_remote_site(site_id)?;
+        let token = EnrollmentToken::parse(encoded_token.to_owned())
+            .map_err(|_| DaemonError::EnrollmentNotFound)?;
+        let (enrollment, guest, device) =
+            self.required_remote_enrollment(site_id, &token, now_unix)?;
+        let owner = AccountOwner::Guest {
+            site_id: site_id.clone(),
+            guest_id: guest.id.clone(),
+        };
+        let account = self.store.auth_account_for_owner(&owner)?;
+        let account_id = account.as_ref().map_or_else(Uuid::new_v4, |value| value.id);
+        let existing = account
+            .as_ref()
+            .map(|value| self.store.passkeys(value.id))
+            .transpose()?
+            .unwrap_or_default()
+            .into_iter()
+            .map(|record| record.passkey)
+            .collect::<Vec<_>>();
+        let started = self.passkey_service(&site)?.start_registration(
+            account_id,
+            guest.id.as_str(),
+            &guest.display_name,
+            &existing,
+        )?;
+        let public_key = match serde_json::to_value(&started.challenge) {
+            Ok(value) => value,
+            Err(error) => {
+                let _ = self.passkey_service(&site)?.cancel(&started.handle);
+                return Err(error.into());
+            }
+        };
+        let ceremony_digest = started.handle.digest();
+        self.pending_passkey_enrollments.insert(
+            ceremony_digest,
+            PendingPasskeyEnrollment {
+                site_id: site_id.clone(),
+                guest_id: guest.id,
+                device_id: device.id,
+                token_digest: token.digest(),
+                account_id,
+                account_was_new: account.is_none(),
+                expires_unix: enrollment.expires_unix.min(
+                    now_unix
+                        .checked_add(PASSKEY_CEREMONY_SECONDS)
+                        .ok_or(DaemonError::InvalidTimestamp(now_unix))?,
+                ),
+            },
+        );
+        Ok(RemoteResponse::PasskeyRegistrationStarted {
+            ceremony: torkitten_core::SensitiveString::new(started.handle.expose()),
+            public_key,
+        })
+    }
+
+    fn finish_passkey_enrollment(
+        &mut self,
+        site_id: &SiteId,
+        encoded_token: &str,
+        encoded_ceremony: &str,
+        encoded_credential: &str,
+        now_unix: i64,
+    ) -> Result<RemoteResponse, DaemonError> {
+        let site = self.required_remote_site(site_id)?;
+        let token = EnrollmentToken::parse(encoded_token.to_owned())
+            .map_err(|_| DaemonError::EnrollmentNotFound)?;
+        let ceremony = SessionToken::parse(encoded_ceremony.to_owned())
+            .map_err(|_| DaemonError::RemoteUnauthorized)?;
+        let pending = self
+            .pending_passkey_enrollments
+            .remove(&ceremony.digest())
+            .filter(|pending| {
+                pending.expires_unix > now_unix
+                    && pending.site_id == *site_id
+                    && token.digest_matches(&pending.token_digest)
+            })
+            .ok_or(DaemonError::RemoteUnauthorized)?;
+        let (enrollment, guest, device) =
+            self.required_remote_enrollment(site_id, &token, now_unix)?;
+        if enrollment.guest_id != pending.guest_id
+            || enrollment.device_id != pending.device_id
+            || guest.id != pending.guest_id
+            || device.id != pending.device_id
+        {
+            return Err(DaemonError::RemoteUnauthorized);
+        }
+        let owner = AccountOwner::Guest {
+            site_id: site_id.clone(),
+            guest_id: guest.id.clone(),
+        };
+        let account = self.store.auth_account_for_owner(&owner)?;
+        if account
+            .as_ref()
+            .is_some_and(|account| account.id != pending.account_id)
+            || (account.is_none() != pending.account_was_new)
+        {
+            return Err(DaemonError::RemoteUnauthorized);
+        }
+        let credential: RegisterPublicKeyCredential = serde_json::from_str(encoded_credential)?;
+        let registered = self
+            .passkey_service(&site)?
+            .finish_registration(&ceremony, &credential)?;
+        if registered.account_id != pending.account_id {
+            return Err(DaemonError::RemoteUnauthorized);
+        }
+
+        let created_account = if pending.account_was_new {
+            let mut recovery_pepper = [0_u8; 32];
+            getrandom::fill(&mut recovery_pepper).map_err(DaemonError::Random)?;
+            self.store.create_auth_account(
+                pending.account_id,
+                &owner,
+                &guest.display_name,
+                None,
+                None,
+                &recovery_pepper,
+            )?;
+            true
+        } else {
+            false
+        };
+        if let Err(error) = self.store.put_passkey(
+            pending.account_id,
+            &device.display_name,
+            &registered.passkey,
+            now_unix,
+        ) {
+            if created_account {
+                let _ = self.store.remove_auth_account(pending.account_id);
+            }
+            return Err(error.into());
+        }
+        match self.store.consume_device_enrollment(&token, now_unix) {
+            Ok(Some(consumed))
+                if consumed.site_id == *site_id
+                    && consumed.guest_id == pending.guest_id
+                    && consumed.device_id == pending.device_id => {}
+            result => {
+                let operation = match result {
+                    Ok(_) => DaemonError::EnrollmentNotFound.to_string(),
+                    Err(ref error) => error.to_string(),
+                };
+                if let Err(rollback) = self.rollback_passkey_registration(
+                    pending.account_id,
+                    created_account,
+                    &registered.passkey,
+                ) {
+                    return Err(DaemonError::Rollback {
+                        operation,
+                        rollback: rollback.to_string(),
+                    });
+                }
+                return match result {
+                    Ok(_) => Err(DaemonError::EnrollmentNotFound),
+                    Err(error) => Err(error.into()),
+                };
+            }
+        }
+        let (session, expires_unix) = self.create_remote_session(pending.account_id, now_unix)?;
+        Ok(RemoteResponse::EnrollmentCompleted {
+            session: torkitten_core::SensitiveString::new(session.expose()),
+            expires_unix,
+            recovery_codes: Vec::new(),
+        })
+    }
+
+    fn start_passkey_authentication(
+        &mut self,
+        site_id: &SiteId,
+        guest_id: &GuestId,
+        now_unix: i64,
+    ) -> Result<RemoteResponse, DaemonError> {
+        self.purge_pending_passkey_ceremonies(now_unix);
+        if self.pending_passkey_authentications.len() >= MAXIMUM_PENDING_PASSKEY_CEREMONIES {
+            return Err(PasskeyError::TooManyCeremonies.into());
+        }
+        let site = self.required_remote_site(site_id)?;
+        let guest = self.required_guest(site_id, guest_id)?;
+        if !guest.enabled {
+            return Err(DaemonError::RemoteUnauthorized);
+        }
+        let account = self
+            .store
+            .auth_account_for_owner(&AccountOwner::Guest {
+                site_id: site_id.clone(),
+                guest_id: guest_id.clone(),
+            })?
+            .ok_or(DaemonError::RemoteUnauthorized)?;
+        let credentials = self
+            .store
+            .passkeys(account.id)?
+            .into_iter()
+            .map(|record| record.passkey)
+            .collect::<Vec<_>>();
+        if credentials.is_empty() {
+            return Err(DaemonError::RemoteUnauthorized);
+        }
+        let started = self
+            .passkey_service(&site)?
+            .start_authentication(account.id, credentials)?;
+        let public_key = match serde_json::to_value(&started.challenge) {
+            Ok(value) => value,
+            Err(error) => {
+                let _ = self.passkey_service(&site)?.cancel(&started.handle);
+                return Err(error.into());
+            }
+        };
+        self.pending_passkey_authentications.insert(
+            started.handle.digest(),
+            PendingPasskeyAuthentication {
+                site_id: site_id.clone(),
+                guest_id: guest_id.clone(),
+                account_id: account.id,
+                expires_unix: now_unix
+                    .checked_add(PASSKEY_CEREMONY_SECONDS)
+                    .ok_or(DaemonError::InvalidTimestamp(now_unix))?,
+            },
+        );
+        Ok(RemoteResponse::PasskeyAuthenticationStarted {
+            ceremony: torkitten_core::SensitiveString::new(started.handle.expose()),
+            public_key,
+        })
+    }
+
+    fn finish_passkey_authentication(
+        &mut self,
+        site_id: &SiteId,
+        guest_id: &GuestId,
+        encoded_ceremony: &str,
+        encoded_credential: &str,
+        now_unix: i64,
+    ) -> Result<RemoteResponse, DaemonError> {
+        let site = self.required_remote_site(site_id)?;
+        let ceremony = SessionToken::parse(encoded_ceremony.to_owned())
+            .map_err(|_| DaemonError::RemoteUnauthorized)?;
+        let pending = self
+            .pending_passkey_authentications
+            .remove(&ceremony.digest())
+            .filter(|pending| {
+                pending.expires_unix > now_unix
+                    && pending.site_id == *site_id
+                    && pending.guest_id == *guest_id
+            })
+            .ok_or(DaemonError::RemoteUnauthorized)?;
+        let guest = self.required_guest(site_id, guest_id)?;
+        if !guest.enabled {
+            return Err(DaemonError::RemoteUnauthorized);
+        }
+        let account = self
+            .store
+            .auth_account_for_owner(&AccountOwner::Guest {
+                site_id: site_id.clone(),
+                guest_id: guest_id.clone(),
+            })?
+            .filter(|account| account.id == pending.account_id)
+            .ok_or(DaemonError::RemoteUnauthorized)?;
+        let credential: PublicKeyCredential = serde_json::from_str(encoded_credential)?;
+        let authenticated = self
+            .passkey_service(&site)?
+            .finish_authentication(&ceremony, &credential)?;
+        if authenticated.account_id != account.id {
+            return Err(DaemonError::RemoteUnauthorized);
+        }
+        self.store.mark_passkey_used(
+            authenticated.account_id,
+            &authenticated.credential,
+            now_unix,
+        )?;
+        let (session, expires_unix) = self.create_remote_session(account.id, now_unix)?;
+        Ok(RemoteResponse::GuestAuthenticated {
+            session: torkitten_core::SensitiveString::new(session.expose()),
+            expires_unix,
+        })
+    }
+
+    fn required_remote_enrollment(
+        &self,
+        site_id: &SiteId,
+        token: &EnrollmentToken,
+        now_unix: i64,
+    ) -> Result<(DeviceEnrollmentRecord, Guest, Device), DaemonError> {
+        let enrollment = self
+            .store
+            .device_enrollment(token, now_unix)?
+            .filter(|enrollment| enrollment.site_id == *site_id)
+            .ok_or(DaemonError::EnrollmentNotFound)?;
+        let guest = self.required_guest(site_id, &enrollment.guest_id)?;
+        let device = self
+            .store
+            .devices(site_id, &guest.id)?
+            .into_iter()
+            .find(|device| device.id == enrollment.device_id && device.enabled)
+            .filter(|_| guest.enabled)
+            .ok_or(DaemonError::EnrollmentNotFound)?;
+        Ok((enrollment, guest, device))
+    }
+
+    fn passkey_service(&mut self, site: &Site) -> Result<&PasskeyService, DaemonError> {
+        let onion_hostname = self.tor.onion_hostname(&site.id)?;
+        let needs_replacement = self.passkey_services.get(&site.id).is_none_or(|entry| {
+            entry.onion_hostname != onion_hostname || entry.relying_party_name != site.display_name
+        });
+        if needs_replacement {
+            let service = PasskeyService::new(&onion_hostname, &site.display_name)?;
+            self.passkey_services.insert(
+                site.id.clone(),
+                SitePasskeyService {
+                    onion_hostname,
+                    relying_party_name: site.display_name.clone(),
+                    service,
+                },
+            );
+        }
+        Ok(&self
+            .passkey_services
+            .get(&site.id)
+            .ok_or(PasskeyError::StateUnavailable)?
+            .service)
+    }
+
+    fn purge_pending_passkey_ceremonies(&mut self, now_unix: i64) {
+        self.pending_passkey_enrollments
+            .retain(|_, pending| pending.expires_unix > now_unix);
+        self.pending_passkey_authentications
+            .retain(|_, pending| pending.expires_unix > now_unix);
+    }
+
+    fn invalidate_site_passkey_ceremonies(&mut self, site_id: &SiteId) {
+        self.passkey_services.remove(site_id);
+        self.pending_passkey_enrollments
+            .retain(|_, pending| pending.site_id != *site_id);
+        self.pending_passkey_authentications
+            .retain(|_, pending| pending.site_id != *site_id);
+    }
+
+    fn rollback_passkey_registration(
+        &self,
+        account_id: Uuid,
+        created_account: bool,
+        passkey: &torkitten_auth::Passkey,
+    ) -> Result<(), DaemonError> {
+        if created_account {
+            self.store.remove_auth_account(account_id)?;
+        } else {
+            self.store
+                .revoke_passkey(account_id, &passkey_credential_id(passkey))?;
+        }
+        Ok(())
     }
 
     fn authenticate_remote_guest(
@@ -921,14 +1354,19 @@ impl<S: ServiceControl> Daemon<S> {
             } => {
                 let mut site = self.required_site(&site_id)?;
                 site.display_name = display_name;
-                self.put_existing_site(&site, now_unix)
+                let response = self.put_existing_site(&site, now_unix)?;
+                self.invalidate_site_passkey_ceremonies(&site_id);
+                Ok(response)
             }
             AdminCommand::RotateSite {
                 site_id,
                 candidate_id,
             } => {
                 let candidate = self.take_candidate(candidate_id.expose(), now_unix)?;
-                self.rotate_generated_site(&site_id, &candidate.identity, now_unix)
+                let response =
+                    self.rotate_generated_site(&site_id, &candidate.identity, now_unix)?;
+                self.invalidate_site_passkey_ceremonies(&site_id);
+                Ok(response)
             }
             AdminCommand::RemoveSite { site_id } => {
                 let old = self.required_site(&site_id)?;
@@ -942,17 +1380,22 @@ impl<S: ServiceControl> Daemon<S> {
                 self.remove_runtime_tls(&site_id)?;
                 self.tor.remove_site_state(&site_id)?;
                 self.bootstrap_windows.remove(&site_id);
+                self.invalidate_site_passkey_ceremonies(&site_id);
                 Ok(AdminResponse::Ok)
             }
             AdminCommand::SetSiteEnabled { site_id, enabled } => {
                 let mut site = self.required_site(&site_id)?;
                 site.enabled = enabled;
-                self.put_existing_site(&site, now_unix)
+                let response = self.put_existing_site(&site, now_unix)?;
+                self.invalidate_site_passkey_ceremonies(&site_id);
+                Ok(response)
             }
             AdminCommand::StopSite { site_id } => {
                 let mut site = self.required_site(&site_id)?;
                 site.enabled = false;
-                self.put_existing_site(&site, now_unix)
+                let response = self.put_existing_site(&site, now_unix)?;
+                self.invalidate_site_passkey_ceremonies(&site_id);
+                Ok(response)
             }
             AdminCommand::RestartSite { site_id } => {
                 let site = self.required_site(&site_id)?;
@@ -2206,6 +2649,8 @@ pub enum DaemonError {
     #[error(transparent)]
     Recovery(#[from] torkitten_auth::RecoveryError),
     #[error(transparent)]
+    Passkey(#[from] PasskeyError),
+    #[error(transparent)]
     Url(#[from] url::ParseError),
     #[error(transparent)]
     Service(#[from] ServiceError),
@@ -2242,6 +2687,7 @@ impl DaemonError {
             Self::Service(_) => "service_failed",
             Self::Password(_) => "password_failed",
             Self::Token(_) | Self::Recovery(_) => "token_failed",
+            Self::Passkey(_) => "passkey_failed",
             Self::InvalidTimestamp(_)
             | Self::AlreadyRunning(_)
             | Self::UnsafeSocket(_)
@@ -2865,6 +3311,94 @@ mod tests {
         ));
         assert_remote_portal_access(&mut daemon, &site_id, &guest_id, session.expose());
         assert_remote_login_and_logout(&mut daemon, &site_id, &guest_id, &totp, &recovery_code);
+    }
+
+    #[test]
+    fn passkey_registration_is_onion_scoped_and_bound_to_one_enrollment() {
+        let (_temporary, mut daemon, _services) = daemon();
+        initialize(&mut daemon);
+        create_generated_test_site(&mut daemon);
+        let site_id = SiteId::new("alpha").unwrap();
+        let guest_id = GuestId::new("family").unwrap();
+        let guest = Guest {
+            site_id: site_id.clone(),
+            id: guest_id.clone(),
+            display_name: "Family".to_owned(),
+            enabled: true,
+        };
+        let enroll = |daemon: &mut Daemon<FakeServices>, id: &str, now_unix| {
+            let response = daemon.handle(
+                AdminCommand::EnrollDevice {
+                    guest: guest.clone(),
+                    device: Device {
+                        site_id: site_id.clone(),
+                        guest_id: guest_id.clone(),
+                        id: DeviceId::new(id).unwrap(),
+                        display_name: format!("Device {id}"),
+                        tor_client_name: format!("client_{id}"),
+                        enabled: true,
+                    },
+                    mapping_ids: vec![MappingId::new("app").unwrap()],
+                },
+                now_unix,
+            );
+            let AdminResponse::DeviceEnrolled { enrollment_url, .. } = response else {
+                panic!("expected enrollment: {response:?}");
+            };
+            enrollment_url
+                .expose()
+                .rsplit('/')
+                .next()
+                .unwrap()
+                .to_owned()
+        };
+        let first_token = enroll(&mut daemon, "phone", NOW + 2);
+        let second_token = enroll(&mut daemon, "laptop", NOW + 3);
+        let expected_hostname = daemon.tor.onion_hostname(&site_id).unwrap();
+        let response = daemon.handle_remote(
+            RemoteCommand::StartPasskeyEnrollment {
+                site_id: site_id.clone(),
+                token: SensitiveString::new(&first_token),
+            },
+            NOW + 4,
+        );
+        let RemoteResponse::PasskeyRegistrationStarted {
+            ceremony,
+            public_key,
+        } = response
+        else {
+            panic!("expected passkey options: {response:?}");
+        };
+        assert_eq!(public_key["publicKey"]["rp"]["id"], expected_hostname);
+        assert_eq!(
+            public_key["publicKey"]["authenticatorSelection"]["userVerification"],
+            "required"
+        );
+        assert!(SessionToken::parse(ceremony.expose()).is_ok());
+
+        let response = daemon.handle_remote(
+            RemoteCommand::FinishPasskeyEnrollment {
+                site_id: site_id.clone(),
+                token: SensitiveString::new(&second_token),
+                ceremony,
+                credential: SensitiveString::new("{}"),
+            },
+            NOW + 5,
+        );
+        assert!(matches!(
+            response,
+            RemoteResponse::Error { code, .. } if code == "unauthorized"
+        ));
+        for token in [&first_token, &second_token] {
+            let token = EnrollmentToken::parse(token.to_owned()).unwrap();
+            assert!(
+                daemon
+                    .store
+                    .device_enrollment(&token, NOW + 6)
+                    .unwrap()
+                    .is_some()
+            );
+        }
     }
 
     fn assert_remote_portal_access(
