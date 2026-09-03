@@ -49,6 +49,60 @@ pub struct TorInstance {
     paths: TorPaths,
 }
 
+/// A crash-recoverable swap of one site's identity directory. Dropping an
+/// uncommitted rotation restores the previous identity.
+pub struct IdentityRotation {
+    onion_directory: PathBuf,
+    previous_directory: PathBuf,
+    committed_directory: PathBuf,
+    active: bool,
+}
+
+impl IdentityRotation {
+    /// Makes the new identity permanent. A committed backup left by an
+    /// interrupted cleanup is safely removed during the next prepare.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the atomic commit marker cannot be installed.
+    pub fn commit(mut self) -> Result<(), TorError> {
+        fs::rename(&self.previous_directory, &self.committed_directory)?;
+        if let Err(error) = sync_parent(&self.onion_directory) {
+            let _ = fs::rename(&self.committed_directory, &self.previous_directory);
+            return Err(error);
+        }
+        self.active = false;
+        let _ = remove_private_tree(&self.committed_directory);
+        Ok(())
+    }
+
+    /// Restores the old identity immediately.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the new directory cannot be removed or the old
+    /// directory cannot be restored.
+    pub fn rollback(mut self) -> Result<(), TorError> {
+        self.rollback_inner()?;
+        self.active = false;
+        Ok(())
+    }
+
+    fn rollback_inner(&self) -> Result<(), TorError> {
+        remove_private_tree(&self.onion_directory)?;
+        fs::rename(&self.previous_directory, &self.onion_directory)?;
+        sync_parent(&self.onion_directory)
+    }
+}
+
+impl Drop for IdentityRotation {
+    fn drop(&mut self) {
+        if self.active {
+            let _ = self.rollback_inner();
+        }
+    }
+}
+
 impl TorInstance {
     #[must_use]
     pub fn new(paths: TorPaths) -> Self {
@@ -273,6 +327,100 @@ impl TorInstance {
             format!("{}\n", identity.hostname()).as_bytes(),
             0o600,
         )
+    }
+
+    /// Atomically selects a new identity directory while keeping the old one
+    /// available for rollback until the caller commits the returned guard.
+    /// Existing authorized-client public keys are copied into the candidate.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the current identity is missing or unsafe, a
+    /// previous interrupted rotation cannot be recovered, or filesystem
+    /// operations fail.
+    pub fn begin_identity_rotation(
+        &self,
+        site_id: &SiteId,
+        identity: &OnionIdentity,
+    ) -> Result<IdentityRotation, TorError> {
+        self.recover_identity_rotation(site_id)?;
+        let onion = self.onion_directory(site_id);
+        ensure_existing_private_directory(&onion)?;
+        let parent = self.site_state_directory(site_id);
+        let staged = parent.join("onion.rotation-new");
+        let previous = parent.join("onion.rotation-old");
+        let committed = parent.join("onion.rotation-committed");
+        ensure_absent(&staged)?;
+        ensure_absent(&previous)?;
+        ensure_absent(&committed)?;
+        ensure_private_directory(&staged)?;
+        let result = (|| {
+            atomic_write(
+                &staged.join("hs_ed25519_secret_key"),
+                identity.secret_key_file(),
+                0o600,
+            )?;
+            atomic_write(
+                &staged.join("hs_ed25519_public_key"),
+                identity.public_key_file(),
+                0o600,
+            )?;
+            atomic_write(
+                &staged.join("hostname"),
+                format!("{}\n", identity.hostname()).as_bytes(),
+                0o600,
+            )?;
+            copy_authorized_clients(
+                &onion.join("authorized_clients"),
+                &staged.join("authorized_clients"),
+            )?;
+            fs::rename(&onion, &previous)?;
+            if let Err(error) = fs::rename(&staged, &onion) {
+                let _ = fs::rename(&previous, &onion);
+                return Err(error.into());
+            }
+            sync_parent(&onion)
+        })();
+        if let Err(error) = result {
+            let _ = remove_private_tree(&staged);
+            return Err(error);
+        }
+        Ok(IdentityRotation {
+            onion_directory: onion,
+            previous_directory: previous,
+            committed_directory: committed,
+            active: true,
+        })
+    }
+
+    /// Restores or cleans identity directories left by an interrupted rotation.
+    /// This is called once by the daemon at startup, never during an active
+    /// configuration transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a rotation path is unsafe or cannot be recovered.
+    pub fn recover_identity_rotation(&self, site_id: &SiteId) -> Result<(), TorError> {
+        let parent = self.site_state_directory(site_id);
+        let onion = self.onion_directory(site_id);
+        let staged = parent.join("onion.rotation-new");
+        let previous = parent.join("onion.rotation-old");
+        let committed = parent.join("onion.rotation-committed");
+        if committed.exists() {
+            remove_private_tree(&committed)?;
+        }
+        if previous.exists() {
+            if onion.exists() {
+                remove_private_tree(&onion)?;
+            }
+            ensure_existing_private_directory(&previous)?;
+            fs::rename(&previous, &onion)?;
+            sync_parent(&onion)?;
+        }
+        if staged.exists() {
+            remove_private_tree(&staged)?;
+        }
+        Ok(())
     }
 
     /// Removes one site's exact persistent onion identity directory after the
@@ -548,6 +696,64 @@ fn ensure_private_directory(path: &Path) -> Result<(), TorError> {
     Ok(())
 }
 
+fn ensure_existing_private_directory(path: &Path) -> Result<(), TorError> {
+    let metadata = fs::symlink_metadata(path)?;
+    if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
+        return Err(TorError::UnsafeDirectory(path.to_path_buf()));
+    }
+    Ok(())
+}
+
+fn ensure_absent(path: &Path) -> Result<(), TorError> {
+    match fs::symlink_metadata(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Ok(_) => Err(TorError::UnsafeDirectory(path.to_path_buf())),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn remove_private_tree(path: &Path) -> Result<(), TorError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
+                return Err(TorError::UnsafeDirectory(path.to_path_buf()));
+            }
+            fs::remove_dir_all(path)?;
+            Ok(())
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn copy_authorized_clients(source: &Path, destination: &Path) -> Result<(), TorError> {
+    ensure_existing_private_directory(source)?;
+    ensure_private_directory(destination)?;
+    for entry in fs::read_dir(source)? {
+        let entry = entry?;
+        let path = entry.path();
+        let metadata = fs::symlink_metadata(&path)?;
+        let filename = entry.file_name();
+        let safe_name = filename
+            .to_str()
+            .is_some_and(|name| !name.contains(['/', '\0']))
+            && path.extension() == Some(OsStr::new("auth"));
+        if !metadata.file_type().is_file() || metadata.file_type().is_symlink() || !safe_name {
+            return Err(TorError::UnsafeAuthorizedClient(path));
+        }
+        atomic_write(&destination.join(filename), &fs::read(path)?, 0o600)?;
+    }
+    Ok(())
+}
+
+fn sync_parent(path: &Path) -> Result<(), TorError> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| TorError::InvalidPath(path.to_path_buf()))?;
+    File::open(parent)?.sync_all()?;
+    Ok(())
+}
+
 fn atomic_write(path: &Path, contents: &[u8], mode: u32) -> Result<(), TorError> {
     let parent = path
         .parent()
@@ -599,6 +805,8 @@ pub enum TorError {
     BootstrapSiteUnavailable(SiteId),
     #[error("onion identity already exists for site {0}")]
     IdentityAlreadyExists(SiteId),
+    #[error("unsafe authorized-client entry: {path}", path = .0.display())]
+    UnsafeAuthorizedClient(PathBuf),
     #[error("could not allocate a temporary filename")]
     TemporaryNameExhausted,
     #[error("operating-system randomness failed: {0}")]
@@ -794,6 +1002,77 @@ mod tests {
             instance.install_identity(&site_id, &OnionIdentity::generate().unwrap()),
             Err(TorError::IdentityAlreadyExists(id)) if id == site_id
         ));
+    }
+
+    #[test]
+    fn identity_rotation_preserves_clients_and_rolls_back_until_commit() {
+        let temporary = tempfile::tempdir().unwrap();
+        let instance = instance(&temporary);
+        let site_id = SiteId::new("alpha").unwrap();
+        let original = OnionIdentity::generate().unwrap();
+        instance.install_identity(&site_id, &original).unwrap();
+        let name = ClientName::new("phone").unwrap();
+        let keys = ClientKeyPair::generate().unwrap();
+        instance.authorize_client(&site_id, &name, &keys).unwrap();
+
+        let replacement = OnionIdentity::generate().unwrap();
+        let rotation = instance
+            .begin_identity_rotation(&site_id, &replacement)
+            .unwrap();
+        assert_eq!(
+            instance.onion_hostname(&site_id).unwrap(),
+            replacement.hostname()
+        );
+        assert_eq!(
+            fs::read_to_string(
+                instance
+                    .onion_directory(&site_id)
+                    .join("authorized_clients/phone.auth")
+            )
+            .unwrap(),
+            keys.server_authorization()
+        );
+        rotation.rollback().unwrap();
+        assert_eq!(
+            instance.onion_hostname(&site_id).unwrap(),
+            original.hostname()
+        );
+
+        let committed = OnionIdentity::generate().unwrap();
+        instance
+            .begin_identity_rotation(&site_id, &committed)
+            .unwrap()
+            .commit()
+            .unwrap();
+        assert_eq!(
+            instance.onion_hostname(&site_id).unwrap(),
+            committed.hostname()
+        );
+    }
+
+    #[test]
+    fn prepare_recovers_an_interrupted_identity_rotation() {
+        let temporary = tempfile::tempdir().unwrap();
+        let instance = instance(&temporary);
+        let site_id = SiteId::new("alpha").unwrap();
+        let original = OnionIdentity::generate().unwrap();
+        instance.install_identity(&site_id, &original).unwrap();
+        let rotation = instance
+            .begin_identity_rotation(&site_id, &OnionIdentity::generate().unwrap())
+            .unwrap();
+        std::mem::forget(rotation);
+
+        instance.recover_identity_rotation(&site_id).unwrap();
+        assert_eq!(
+            instance.onion_hostname(&site_id).unwrap(),
+            original.hostname()
+        );
+        assert!(
+            !instance
+                .site_state_directory(&site_id)
+                .join("onion.rotation-old")
+                .exists()
+        );
     }
 
     #[test]

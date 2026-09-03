@@ -427,11 +427,16 @@ async fn rotate_site(
     Path(site_id): Path<String>,
     headers: HeaderMap,
 ) -> ApiResult<Json<AdminResponse>> {
-    authorized_command(
+    authorize_mutation(&state, &headers).await?;
+    let candidate = request_daemon(&state, AdminCommand::GenerateSiteCandidate).await?;
+    let AdminResponse::SiteCandidate { candidate_id, .. } = candidate else {
+        return Err(ApiError::from_daemon_response(candidate));
+    };
+    daemon_json(
         &state,
-        &headers,
         AdminCommand::RotateSite {
             site_id: parse_site_id(site_id)?,
+            candidate_id,
         },
     )
     .await

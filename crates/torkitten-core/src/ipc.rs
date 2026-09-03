@@ -62,6 +62,7 @@ pub enum AdminCommand {
     },
     RotateSite {
         site_id: SiteId,
+        candidate_id: SensitiveString,
     },
     RemoveSite {
         site_id: SiteId,

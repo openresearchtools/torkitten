@@ -35,16 +35,18 @@ fn main() -> ExitCode {
 
 fn run() -> Result<(), String> {
     let (options, command) = parse_arguments(env::args_os().skip(1).collect())?;
-    if let ParsedCommand::GenerateSite {
-        site_id,
-        display_name,
-    } = command
-    {
-        return generate_site(&options, site_id, display_name);
+    match command {
+        ParsedCommand::GenerateSite {
+            site_id,
+            display_name,
+        } => generate_site(&options, site_id, display_name),
+        ParsedCommand::RotateSite { site_id } => rotate_site(&options, site_id),
+        command => {
+            let command = command.into_admin_command()?;
+            let response = request(&options.socket, &command).map_err(|error| error.to_string())?;
+            print_response(response, options.json)
+        }
     }
-    let command = command.into_admin_command()?;
-    let response = request(&options.socket, &command).map_err(|error| error.to_string())?;
-    print_response(response, options.json)
 }
 
 #[derive(Debug)]
@@ -60,6 +62,9 @@ enum ParsedCommand {
     GenerateSite {
         site_id: SiteId,
         display_name: String,
+    },
+    RotateSite {
+        site_id: SiteId,
     },
 }
 
@@ -82,7 +87,9 @@ impl ParsedCommand {
                     password: SensitiveString::new(password),
                 })
             }
-            Self::GenerateSite { .. } => Err("internal command dispatch error".to_owned()),
+            Self::GenerateSite { .. } | Self::RotateSite { .. } => {
+                Err("internal command dispatch error".to_owned())
+            }
         }
     }
 }
@@ -132,9 +139,9 @@ fn parse_arguments(arguments: Vec<OsString>) -> Result<(Options, ParsedCommand),
         "restart-site" => ParsedCommand::Direct(AdminCommand::RestartSite {
             site_id: site_id(&mut arguments)?,
         }),
-        "rotate-site" => ParsedCommand::Direct(AdminCommand::RotateSite {
+        "rotate-site" => ParsedCommand::RotateSite {
             site_id: site_id(&mut arguments)?,
-        }),
+        },
         "add-tcp-mapping" => ParsedCommand::Direct(parse_tcp_mapping(&mut arguments)?),
         "add-unix-mapping" => ParsedCommand::Direct(parse_unix_mapping(&mut arguments)?),
         "remove-mapping" => ParsedCommand::Direct(AdminCommand::RemoveMapping {
@@ -257,34 +264,7 @@ fn parse_component(
 }
 
 fn generate_site(options: &Options, site_id: SiteId, display_name: String) -> Result<(), String> {
-    let deadline = Instant::now() + GENERATOR_DURATION;
-    let mut selected = None;
-    let mut count = 0_u64;
-    while Instant::now() < deadline {
-        let response = request(&options.socket, &AdminCommand::GenerateSiteCandidate)
-            .map_err(|error| error.to_string())?;
-        let AdminResponse::SiteCandidate {
-            candidate_id,
-            onion_hostname,
-            ..
-        } = response
-        else {
-            return print_response(response, options.json);
-        };
-        count += 1;
-        if !options.json {
-            print!("\rGenerating candidate {count}: {onion_hostname}");
-            io::stdout().flush().map_err(|error| error.to_string())?;
-        }
-        selected = Some((candidate_id, onion_hostname));
-        thread::sleep(GENERATOR_INTERVAL);
-    }
-    let Some((candidate_id, onion_hostname)) = selected else {
-        return Err("site generator produced no candidate".to_owned());
-    };
-    if !options.json {
-        println!();
-    }
+    let (candidate_id, onion_hostname) = select_candidate(options)?;
     let response = request(
         &options.socket,
         &AdminCommand::CreateGeneratedSite {
@@ -305,6 +285,60 @@ fn generate_site(options: &Options, site_id: SiteId, display_name: String) -> Re
         }
         response => print_response(response, options.json),
     }
+}
+
+fn rotate_site(options: &Options, site_id: SiteId) -> Result<(), String> {
+    let (candidate_id, onion_hostname) = select_candidate(options)?;
+    let response = request(
+        &options.socket,
+        &AdminCommand::RotateSite {
+            site_id,
+            candidate_id,
+        },
+    )
+    .map_err(|error| error.to_string())?;
+    match response {
+        AdminResponse::Ok if !options.json => {
+            println!("Rotated site to {onion_hostname}");
+            Ok(())
+        }
+        response => print_response(response, options.json),
+    }
+}
+
+fn select_candidate(options: &Options) -> Result<(SensitiveString, String), String> {
+    let deadline = Instant::now() + GENERATOR_DURATION;
+    let mut selected = None;
+    let mut count = 0_u64;
+    while Instant::now() < deadline {
+        let response = request(&options.socket, &AdminCommand::GenerateSiteCandidate)
+            .map_err(|error| error.to_string())?;
+        let AdminResponse::SiteCandidate {
+            candidate_id,
+            onion_hostname,
+            ..
+        } = response
+        else {
+            return match print_response(response, options.json) {
+                Ok(()) => Err("unexpected daemon response while generating identity".to_owned()),
+                Err(error) => Err(error),
+            };
+        };
+        count += 1;
+        if !options.json {
+            print!("\rGenerating candidate {count}: {onion_hostname}");
+            io::stdout().flush().map_err(|error| error.to_string())?;
+        }
+        selected = Some((candidate_id, onion_hostname));
+        thread::sleep(GENERATOR_INTERVAL);
+    }
+    let Some(selected) = selected else {
+        return Err("site generator produced no candidate".to_owned());
+    };
+    if !options.json {
+        println!();
+    }
+    Ok(selected)
 }
 
 fn request(socket: &PathBuf, command: &AdminCommand) -> io::Result<AdminResponse> {

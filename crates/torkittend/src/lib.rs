@@ -235,6 +235,9 @@ impl<S: ServiceControl> Daemon<S> {
             paths.state_directory.join("tor"),
             paths.runtime_directory.join("tor"),
         ));
+        for site in store.gateway_config()?.sites {
+            tor.recover_identity_rotation(&site.id)?;
+        }
         let caddy = CaddyInstance::new(CaddyPaths::new(
             &paths.caddy_binary,
             paths.state_directory.join("caddy"),
@@ -400,13 +403,7 @@ impl<S: ServiceControl> Daemon<S> {
                 Ok(AdminResponse::Ok)
             }
             AdminCommand::CreateGeneratedSite { site, candidate_id } => {
-                let candidate = self
-                    .candidates
-                    .remove(&token_digest(candidate_id.expose()))
-                    .ok_or(DaemonError::CandidateNotFound)?;
-                if candidate.expires_unix <= now_unix {
-                    return Err(DaemonError::CandidateExpired);
-                }
+                let candidate = self.take_candidate(candidate_id.expose(), now_unix)?;
                 self.create_generated_site(site, &candidate.identity, now_unix)
             }
             AdminCommand::RenameSite {
@@ -416,6 +413,13 @@ impl<S: ServiceControl> Daemon<S> {
                 let mut site = self.required_site(&site_id)?;
                 site.display_name = display_name;
                 self.put_existing_site(&site, now_unix)
+            }
+            AdminCommand::RotateSite {
+                site_id,
+                candidate_id,
+            } => {
+                let candidate = self.take_candidate(candidate_id.expose(), now_unix)?;
+                self.rotate_generated_site(&site_id, &candidate.identity, now_unix)
             }
             AdminCommand::RemoveSite { site_id } => {
                 let old = self.required_site(&site_id)?;
@@ -440,6 +444,20 @@ impl<S: ServiceControl> Daemon<S> {
                 let mut site = self.required_site(&site_id)?;
                 site.enabled = false;
                 self.put_existing_site(&site, now_unix)
+            }
+            AdminCommand::RestartSite { site_id } => {
+                let site = self.required_site(&site_id)?;
+                if !site.enabled {
+                    return Err(DaemonError::SiteDisabled(site_id));
+                }
+                if self.store.publication_settings()?.emergency_disabled {
+                    return Err(DaemonError::EmergencyLatchSet);
+                }
+                let config = self.store.gateway_config()?;
+                self.validate_runtime(&config, now_unix)?;
+                self.install_runtime(&config, now_unix)?;
+                self.maintenance_enabled = true;
+                Ok(AdminResponse::Ok)
             }
             AdminCommand::PutMapping { site_id, mapping } => {
                 let mut site = self.required_site(&site_id)?;
@@ -574,10 +592,9 @@ impl<S: ServiceControl> Daemon<S> {
                 }
                 Ok(AdminResponse::Ok)
             }
-            AdminCommand::RotateSite { .. }
-            | AdminCommand::RestartSite { .. }
-            | AdminCommand::EnrollClient { .. }
-            | AdminCommand::RevokeClient { .. } => Err(DaemonError::UnsupportedCommand),
+            AdminCommand::EnrollClient { .. } | AdminCommand::RevokeClient { .. } => {
+                Err(DaemonError::UnsupportedCommand)
+            }
         }
     }
 
@@ -769,6 +786,78 @@ impl<S: ServiceControl> Daemon<S> {
                 });
             }
             return Err(error);
+        }
+        self.maintenance_enabled = true;
+        Ok(AdminResponse::Ok)
+    }
+
+    fn take_candidate(
+        &mut self,
+        candidate_id: &str,
+        now_unix: i64,
+    ) -> Result<GeneratedCandidate, DaemonError> {
+        let candidate = self
+            .candidates
+            .remove(&token_digest(candidate_id))
+            .ok_or(DaemonError::CandidateNotFound)?;
+        if candidate.expires_unix <= now_unix {
+            Err(DaemonError::CandidateExpired)
+        } else {
+            Ok(candidate)
+        }
+    }
+
+    fn rotate_generated_site(
+        &mut self,
+        site_id: &SiteId,
+        identity: &OnionIdentity,
+        now_unix: i64,
+    ) -> Result<AdminResponse, DaemonError> {
+        let site = self.required_site(site_id)?;
+        if !site.enabled {
+            return Err(DaemonError::SiteDisabled(site_id.clone()));
+        }
+        if self.store.publication_settings()?.emergency_disabled {
+            return Err(DaemonError::EmergencyLatchSet);
+        }
+        let config = self.store.gateway_config()?;
+        self.validate_runtime(&config, now_unix)?;
+        let bootstrap = self.bootstrap_windows.remove(site_id);
+        let rotation = self.tor.begin_identity_rotation(site_id, identity)?;
+        self.remove_runtime_tls(site_id)?;
+        if let Err(error) = self
+            .validate_runtime(&config, now_unix)
+            .and_then(|()| self.install_runtime(&config, now_unix))
+        {
+            let operation = error.to_string();
+            let rollback = (|| -> Result<(), DaemonError> {
+                rotation.rollback()?;
+                if let Some(bootstrap) = bootstrap.clone() {
+                    self.bootstrap_windows.insert(site_id.clone(), bootstrap);
+                }
+                self.remove_runtime_tls(site_id)?;
+                self.restore_runtime(&config, now_unix)
+            })();
+            if let Err(rollback) = rollback {
+                return Err(DaemonError::Rollback {
+                    operation,
+                    rollback: rollback.to_string(),
+                });
+            }
+            return Err(error);
+        }
+        if let Err(error) = rotation.commit() {
+            let operation = error.to_string();
+            if let Some(bootstrap) = bootstrap {
+                self.bootstrap_windows.insert(site_id.clone(), bootstrap);
+            }
+            self.remove_runtime_tls(site_id)?;
+            self.restore_runtime(&config, now_unix)
+                .map_err(|rollback| DaemonError::Rollback {
+                    operation,
+                    rollback: rollback.to_string(),
+                })?;
+            return Err(error.into());
         }
         self.maintenance_enabled = true;
         Ok(AdminResponse::Ok)
@@ -1235,11 +1324,13 @@ pub enum DaemonError {
     SiteAlreadyExists(SiteId),
     #[error("site must be enabled before opening certificate bootstrap: {0}")]
     BootstrapSiteDisabled(SiteId),
+    #[error("site must be enabled before it can be restarted or rotated: {0}")]
+    SiteDisabled(SiteId),
     #[error("bootstrap duration must be 1-{MAX_BOOTSTRAP_SECONDS} seconds, got {0}")]
     InvalidBootstrapDuration(u32),
     #[error("publication is blocked by the persistent emergency latch")]
     EmergencyLatchSet,
-    #[error("this command requires the enrollment or identity-rotation implementation")]
+    #[error("this command requires the enrollment implementation")]
     UnsupportedCommand,
     #[error("generated onion candidate was not found")]
     CandidateNotFound,
@@ -1302,6 +1393,7 @@ impl DaemonError {
             Self::BootstrapSiteDisabled(_) | Self::InvalidBootstrapDuration(_) => {
                 "invalid_bootstrap"
             }
+            Self::SiteDisabled(_) => "invalid_site_state",
             Self::EmergencyLatchSet => "emergency_disabled",
             Self::UnsupportedCommand => "unsupported_command",
             Self::CandidateNotFound | Self::CandidateExpired => "invalid_candidate",
@@ -1594,6 +1686,113 @@ mod tests {
             ),
             AdminResponse::Error { code, .. } if code == "invalid_candidate"
         ));
+    }
+
+    #[test]
+    fn rotates_a_site_to_a_selected_identity_and_restarts_publication() {
+        let (_temporary, mut daemon, services) = daemon();
+        initialize(&mut daemon);
+        let AdminResponse::SiteCandidate {
+            candidate_id,
+            onion_hostname: original_hostname,
+            ..
+        } = daemon.handle(AdminCommand::GenerateSiteCandidate, NOW)
+        else {
+            panic!("expected original candidate");
+        };
+        assert!(matches!(
+            daemon.handle(
+                AdminCommand::CreateGeneratedSite {
+                    site: site(),
+                    candidate_id,
+                },
+                NOW + 1,
+            ),
+            AdminResponse::Ok
+        ));
+        let AdminResponse::SiteCandidate {
+            candidate_id,
+            onion_hostname: replacement_hostname,
+            ..
+        } = daemon.handle(AdminCommand::GenerateSiteCandidate, NOW + 2)
+        else {
+            panic!("expected replacement candidate");
+        };
+        assert_ne!(original_hostname, replacement_hostname);
+        let response = daemon.handle(
+            AdminCommand::RotateSite {
+                site_id: SiteId::new("alpha").unwrap(),
+                candidate_id,
+            },
+            NOW + 3,
+        );
+        assert!(matches!(response, AdminResponse::Ok), "{response:?}");
+        let AdminResponse::Status { status } = daemon.handle(AdminCommand::Status, NOW + 3) else {
+            panic!("expected status");
+        };
+        assert_eq!(
+            status.sites[0].onion_hostname.as_deref(),
+            Some(replacement_hostname.as_str())
+        );
+        let before = services.actions.lock().unwrap().len();
+        assert!(matches!(
+            daemon.handle(
+                AdminCommand::RestartSite {
+                    site_id: SiteId::new("alpha").unwrap(),
+                },
+                NOW + 4,
+            ),
+            AdminResponse::Ok
+        ));
+        assert!(services.actions.lock().unwrap().len() > before);
+    }
+
+    #[test]
+    fn failed_rotation_restores_the_previous_identity() {
+        let (_temporary, mut daemon, services) = daemon();
+        initialize(&mut daemon);
+        let AdminResponse::SiteCandidate {
+            candidate_id,
+            onion_hostname: original_hostname,
+            ..
+        } = daemon.handle(AdminCommand::GenerateSiteCandidate, NOW)
+        else {
+            panic!("expected original candidate");
+        };
+        assert!(matches!(
+            daemon.handle(
+                AdminCommand::CreateGeneratedSite {
+                    site: site(),
+                    candidate_id,
+                },
+                NOW + 1,
+            ),
+            AdminResponse::Ok
+        ));
+        let AdminResponse::SiteCandidate { candidate_id, .. } =
+            daemon.handle(AdminCommand::GenerateSiteCandidate, NOW + 2)
+        else {
+            panic!("expected replacement candidate");
+        };
+        *services.fail_next.lock().unwrap() = Some(ManagedComponent::Tor);
+        let response = daemon.handle(
+            AdminCommand::RotateSite {
+                site_id: SiteId::new("alpha").unwrap(),
+                candidate_id,
+            },
+            NOW + 3,
+        );
+        assert!(
+            matches!(response, AdminResponse::Error { ref code, .. } if code == "service_failed"),
+            "{response:?}"
+        );
+        let AdminResponse::Status { status } = daemon.handle(AdminCommand::Status, NOW + 3) else {
+            panic!("expected status");
+        };
+        assert_eq!(
+            status.sites[0].onion_hostname.as_deref(),
+            Some(original_hostname.as_str())
+        );
     }
 
     #[test]
