@@ -14,7 +14,7 @@ use thiserror::Error;
 use torkitten_core::{GatewayConfig, SiteId};
 
 use crate::{
-    ClientKeyPair, ClientName,
+    ClientKeyPair, ClientName, OnionIdentity,
     client_auth::{ClientAuthError, validate_onion_hostname},
 };
 
@@ -240,6 +240,54 @@ impl TorInstance {
             keys.server_authorization().as_bytes(),
             0o600,
         )
+    }
+
+    /// Installs a selected generated identity into an otherwise new site's
+    /// persistent hidden-service directory.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when identity material already exists or private files
+    /// cannot be installed atomically.
+    pub fn install_identity(
+        &self,
+        site_id: &SiteId,
+        identity: &OnionIdentity,
+    ) -> Result<(), TorError> {
+        let directory = self.onion_directory(site_id);
+        ensure_private_directory(&directory)?;
+        ensure_private_directory(&directory.join("authorized_clients"))?;
+        let secret = directory.join("hs_ed25519_secret_key");
+        let public = directory.join("hs_ed25519_public_key");
+        let hostname = directory.join("hostname");
+        if [&secret, &public, &hostname]
+            .iter()
+            .any(|path| path.exists())
+        {
+            return Err(TorError::IdentityAlreadyExists(site_id.clone()));
+        }
+        atomic_write(&secret, identity.secret_key_file(), 0o600)?;
+        atomic_write(&public, identity.public_key_file(), 0o600)?;
+        atomic_write(
+            &hostname,
+            format!("{}\n", identity.hostname()).as_bytes(),
+            0o600,
+        )
+    }
+
+    /// Removes one site's exact persistent onion identity directory after the
+    /// site has been unpublished.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the exact per-site directory cannot be removed.
+    pub fn remove_site_state(&self, site_id: &SiteId) -> Result<bool, TorError> {
+        let path = self.site_state_directory(site_id);
+        match fs::remove_dir_all(path) {
+            Ok(()) => Ok(true),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(error.into()),
+        }
     }
 
     /// Removes one site's authorized client, returning whether its file existed.
@@ -549,6 +597,8 @@ pub enum TorError {
     LegacyIdentityConflict(PathBuf),
     #[error("certificate bootstrap site is missing or disabled: {0}")]
     BootstrapSiteUnavailable(SiteId),
+    #[error("onion identity already exists for site {0}")]
+    IdentityAlreadyExists(SiteId),
     #[error("could not allocate a temporary filename")]
     TemporaryNameExhausted,
     #[error("operating-system randomness failed: {0}")]
@@ -565,7 +615,11 @@ pub enum TorError {
 
 #[cfg(test)]
 mod tests {
-    use std::net::{IpAddr, Ipv4Addr};
+    use std::{
+        net::{IpAddr, Ipv4Addr},
+        thread,
+        time::Duration,
+    };
 
     use torkitten_core::{Mapping, MappingId, MappingTarget, Site, Transport};
 
@@ -717,6 +771,32 @@ mod tests {
     }
 
     #[test]
+    fn installs_a_selected_generated_identity_once() {
+        let temporary = tempfile::tempdir().unwrap();
+        let instance = instance(&temporary);
+        let site_id = SiteId::new("alpha").unwrap();
+        let identity = OnionIdentity::generate().unwrap();
+        instance.install_identity(&site_id, &identity).unwrap();
+        assert_eq!(
+            instance.onion_hostname(&site_id).unwrap(),
+            identity.hostname()
+        );
+        assert_eq!(
+            fs::read(
+                instance
+                    .onion_directory(&site_id)
+                    .join("hs_ed25519_secret_key")
+            )
+            .unwrap(),
+            identity.secret_key_file()
+        );
+        assert!(matches!(
+            instance.install_identity(&site_id, &OnionIdentity::generate().unwrap()),
+            Err(TorError::IdentityAlreadyExists(id)) if id == site_id
+        ));
+    }
+
+    #[test]
     fn migrates_the_single_site_identity_without_changing_it() {
         let temporary = tempfile::tempdir().unwrap();
         let instance = instance(&temporary);
@@ -775,5 +855,45 @@ mod tests {
         instance
             .prepare_validated(&config(), &HashSet::new())
             .unwrap();
+    }
+
+    #[test]
+    #[ignore = "requires the bundled Tor binary and its Ubuntu 24.04 runtime libraries"]
+    fn bundled_tor_loads_a_selected_generated_identity() {
+        let binary = std::env::var_os("TORKITTEN_TOR_BINARY")
+            .expect("TORKITTEN_TOR_BINARY must identify the bundled Tor binary");
+        let temporary = tempfile::tempdir().unwrap();
+        let instance = TorInstance::new(TorPaths::new(
+            binary,
+            temporary.path().join("state/tor"),
+            temporary.path().join("run/tor"),
+        ));
+        let site = site("alpha", true, Vec::new());
+        let identity = OnionIdentity::generate().unwrap();
+        instance.install_identity(&site.id, &identity).unwrap();
+        instance
+            .prepare_validated(
+                &GatewayConfig {
+                    sites: vec![site.clone()],
+                    ..GatewayConfig::default()
+                },
+                &HashSet::new(),
+            )
+            .unwrap();
+
+        let mut command = instance.command();
+        command.args(["--DisableNetwork", "1"]);
+        let mut child = command.spawn().unwrap();
+        thread::sleep(Duration::from_millis(500));
+        assert!(
+            child.try_wait().unwrap().is_none(),
+            "Tor rejected the installed selected identity"
+        );
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert_eq!(
+            instance.onion_hostname(&site.id).unwrap(),
+            identity.hostname()
+        );
     }
 }

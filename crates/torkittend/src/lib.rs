@@ -16,6 +16,7 @@ use std::{
 };
 
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
@@ -27,7 +28,7 @@ use torkitten_core::{
     GatewayMode, GatewayStatus, ManagedComponent, Mapping, MappingTarget, Site, SiteId, SiteStatus,
 };
 use torkitten_proxy::{CaddyError, CaddyInstance, CaddyPaths, ProxyConfig, ProxySite};
-use torkitten_tor::{TorError, TorInstance, TorPaths};
+use torkitten_tor::{OnionIdentity, TorError, TorInstance, TorPaths};
 use torkitten_vault::{PkiError, Store, StoreError, TlsAuthority};
 use uuid::Uuid;
 
@@ -35,6 +36,7 @@ const MAX_BOOTSTRAP_SECONDS: u32 = 3_600;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 const MAXIMUM_IPC_REQUEST_BYTES: usize = 1024 * 1024;
 const IPC_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+const CANDIDATE_LIFETIME_SECONDS: i64 = 300;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DaemonPaths {
@@ -199,11 +201,17 @@ pub struct Daemon<S> {
     bootstrap_windows: HashMap<SiteId, BootstrapWindow>,
     active_proxy_config: Option<ProxyConfig>,
     maintenance_enabled: bool,
+    candidates: HashMap<[u8; 32], GeneratedCandidate>,
 }
 
 #[derive(Clone, Debug)]
 struct BootstrapWindow {
     path_token: String,
+    expires_unix: i64,
+}
+
+struct GeneratedCandidate {
+    identity: OnionIdentity,
     expires_unix: i64,
 }
 
@@ -240,6 +248,7 @@ impl<S: ServiceControl> Daemon<S> {
             bootstrap_windows: HashMap::new(),
             active_proxy_config: None,
             maintenance_enabled: false,
+            candidates: HashMap::new(),
         })
     }
 
@@ -288,6 +297,8 @@ impl<S: ServiceControl> Daemon<S> {
         let before = self.bootstrap_windows.len();
         self.bootstrap_windows
             .retain(|_, window| window.expires_unix > now_unix);
+        self.candidates
+            .retain(|_, candidate| candidate.expires_unix > now_unix);
         let config = self.store.gateway_config()?;
         if self.bootstrap_windows.len() == before {
             self.refresh_proxy(&config, now_unix)
@@ -314,6 +325,29 @@ impl<S: ServiceControl> Daemon<S> {
             AdminCommand::Status => Ok(AdminResponse::Status {
                 status: self.status(now_unix)?,
             }),
+            AdminCommand::GenerateSiteCandidate => {
+                self.candidates
+                    .retain(|_, candidate| candidate.expires_unix > now_unix);
+                let identity = OnionIdentity::generate()?;
+                let candidate_id = random_path_token()?;
+                let digest = token_digest(&candidate_id);
+                let expires_unix = now_unix
+                    .checked_add(CANDIDATE_LIFETIME_SECONDS)
+                    .ok_or(DaemonError::InvalidTimestamp(now_unix))?;
+                let onion_hostname = identity.hostname().to_owned();
+                self.candidates.insert(
+                    digest,
+                    GeneratedCandidate {
+                        identity,
+                        expires_unix,
+                    },
+                );
+                Ok(AdminResponse::SiteCandidate {
+                    candidate_id: torkitten_core::SensitiveString::new(candidate_id),
+                    onion_hostname,
+                    expires_unix,
+                })
+            }
             AdminCommand::Initialize { password } => {
                 if self.initialized()? {
                     return Err(DaemonError::AlreadyInitialized);
@@ -345,6 +379,16 @@ impl<S: ServiceControl> Daemon<S> {
                 }
                 Ok(AdminResponse::Ok)
             }
+            AdminCommand::CreateGeneratedSite { site, candidate_id } => {
+                let candidate = self
+                    .candidates
+                    .remove(&token_digest(candidate_id.expose()))
+                    .ok_or(DaemonError::CandidateNotFound)?;
+                if candidate.expires_unix <= now_unix {
+                    return Err(DaemonError::CandidateExpired);
+                }
+                self.create_generated_site(site, &candidate.identity, now_unix)
+            }
             AdminCommand::RenameSite {
                 site_id,
                 display_name,
@@ -363,6 +407,7 @@ impl<S: ServiceControl> Daemon<S> {
                     return Err(error.into());
                 }
                 self.remove_runtime_tls(&site_id)?;
+                self.tor.remove_site_state(&site_id)?;
                 self.bootstrap_windows.remove(&site_id);
                 Ok(AdminResponse::Ok)
             }
@@ -593,6 +638,51 @@ impl<S: ServiceControl> Daemon<S> {
             self.restore_runtime(&old_config, now_unix)?;
             return Err(error.into());
         }
+        Ok(AdminResponse::Ok)
+    }
+
+    fn create_generated_site(
+        &mut self,
+        site: Site,
+        identity: &OnionIdentity,
+        now_unix: i64,
+    ) -> Result<AdminResponse, DaemonError> {
+        if self.store.site(&site.id)?.is_some() {
+            return Err(DaemonError::SiteAlreadyExists(site.id));
+        }
+        let stored = self.store.gateway_config()?;
+        let mut candidate = stored.clone();
+        candidate.sites.push(site.clone());
+        candidate.validate()?;
+        self.validate_runtime(&candidate, now_unix)?;
+
+        if let Err(error) = self.tor.install_identity(&site.id, identity) {
+            let _ = self.tor.remove_site_state(&site.id);
+            return Err(error.into());
+        }
+        if let Err(error) = self.store.put_site(&site) {
+            let _ = self.tor.remove_site_state(&site.id);
+            return Err(error.into());
+        }
+        if let Err(error) = self
+            .validate_runtime(&candidate, now_unix)
+            .and_then(|()| self.install_runtime(&candidate, now_unix))
+        {
+            let operation = error.to_string();
+            let cleanup = (|| -> Result<(), DaemonError> {
+                self.store.remove_site(&site.id)?;
+                self.tor.remove_site_state(&site.id)?;
+                self.restore_runtime(&stored, now_unix)
+            })();
+            if let Err(cleanup) = cleanup {
+                return Err(DaemonError::Rollback {
+                    operation,
+                    rollback: cleanup.to_string(),
+                });
+            }
+            return Err(error);
+        }
+        self.maintenance_enabled = true;
         Ok(AdminResponse::Ok)
     }
 
@@ -959,6 +1049,10 @@ fn random_path_token() -> Result<String, DaemonError> {
     Ok(URL_SAFE_NO_PAD.encode(bytes))
 }
 
+fn token_digest(token: &str) -> [u8; 32] {
+    Sha256::digest(token.as_bytes()).into()
+}
+
 fn ensure_directory(path: &Path, mode: u32) -> Result<(), DaemonError> {
     fs::create_dir_all(path)?;
     let metadata = fs::symlink_metadata(path)?;
@@ -1055,6 +1149,10 @@ pub enum DaemonError {
     EmergencyLatchSet,
     #[error("this command requires the enrollment or identity-rotation implementation")]
     UnsupportedCommand,
+    #[error("generated onion candidate was not found")]
+    CandidateNotFound,
+    #[error("generated onion candidate expired")]
+    CandidateExpired,
     #[error("another torkittend instance is listening at {path}", path = .0.display())]
     AlreadyRunning(PathBuf),
     #[error("administration socket path is not a Unix socket: {path}", path = .0.display())]
@@ -1088,6 +1186,8 @@ pub enum DaemonError {
     #[error(transparent)]
     Pki(#[from] PkiError),
     #[error(transparent)]
+    Identity(#[from] torkitten_tor::OnionIdentityError),
+    #[error(transparent)]
     Tor(#[from] TorError),
     #[error(transparent)]
     Caddy(#[from] CaddyError),
@@ -1108,9 +1208,11 @@ impl DaemonError {
             }
             Self::EmergencyLatchSet => "emergency_disabled",
             Self::UnsupportedCommand => "unsupported_command",
+            Self::CandidateNotFound | Self::CandidateExpired => "invalid_candidate",
             Self::Validation(_) => "validation_failed",
             Self::Store(_) => "state_failed",
             Self::Pki(_) => "certificate_failed",
+            Self::Identity(_) => "identity_failed",
             Self::Tor(_) => "tor_failed",
             Self::Caddy(_) => "caddy_failed",
             Self::Service(_) => "service_failed",
@@ -1290,6 +1392,51 @@ mod tests {
     }
 
     #[test]
+    fn generated_candidate_is_one_time_and_becomes_the_persistent_identity() {
+        let (_temporary, mut daemon, _services) = daemon();
+        initialize(&mut daemon);
+        let AdminResponse::SiteCandidate {
+            candidate_id,
+            onion_hostname,
+            ..
+        } = daemon.handle(AdminCommand::GenerateSiteCandidate, NOW)
+        else {
+            panic!("expected generated candidate");
+        };
+        let selected_token = candidate_id.expose().to_owned();
+        assert!(matches!(
+            daemon.handle(
+                AdminCommand::CreateGeneratedSite {
+                    site: site(),
+                    candidate_id,
+                },
+                NOW + 1,
+            ),
+            AdminResponse::Ok
+        ));
+        let AdminResponse::Status { status } = daemon.handle(AdminCommand::Status, NOW + 1) else {
+            panic!("expected status");
+        };
+        assert_eq!(
+            status.sites[0].onion_hostname.as_deref(),
+            Some(onion_hostname.as_str())
+        );
+        assert!(matches!(
+            daemon.handle(
+                AdminCommand::CreateGeneratedSite {
+                    site: Site {
+                        id: SiteId::new("beta").unwrap(),
+                        ..site()
+                    },
+                    candidate_id: SensitiveString::new(selected_token),
+                },
+                NOW + 2,
+            ),
+            AdminResponse::Error { code, .. } if code == "invalid_candidate"
+        ));
+    }
+
+    #[test]
     fn service_failure_restores_runtime_and_does_not_commit_site() {
         let (_temporary, mut daemon, services) = daemon();
         initialize(&mut daemon);
@@ -1410,8 +1557,19 @@ mod tests {
         )
         .unwrap();
         initialize(&mut daemon);
+        let AdminResponse::SiteCandidate { candidate_id, .. } =
+            daemon.handle(AdminCommand::GenerateSiteCandidate, NOW)
+        else {
+            panic!("expected candidate");
+        };
         assert!(matches!(
-            daemon.handle(AdminCommand::CreateSite { site: site() }, NOW),
+            daemon.handle(
+                AdminCommand::CreateGeneratedSite {
+                    site: site(),
+                    candidate_id,
+                },
+                NOW,
+            ),
             AdminResponse::Ok
         ));
     }

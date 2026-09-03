@@ -31,8 +31,13 @@ impl fmt::Debug for SensitiveString {
 #[serde(tag = "command", rename_all = "snake_case")]
 pub enum AdminCommand {
     Status,
+    GenerateSiteCandidate,
     Initialize {
         password: SensitiveString,
+    },
+    CreateGeneratedSite {
+        site: Site,
+        candidate_id: SensitiveString,
     },
     CreateSite {
         site: Site,
@@ -153,6 +158,11 @@ pub struct GatewayStatus {
 #[serde(tag = "result", rename_all = "snake_case")]
 pub enum AdminResponse {
     Ok,
+    SiteCandidate {
+        candidate_id: SensitiveString,
+        onion_hostname: String,
+        expires_unix: i64,
+    },
     Status {
         status: GatewayStatus,
     },
