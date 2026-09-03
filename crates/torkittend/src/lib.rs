@@ -489,6 +489,9 @@ impl<S: ServiceControl> Daemon<S> {
                 self.store.revoke_session(&session)?;
                 Ok(RemoteResponse::LoggedOut)
             }
+            RemoteCommand::LogoutOtherGuestSessions { site_id, session } => {
+                self.logout_other_remote_sessions(&site_id, session.expose(), now_unix)
+            }
             RemoteCommand::BootstrapCertificate { site_id, path } => {
                 self.required_remote_site(&site_id)?;
                 let window = self
@@ -610,6 +613,7 @@ impl<S: ServiceControl> Daemon<S> {
                 guest_id: guest.as_ref().map(|guest| guest.id.clone()),
                 guest_display_name: guest.map(|guest| guest.display_name),
                 mappings,
+                remote_access_policy: self.store.remote_access_policy()?,
             },
         })
     }
@@ -621,6 +625,7 @@ impl<S: ServiceControl> Daemon<S> {
         now_unix: i64,
     ) -> Result<RemoteResponse, DaemonError> {
         self.required_remote_site(site_id)?;
+        let policy = self.store.remote_access_policy()?;
         let token = EnrollmentToken::parse(encoded_token.to_owned())
             .map_err(|_| DaemonError::EnrollmentNotFound)?;
         let enrollment = self
@@ -640,7 +645,9 @@ impl<S: ServiceControl> Daemon<S> {
             site_id: site_id.clone(),
             guest_id: guest.id.clone(),
         };
-        let (totp_secret, totp_uri) = if self.store.auth_account_for_owner(&owner)?.is_some() {
+        let (totp_secret, totp_uri) = if !policy.password_totp_enabled
+            || self.store.auth_account_for_owner(&owner)?.is_some()
+        {
             (None, None)
         } else {
             let factor = self
@@ -665,6 +672,7 @@ impl<S: ServiceControl> Daemon<S> {
             expires_unix: enrollment.expires_unix,
             totp_secret,
             totp_uri,
+            remote_access_policy: policy,
         })
     }
 
@@ -677,6 +685,10 @@ impl<S: ServiceControl> Daemon<S> {
         now_unix: i64,
     ) -> Result<RemoteResponse, DaemonError> {
         self.required_remote_site(site_id)?;
+        let policy = self.store.remote_access_policy()?;
+        if !policy.password_totp_enabled {
+            return Err(DaemonError::RemoteAuthenticationMethodDisabled);
+        }
         let token = EnrollmentToken::parse(encoded_token.to_owned())
             .map_err(|_| DaemonError::EnrollmentNotFound)?;
         let enrollment = self
@@ -717,7 +729,11 @@ impl<S: ServiceControl> Daemon<S> {
                 return Err(DaemonError::RemoteUnauthorized);
             }
             let password_hash = hash_password(password)?;
-            let recovery_codes = generate_recovery_codes(10)?;
+            let recovery_codes = if policy.recovery_codes_enabled {
+                generate_recovery_codes(10)?
+            } else {
+                Vec::new()
+            };
             let mut recovery_pepper = [0_u8; 32];
             getrandom::fill(&mut recovery_pepper).map_err(DaemonError::Random)?;
             let account_id = Uuid::new_v4();
@@ -729,16 +745,18 @@ impl<S: ServiceControl> Daemon<S> {
                 Some(&factor.totp_secret),
                 &recovery_pepper,
             )?;
-            let digests = recovery_codes
-                .iter()
-                .map(|code| code.digest(&recovery_pepper))
-                .collect::<Vec<_>>();
-            if let Err(error) = self
-                .store
-                .replace_recovery_codes(account_id, &digests, now_unix)
-            {
-                self.store.remove_auth_account(account_id)?;
-                return Err(error.into());
+            if !recovery_codes.is_empty() {
+                let digests = recovery_codes
+                    .iter()
+                    .map(|code| code.digest(&recovery_pepper))
+                    .collect::<Vec<_>>();
+                if let Err(error) = self
+                    .store
+                    .replace_recovery_codes(account_id, &digests, now_unix)
+                {
+                    self.store.remove_auth_account(account_id)?;
+                    return Err(error.into());
+                }
             }
             (account_id, recovery_codes, true)
         };
@@ -757,15 +775,7 @@ impl<S: ServiceControl> Daemon<S> {
                 return Err(error.into());
             }
         }
-        let (session, expires_unix) = self.create_remote_session(account_id, now_unix)?;
-        Ok(RemoteResponse::EnrollmentCompleted {
-            session: torkitten_core::SensitiveString::new(session.expose()),
-            expires_unix,
-            recovery_codes: recovery_codes
-                .iter()
-                .map(|code| torkitten_core::SensitiveString::new(code.expose()))
-                .collect(),
-        })
+        self.completed_enrollment_response(account_id, &recovery_codes, now_unix)
     }
 
     fn start_passkey_enrollment(
@@ -774,6 +784,9 @@ impl<S: ServiceControl> Daemon<S> {
         encoded_token: &str,
         now_unix: i64,
     ) -> Result<RemoteResponse, DaemonError> {
+        if !self.store.remote_access_policy()?.passkeys_enabled {
+            return Err(DaemonError::RemoteAuthenticationMethodDisabled);
+        }
         self.purge_pending_passkey_ceremonies(now_unix);
         if self.pending_passkey_enrollments.len() >= MAXIMUM_PENDING_PASSKEY_CEREMONIES {
             return Err(PasskeyError::TooManyCeremonies.into());
@@ -841,6 +854,9 @@ impl<S: ServiceControl> Daemon<S> {
         encoded_credential: &str,
         now_unix: i64,
     ) -> Result<RemoteResponse, DaemonError> {
+        if !self.store.remote_access_policy()?.passkeys_enabled {
+            return Err(DaemonError::RemoteAuthenticationMethodDisabled);
+        }
         let site = self.required_remote_site(site_id)?;
         let token = EnrollmentToken::parse(encoded_token.to_owned())
             .map_err(|_| DaemonError::EnrollmentNotFound)?;
@@ -936,12 +952,7 @@ impl<S: ServiceControl> Daemon<S> {
                 };
             }
         }
-        let (session, expires_unix) = self.create_remote_session(pending.account_id, now_unix)?;
-        Ok(RemoteResponse::EnrollmentCompleted {
-            session: torkitten_core::SensitiveString::new(session.expose()),
-            expires_unix,
-            recovery_codes: Vec::new(),
-        })
+        self.completed_enrollment_response(pending.account_id, &[], now_unix)
     }
 
     fn start_passkey_authentication(
@@ -950,6 +961,9 @@ impl<S: ServiceControl> Daemon<S> {
         guest_id: &GuestId,
         now_unix: i64,
     ) -> Result<RemoteResponse, DaemonError> {
+        if !self.store.remote_access_policy()?.passkeys_enabled {
+            return Err(DaemonError::RemoteAuthenticationMethodDisabled);
+        }
         self.purge_pending_passkey_ceremonies(now_unix);
         if self.pending_passkey_authentications.len() >= MAXIMUM_PENDING_PASSKEY_CEREMONIES {
             return Err(PasskeyError::TooManyCeremonies.into());
@@ -1010,6 +1024,9 @@ impl<S: ServiceControl> Daemon<S> {
         encoded_credential: &str,
         now_unix: i64,
     ) -> Result<RemoteResponse, DaemonError> {
+        if !self.store.remote_access_policy()?.passkeys_enabled {
+            return Err(DaemonError::RemoteAuthenticationMethodDisabled);
+        }
         let site = self.required_remote_site(site_id)?;
         let ceremony = SessionToken::parse(encoded_ceremony.to_owned())
             .map_err(|_| DaemonError::RemoteUnauthorized)?;
@@ -1046,10 +1063,12 @@ impl<S: ServiceControl> Daemon<S> {
             &authenticated.credential,
             now_unix,
         )?;
-        let (session, expires_unix) = self.create_remote_session(account.id, now_unix)?;
+        let (session, expires_unix, max_age_seconds) =
+            self.create_remote_session(account.id, now_unix)?;
         Ok(RemoteResponse::GuestAuthenticated {
             session: torkitten_core::SensitiveString::new(session.expose()),
             expires_unix,
+            max_age_seconds,
         })
     }
 
@@ -1137,6 +1156,10 @@ impl<S: ServiceControl> Daemon<S> {
         now_unix: i64,
     ) -> Result<RemoteResponse, DaemonError> {
         self.required_remote_site(site_id)?;
+        let policy = self.store.remote_access_policy()?;
+        if !policy.password_totp_enabled {
+            return Err(DaemonError::RemoteAuthenticationMethodDisabled);
+        }
         let guest = self.required_guest(site_id, guest_id)?;
         if !guest.enabled {
             return Err(DaemonError::RemoteUnauthorized);
@@ -1166,6 +1189,9 @@ impl<S: ServiceControl> Daemon<S> {
                 }
             }
             GuestSecondFactor::RecoveryCode(code) => {
+                if !policy.recovery_codes_enabled {
+                    return Err(DaemonError::RemoteAuthenticationMethodDisabled);
+                }
                 let code = RecoveryCode::parse(code.expose())
                     .map_err(|_| DaemonError::RemoteUnauthorized)?;
                 let pepper: &[u8; 32] = account
@@ -1182,10 +1208,12 @@ impl<S: ServiceControl> Daemon<S> {
                 }
             }
         }
-        let (session, expires_unix) = self.create_remote_session(account.id, now_unix)?;
+        let (session, expires_unix, max_age_seconds) =
+            self.create_remote_session(account.id, now_unix)?;
         Ok(RemoteResponse::GuestAuthenticated {
             session: torkitten_core::SensitiveString::new(session.expose()),
             expires_unix,
+            max_age_seconds,
         })
     }
 
@@ -1216,11 +1244,12 @@ impl<S: ServiceControl> Daemon<S> {
         &self,
         account_id: Uuid,
         now_unix: i64,
-    ) -> Result<(SessionToken, i64), DaemonError> {
+    ) -> Result<(SessionToken, i64, u64), DaemonError> {
         let token = SessionToken::generate()?;
         let csrf = CsrfToken::generate()?;
+        let lifetime_seconds = self.store.remote_access_policy()?.session_seconds();
         let expires_unix = now_unix
-            .checked_add(ADMIN_SESSION_SECONDS)
+            .checked_add(lifetime_seconds)
             .ok_or(DaemonError::InvalidTimestamp(now_unix))?;
         let fresh_until = now_unix
             .checked_add(FRESH_AUTHENTICATION_SECONDS)
@@ -1233,7 +1262,52 @@ impl<S: ServiceControl> Daemon<S> {
             expires_unix,
             fresh_until,
         )?;
-        Ok((token, expires_unix))
+        Ok((
+            token,
+            expires_unix,
+            u64::try_from(lifetime_seconds).map_err(|_| DaemonError::InvalidTimestamp(now_unix))?,
+        ))
+    }
+
+    fn completed_enrollment_response(
+        &self,
+        account_id: Uuid,
+        recovery_codes: &[RecoveryCode],
+        now_unix: i64,
+    ) -> Result<RemoteResponse, DaemonError> {
+        let (session, expires_unix, max_age_seconds) =
+            self.create_remote_session(account_id, now_unix)?;
+        Ok(RemoteResponse::EnrollmentCompleted {
+            session: torkitten_core::SensitiveString::new(session.expose()),
+            expires_unix,
+            max_age_seconds,
+            recovery_codes: recovery_codes
+                .iter()
+                .map(|code| torkitten_core::SensitiveString::new(code.expose()))
+                .collect(),
+        })
+    }
+
+    fn logout_other_remote_sessions(
+        &self,
+        site_id: &SiteId,
+        encoded_session: &str,
+        now_unix: i64,
+    ) -> Result<RemoteResponse, DaemonError> {
+        let guest = self.authorized_remote_guest(site_id, encoded_session, now_unix)?;
+        let session = SessionToken::parse(encoded_session.to_owned())
+            .map_err(|_| DaemonError::RemoteUnauthorized)?;
+        let account = self
+            .store
+            .auth_account_for_owner(&AccountOwner::Guest {
+                site_id: site_id.clone(),
+                guest_id: guest.id,
+            })?
+            .ok_or(DaemonError::RemoteUnauthorized)?;
+        let count = self
+            .store
+            .revoke_other_account_sessions(account.id, &session)?;
+        Ok(RemoteResponse::OtherSessionsRevoked { count })
     }
 
     fn required_remote_site(&self, site_id: &SiteId) -> Result<Site, DaemonError> {
@@ -1605,6 +1679,14 @@ impl<S: ServiceControl> Daemon<S> {
                 self.store.set_resume_after_boot(enabled)?;
                 Ok(AdminResponse::Ok)
             }
+            AdminCommand::SetRemoteAccessPolicy { policy } => {
+                self.store.set_remote_access_policy(policy)?;
+                if !policy.passkeys_enabled {
+                    self.pending_passkey_enrollments.clear();
+                    self.pending_passkey_authentications.clear();
+                }
+                Ok(AdminResponse::Ok)
+            }
             AdminCommand::EmergencyDisable => {
                 self.store.set_emergency_disabled(true)?;
                 self.bootstrap_windows.clear();
@@ -1689,6 +1771,7 @@ impl<S: ServiceControl> Daemon<S> {
             tor,
             caddy,
             resume_after_boot: settings.resume_after_boot,
+            remote_access_policy: self.store.remote_access_policy()?,
         })
     }
 
@@ -2677,6 +2760,8 @@ pub enum DaemonError {
     RemoteUnavailable,
     #[error("remote guest authorization failed")]
     RemoteUnauthorized,
+    #[error("this remote authentication method is disabled by local policy")]
+    RemoteAuthenticationMethodDisabled,
     #[error("certificate bootstrap resource was not found")]
     BootstrapNotFound,
     #[error("device enrollment was not found or has expired")]
@@ -2759,6 +2844,7 @@ impl DaemonError {
             | Self::ClientAuth(_) => "invalid_access",
             Self::EmergencyLatchSet => "emergency_disabled",
             Self::RemoteUnavailable => "remote_unavailable",
+            Self::RemoteAuthenticationMethodDisabled => "authentication_method_disabled",
             Self::BootstrapNotFound | Self::EnrollmentNotFound => "not_found",
             Self::CandidateNotFound | Self::CandidateExpired => "invalid_candidate",
             Self::Validation(_) => "validation_failed",
@@ -3334,41 +3420,95 @@ mod tests {
     }
 
     #[test]
+    fn remote_policy_is_reported_and_enforced_for_enrollment_and_sessions() {
+        let (_temporary, mut daemon, _services) = daemon();
+        initialize(&mut daemon);
+        create_generated_test_site(&mut daemon);
+        let policy = torkitten_core::RemoteAccessPolicy {
+            passkeys_enabled: false,
+            password_totp_enabled: true,
+            recovery_codes_enabled: false,
+            session_days: 7,
+        };
+        assert!(matches!(
+            daemon.handle(AdminCommand::SetRemoteAccessPolicy { policy }, NOW + 2),
+            AdminResponse::Ok
+        ));
+        let AdminResponse::Status { status } = daemon.handle(AdminCommand::Status, NOW + 2) else {
+            panic!("expected status");
+        };
+        assert_eq!(status.remote_access_policy, policy);
+        let (site_id, guest_id, enrollment_token) = enroll_remote_test_device(&mut daemon, NOW + 3);
+        let details = daemon.handle_remote(
+            RemoteCommand::EnrollmentDetails {
+                site_id: site_id.clone(),
+                token: SensitiveString::new(&enrollment_token),
+            },
+            NOW + 4,
+        );
+        let RemoteResponse::EnrollmentDetails {
+            totp_secret: Some(totp_secret),
+            remote_access_policy,
+            ..
+        } = details
+        else {
+            panic!("expected password enrollment details");
+        };
+        assert_eq!(remote_access_policy, policy);
+        assert!(matches!(
+            daemon.handle_remote(
+                RemoteCommand::StartPasskeyEnrollment {
+                    site_id: site_id.clone(),
+                    token: SensitiveString::new(&enrollment_token),
+                },
+                NOW + 4,
+            ),
+            RemoteResponse::Error { code, .. } if code == "authentication_method_disabled"
+        ));
+        let totp = torkitten_auth::TotpSecret::from_base32(totp_secret.expose()).unwrap();
+        let response = daemon.handle_remote(
+            RemoteCommand::CompletePasswordEnrollment {
+                site_id: site_id.clone(),
+                token: SensitiveString::new(enrollment_token),
+                password: SensitiveString::new("correct horse battery staple"),
+                totp_code: SensitiveString::new(totp.code_at(NOW + 5).unwrap()),
+            },
+            NOW + 5,
+        );
+        let RemoteResponse::EnrollmentCompleted {
+            expires_unix,
+            max_age_seconds,
+            recovery_codes,
+            ..
+        } = response
+        else {
+            panic!("expected password enrollment");
+        };
+        assert_eq!(expires_unix, NOW + 5 + 7 * 86_400);
+        assert_eq!(max_age_seconds, 7 * 86_400);
+        assert!(recovery_codes.is_empty());
+        assert!(matches!(
+            daemon.handle_remote(
+                RemoteCommand::AuthenticateGuest {
+                    site_id,
+                    guest_id,
+                    password: SensitiveString::new("correct horse battery staple"),
+                    second_factor: GuestSecondFactor::RecoveryCode(SensitiveString::new(
+                        "AAAA-BBBB-CCCC-DDDD",
+                    )),
+                },
+                NOW + 6,
+            ),
+            RemoteResponse::Error { code, .. } if code == "authentication_method_disabled"
+        ));
+    }
+
+    #[test]
     fn remote_protocol_exposes_only_scoped_portal_access() {
         let (_temporary, mut daemon, _services) = daemon();
         initialize(&mut daemon);
         create_generated_test_site(&mut daemon);
-        let site_id = SiteId::new("alpha").unwrap();
-        let guest_id = GuestId::new("family").unwrap();
-        let response = daemon.handle(
-            AdminCommand::EnrollDevice {
-                guest: Guest {
-                    site_id: site_id.clone(),
-                    id: guest_id.clone(),
-                    display_name: "Family".to_owned(),
-                    enabled: true,
-                },
-                device: Device {
-                    site_id: site_id.clone(),
-                    guest_id: guest_id.clone(),
-                    id: DeviceId::new("phone").unwrap(),
-                    display_name: "Phone".to_owned(),
-                    tor_client_name: "phone".to_owned(),
-                    enabled: true,
-                },
-                mapping_ids: vec![MappingId::new("app").unwrap()],
-            },
-            NOW + 2,
-        );
-        let AdminResponse::DeviceEnrolled { enrollment_url, .. } = response else {
-            panic!("expected device enrollment");
-        };
-        let enrollment_token = enrollment_url
-            .expose()
-            .rsplit('/')
-            .next()
-            .unwrap()
-            .to_owned();
+        let (site_id, guest_id, enrollment_token) = enroll_remote_test_device(&mut daemon, NOW + 2);
         let details = daemon.handle_remote(
             RemoteCommand::EnrollmentDetails {
                 site_id: site_id.clone(),
@@ -3407,6 +3547,41 @@ mod tests {
         };
         assert_eq!(recovery_codes.len(), 10);
         let recovery_code = recovery_codes[0].expose().to_owned();
+        let second_session = match daemon.handle_remote(
+            RemoteCommand::AuthenticateGuest {
+                site_id: site_id.clone(),
+                guest_id: guest_id.clone(),
+                password: SensitiveString::new("correct horse battery staple"),
+                second_factor: GuestSecondFactor::Totp(SensitiveString::new(
+                    totp.code_at(NOW + 5).unwrap(),
+                )),
+            },
+            NOW + 5,
+        ) {
+            RemoteResponse::GuestAuthenticated { session, .. } => session,
+            response => panic!("expected second session: {response:?}"),
+        };
+        assert!(matches!(
+            daemon.handle_remote(
+                RemoteCommand::LogoutOtherGuestSessions {
+                    site_id: site_id.clone(),
+                    session: SensitiveString::new(session.expose()),
+                },
+                NOW + 5,
+            ),
+            RemoteResponse::OtherSessionsRevoked { count: 1 }
+        ));
+        assert!(matches!(
+            daemon.handle_remote(
+                RemoteCommand::AuthorizeMapping {
+                    site_id: site_id.clone(),
+                    mapping_id: MappingId::new("app").unwrap(),
+                    session: second_session,
+                },
+                NOW + 5,
+            ),
+            RemoteResponse::Error { code, .. } if code == "unauthorized"
+        ));
         assert!(matches!(
             daemon.handle_remote(
                 RemoteCommand::EnrollmentDetails {
@@ -3618,6 +3793,44 @@ mod tests {
             ),
             AdminResponse::Ok
         ));
+    }
+
+    fn enroll_remote_test_device(
+        daemon: &mut Daemon<FakeServices>,
+        now_unix: i64,
+    ) -> (SiteId, GuestId, String) {
+        let site_id = SiteId::new("alpha").unwrap();
+        let guest_id = GuestId::new("family").unwrap();
+        let response = daemon.handle(
+            AdminCommand::EnrollDevice {
+                guest: Guest {
+                    site_id: site_id.clone(),
+                    id: guest_id.clone(),
+                    display_name: "Family".to_owned(),
+                    enabled: true,
+                },
+                device: Device {
+                    site_id: site_id.clone(),
+                    guest_id: guest_id.clone(),
+                    id: DeviceId::new("phone").unwrap(),
+                    display_name: "Phone".to_owned(),
+                    tor_client_name: "phone".to_owned(),
+                    enabled: true,
+                },
+                mapping_ids: vec![MappingId::new("app").unwrap()],
+            },
+            now_unix,
+        );
+        let AdminResponse::DeviceEnrolled { enrollment_url, .. } = response else {
+            panic!("expected device enrollment");
+        };
+        let token = enrollment_url
+            .expose()
+            .rsplit('/')
+            .next()
+            .unwrap()
+            .to_owned();
+        (site_id, guest_id, token)
     }
 
     #[test]

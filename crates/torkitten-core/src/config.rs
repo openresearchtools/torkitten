@@ -318,6 +318,12 @@ pub enum ValidationError {
     InvalidDeviceDisplayName,
     #[error("invalid Tor client name: {0}")]
     InvalidTorClientName(String),
+    #[error("remote access must keep passkeys or password plus TOTP enabled")]
+    NoRemoteLoginMethod,
+    #[error("recovery codes require password plus TOTP authentication")]
+    RecoveryRequiresPasswordTotp,
+    #[error("remote session lifetime must be between 1 and 365 days, got {0}")]
+    InvalidRemoteSessionDays(u16),
     #[error("virtual port cannot be zero")]
     ZeroVirtualPort,
     #[error("virtual port {0} is reserved by Torkitten")]

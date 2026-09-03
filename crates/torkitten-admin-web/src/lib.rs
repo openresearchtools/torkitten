@@ -31,7 +31,7 @@ use torkitten_auth::{
 use torkitten_core::{
     AdminCommand, AdminResponse, ComponentAction, ComponentState, Device, DeviceId, GatewayMode,
     GatewayStatus, Guest, GuestId, ManagedComponent, Mapping, MappingId, MappingTarget,
-    SensitiveString, Site, SiteId, Transport,
+    RemoteAccessPolicy, SensitiveString, Site, SiteId, Transport,
 };
 
 const SESSION_COOKIE: &str = "torkitten_admin_session";
@@ -192,6 +192,10 @@ fn router(daemon_socket: PathBuf, origin: ExpectedOrigin) -> Router {
             post(remove_guest),
         )
         .route("/api/settings/resume", post(set_resume_after_boot))
+        .route(
+            "/api/settings/remote-access",
+            post(set_remote_access_policy),
+        )
         .route("/api/emergency/stop", post(emergency_stop))
         .route("/api/emergency/clear", post(emergency_clear))
         .route(
@@ -803,6 +807,34 @@ async fn set_resume_after_boot(
     .await
 }
 
+#[derive(Deserialize)]
+struct RemoteAccessPolicyInput {
+    passkeys_enabled: bool,
+    password_totp_enabled: bool,
+    recovery_codes_enabled: bool,
+    session_days: u16,
+}
+
+async fn set_remote_access_policy(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<RemoteAccessPolicyInput>,
+) -> ApiResult<Json<AdminResponse>> {
+    authorized_command(
+        &state,
+        &headers,
+        AdminCommand::SetRemoteAccessPolicy {
+            policy: RemoteAccessPolicy {
+                passkeys_enabled: input.passkeys_enabled,
+                password_totp_enabled: input.password_totp_enabled,
+                recovery_codes_enabled: input.recovery_codes_enabled,
+                session_days: input.session_days,
+            },
+        },
+    )
+    .await
+}
+
 async fn emergency_stop(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1091,7 +1123,15 @@ struct IndexTemplate {
     tor_state: &'static str,
     caddy_state: &'static str,
     resume_after_boot: bool,
+    remote_policy: RemotePolicyView,
     sites: Vec<SiteView>,
+}
+
+struct RemotePolicyView {
+    passkeys_enabled: bool,
+    password_totp_enabled: bool,
+    recovery_codes_enabled: bool,
+    session_days: u16,
 }
 
 impl IndexTemplate {
@@ -1103,6 +1143,12 @@ impl IndexTemplate {
             tor_state: state_label(status.tor),
             caddy_state: state_label(status.caddy),
             resume_after_boot: status.resume_after_boot,
+            remote_policy: RemotePolicyView {
+                passkeys_enabled: status.remote_access_policy.passkeys_enabled,
+                password_totp_enabled: status.remote_access_policy.password_totp_enabled,
+                recovery_codes_enabled: status.remote_access_policy.recovery_codes_enabled,
+                session_days: status.remote_access_policy.session_days,
+            },
             sites: status.sites.iter().map(SiteView::from_status).collect(),
         }
     }
@@ -1313,6 +1359,7 @@ mod tests {
             }],
             tor: ComponentState::Running,
             caddy: ComponentState::Running,
+            remote_access_policy: RemoteAccessPolicy::default(),
             resume_after_boot: true,
         };
         let html = IndexTemplate::new(&status, "dashboard").render().unwrap();
@@ -1320,6 +1367,9 @@ mod tests {
         assert!(!html.contains("<script>alert(1)</script>"));
         assert!(html.contains("http://127.0.0.1:3000"));
         assert!(html.contains("mapping-row"));
+        assert!(html.contains("id=\"remote-policy-form\""));
+        assert!(html.contains("Save remote policy"));
+        assert!(html.contains("value=\"30\" selected"));
         assert!(html.contains("https://apps.apple.com/us/app/orbot/id1609461599"));
         assert!(
             html.contains("https://play.google.com/store/apps/details?id=org.torproject.android")
@@ -1381,7 +1431,7 @@ mod tests {
         let fake_session = session_value.clone();
         let fake_csrf = csrf_value.clone();
         let daemon = tokio::spawn(async move {
-            for request_number in 0..5 {
+            for request_number in 0..7 {
                 let (stream, _) = listener.accept().await.unwrap();
                 let (reader, mut writer) = stream.into_split();
                 let mut line = String::new();
@@ -1403,7 +1453,7 @@ mod tests {
                             expires_unix: 2_000_000_000,
                         }
                     }
-                    (3, AdminCommand::AuthorizeAdministratorMutation { session, csrf }) => {
+                    (3 | 5, AdminCommand::AuthorizeAdministratorMutation { session, csrf }) => {
                         assert_eq!(session.expose(), fake_session);
                         assert_eq!(csrf.expose(), fake_csrf);
                         AdminResponse::AdministratorAuthorized { fresh: true }
@@ -1413,6 +1463,18 @@ mod tests {
                         onion_hostname: "candidate.onion".to_owned(),
                         expires_unix: 2_000_000_000,
                     },
+                    (6, AdminCommand::SetRemoteAccessPolicy { policy }) => {
+                        assert_eq!(
+                            policy,
+                            RemoteAccessPolicy {
+                                passkeys_enabled: true,
+                                password_totp_enabled: false,
+                                recovery_codes_enabled: false,
+                                session_days: 90,
+                            }
+                        );
+                        AdminResponse::Ok
+                    }
                     (_, command) => panic!("unexpected daemon request: {command:?}"),
                 };
                 let mut encoded = serde_json::to_vec(&response).unwrap();
@@ -1474,6 +1536,7 @@ mod tests {
         assert_eq!(rejected.status(), StatusCode::FORBIDDEN);
 
         let accepted = app
+            .clone()
             .oneshot(json_request(
                 "/api/generator/candidate",
                 "{}",
@@ -1485,6 +1548,16 @@ mod tests {
         assert_eq!(accepted.status(), StatusCode::OK);
         let body = accepted.into_body().collect().await.unwrap().to_bytes();
         assert!(String::from_utf8_lossy(&body).contains("candidate.onion"));
+        let policy_response = app
+            .oneshot(json_request(
+                "/api/settings/remote-access",
+                r#"{"passkeys_enabled":true,"password_totp_enabled":false,"recovery_codes_enabled":false,"session_days":90}"#,
+                Some(&cookie_header),
+                Some(&csrf_value),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(policy_response.status(), StatusCode::OK);
         daemon.await.unwrap();
     }
 
@@ -1515,6 +1588,7 @@ mod tests {
             tor: ComponentState::Stopped,
             caddy: ComponentState::Stopped,
             resume_after_boot: true,
+            remote_access_policy: RemoteAccessPolicy::default(),
         }
     }
 }

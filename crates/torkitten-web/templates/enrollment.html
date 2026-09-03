@@ -14,6 +14,7 @@
     <section class="card">
       <p>This one-time enrollment belongs to <strong>{{ guest_display_name }}</strong> on this device only.</p>
       <p class="muted">It expires at Unix time {{ expires_unix }}. Completing setup consumes this link once.</p>
+      {% if passkeys_enabled %}
       <div class="passkey-panel">
         <input type="hidden" name="csrf" value="{{ csrf }}">
         <h2>Create a passkey</h2>
@@ -21,6 +22,8 @@
         <button type="button" data-passkey-enroll>Create passkey and finish</button>
         <p class="status" data-passkey-status role="status" aria-live="polite"></p>
       </div>
+      {% endif %}
+      {% if password_totp_enabled %}
       <details>
         <summary>Use password and TOTP instead</summary>
         {% match totp_secret %}
@@ -40,6 +43,7 @@
           <button type="submit" class="secondary">Complete with password</button>
         </form>
       </details>
+      {% endif %}
     </section>
   </main>
 </body>

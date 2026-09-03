@@ -2,6 +2,57 @@ use serde::{Deserialize, Serialize};
 
 use crate::{DeviceId, GuestId, SiteId, ValidationError};
 
+pub const DEFAULT_REMOTE_SESSION_DAYS: u16 = 30;
+pub const MINIMUM_REMOTE_SESSION_DAYS: u16 = 1;
+pub const MAXIMUM_REMOTE_SESSION_DAYS: u16 = 365;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct RemoteAccessPolicy {
+    pub passkeys_enabled: bool,
+    pub password_totp_enabled: bool,
+    pub recovery_codes_enabled: bool,
+    pub session_days: u16,
+}
+
+impl RemoteAccessPolicy {
+    /// Validates that at least one login method remains available and that the
+    /// session lifetime is bounded.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a lockout policy, a recovery-code policy without
+    /// password authentication, or an out-of-range session lifetime.
+    pub fn validate(&self) -> Result<(), ValidationError> {
+        if !self.passkeys_enabled && !self.password_totp_enabled {
+            return Err(ValidationError::NoRemoteLoginMethod);
+        }
+        if self.recovery_codes_enabled && !self.password_totp_enabled {
+            return Err(ValidationError::RecoveryRequiresPasswordTotp);
+        }
+        if !(MINIMUM_REMOTE_SESSION_DAYS..=MAXIMUM_REMOTE_SESSION_DAYS).contains(&self.session_days)
+        {
+            return Err(ValidationError::InvalidRemoteSessionDays(self.session_days));
+        }
+        Ok(())
+    }
+
+    #[must_use]
+    pub fn session_seconds(self) -> i64 {
+        i64::from(self.session_days) * 86_400
+    }
+}
+
+impl Default for RemoteAccessPolicy {
+    fn default() -> Self {
+        Self {
+            passkeys_enabled: true,
+            password_totp_enabled: true,
+            recovery_codes_enabled: true,
+            session_days: DEFAULT_REMOTE_SESSION_DAYS,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum AccountOwner {
@@ -167,6 +218,39 @@ mod tests {
         assert!(matches!(
             device.validate(),
             Err(ValidationError::InvalidTorClientName(_))
+        ));
+    }
+
+    #[test]
+    fn remote_policy_prevents_lockout_and_bounds_long_lived_sessions() {
+        assert!(RemoteAccessPolicy::default().validate().is_ok());
+        assert!(matches!(
+            RemoteAccessPolicy {
+                passkeys_enabled: false,
+                password_totp_enabled: false,
+                recovery_codes_enabled: false,
+                session_days: 30,
+            }
+            .validate(),
+            Err(ValidationError::NoRemoteLoginMethod)
+        ));
+        assert!(matches!(
+            RemoteAccessPolicy {
+                passkeys_enabled: true,
+                password_totp_enabled: false,
+                recovery_codes_enabled: true,
+                session_days: 30,
+            }
+            .validate(),
+            Err(ValidationError::RecoveryRequiresPasswordTotp)
+        ));
+        assert!(matches!(
+            RemoteAccessPolicy {
+                session_days: 0,
+                ..RemoteAccessPolicy::default()
+            }
+            .validate(),
+            Err(ValidationError::InvalidRemoteSessionDays(0))
         ));
     }
 }

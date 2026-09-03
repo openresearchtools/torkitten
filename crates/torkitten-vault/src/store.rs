@@ -13,8 +13,8 @@ use torkitten_auth::{
     decode_passkey, encode_passkey, passkey_credential_id,
 };
 use torkitten_core::{
-    AccountOwner, Device, DeviceId, GatewayConfig, Guest, GuestId, Mapping, MappingId, Site,
-    SiteId, ValidationError,
+    AccountOwner, Device, DeviceId, GatewayConfig, Guest, GuestId, Mapping, MappingId,
+    RemoteAccessPolicy, Site, SiteId, ValidationError,
 };
 use uuid::Uuid;
 use zeroize::Zeroizing;
@@ -23,7 +23,7 @@ use crate::{EncryptedSecret, VaultCipher, cipher::CipherError, key::KeyError};
 
 const DATABASE_FILENAME: &str = "state.sqlite3";
 const KEY_FILENAME: &str = "secrets/vault.key";
-const DATABASE_SCHEMA_VERSION: i64 = 6;
+const DATABASE_SCHEMA_VERSION: i64 = 7;
 const LEGACY_SITE_ID: &str = "default";
 const LEGACY_SITE_DISPLAY_NAME: &str = "Default site";
 
@@ -909,6 +909,54 @@ impl Store {
         Ok(())
     }
 
+    /// Returns the global policy used for new remote enrollments and logins.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the persisted singleton is missing or invalid.
+    pub fn remote_access_policy(&self) -> Result<RemoteAccessPolicy, StoreError> {
+        let (passkeys_enabled, password_totp_enabled, recovery_codes_enabled, session_days) =
+            self.connection.query_row(
+                "SELECT passkeys_enabled, password_totp_enabled,
+                        recovery_codes_enabled, session_days
+                 FROM remote_access_settings WHERE singleton = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get::<_, i64>(3)?)),
+            )?;
+        let policy = RemoteAccessPolicy {
+            passkeys_enabled,
+            password_totp_enabled,
+            recovery_codes_enabled,
+            session_days: session_days
+                .try_into()
+                .map_err(|_| ValidationError::InvalidRemoteSessionDays(u16::MAX))?,
+        };
+        policy.validate()?;
+        Ok(policy)
+    }
+
+    /// Atomically replaces the validated remote login and session policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an unsafe policy or a failed SQLite update.
+    pub fn set_remote_access_policy(&self, policy: RemoteAccessPolicy) -> Result<(), StoreError> {
+        policy.validate()?;
+        self.connection.execute(
+            "UPDATE remote_access_settings
+             SET passkeys_enabled = ?1, password_totp_enabled = ?2,
+                 recovery_codes_enabled = ?3, session_days = ?4
+             WHERE singleton = 1",
+            params![
+                policy.passkeys_enabled,
+                policy.password_totp_enabled,
+                policy.recovery_codes_enabled,
+                i64::from(policy.session_days),
+            ],
+        )?;
+        Ok(())
+    }
+
     /// Creates one administrator or site-scoped guest authentication account.
     /// TOTP and the recovery-code pepper are encrypted before persistence.
     ///
@@ -1508,6 +1556,27 @@ impl Store {
             .map_err(Into::into)
     }
 
+    /// Revokes every active session for an account except the presented
+    /// current session.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when SQLite cannot update the sessions.
+    pub fn revoke_other_account_sessions(
+        &self,
+        account_id: Uuid,
+        current: &SessionToken,
+    ) -> Result<usize, StoreError> {
+        let current_hash = current.digest();
+        self.connection
+            .execute(
+                "UPDATE sessions SET revoked = 1
+                 WHERE account_id = ?1 AND token_hash != ?2 AND revoked = 0",
+                params![account_id.as_bytes().as_slice(), current_hash.as_slice()],
+            )
+            .map_err(Into::into)
+    }
+
     fn site_mappings(&self, site_id: &SiteId) -> Result<Vec<Mapping>, StoreError> {
         let mut statement = self.connection.prepare(
             "SELECT document FROM mappings
@@ -1551,23 +1620,31 @@ impl Store {
                 migrate_v3_to_v4(&transaction)?;
                 migrate_v4_to_v5(&transaction)?;
                 migrate_v5_to_v6(&transaction)?;
+                migrate_v6_to_v7(&transaction)?;
             }
             Some(2) => {
                 migrate_v2_to_v3(&transaction)?;
                 migrate_v3_to_v4(&transaction)?;
                 migrate_v4_to_v5(&transaction)?;
                 migrate_v5_to_v6(&transaction)?;
+                migrate_v6_to_v7(&transaction)?;
             }
             Some(3) => {
                 migrate_v3_to_v4(&transaction)?;
                 migrate_v4_to_v5(&transaction)?;
                 migrate_v5_to_v6(&transaction)?;
+                migrate_v6_to_v7(&transaction)?;
             }
             Some(4) => {
                 migrate_v4_to_v5(&transaction)?;
                 migrate_v5_to_v6(&transaction)?;
+                migrate_v6_to_v7(&transaction)?;
             }
-            Some(5) => migrate_v5_to_v6(&transaction)?,
+            Some(5) => {
+                migrate_v5_to_v6(&transaction)?;
+                migrate_v6_to_v7(&transaction)?;
+            }
+            Some(6) => migrate_v6_to_v7(&transaction)?,
             Some(DATABASE_SCHEMA_VERSION) => create_current_schema(&transaction)?,
             Some(other) => return Err(StoreError::UnsupportedSchema(other)),
         }
@@ -1817,7 +1894,20 @@ fn create_access_schema(transaction: &Transaction<'_>) -> Result<(), rusqlite::E
              emergency_disabled INTEGER NOT NULL CHECK (emergency_disabled IN (0, 1))
          ) STRICT;
          INSERT OR IGNORE INTO publication_settings
-             (singleton, resume_after_boot, emergency_disabled) VALUES (1, 1, 0);",
+             (singleton, resume_after_boot, emergency_disabled) VALUES (1, 1, 0);
+         CREATE TABLE IF NOT EXISTS remote_access_settings (
+             singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+             passkeys_enabled INTEGER NOT NULL CHECK (passkeys_enabled IN (0, 1)),
+             password_totp_enabled INTEGER NOT NULL CHECK (password_totp_enabled IN (0, 1)),
+             recovery_codes_enabled INTEGER NOT NULL CHECK (recovery_codes_enabled IN (0, 1)),
+             session_days INTEGER NOT NULL CHECK (session_days BETWEEN 1 AND 365),
+             CHECK (passkeys_enabled = 1 OR password_totp_enabled = 1),
+             CHECK (recovery_codes_enabled = 0 OR password_totp_enabled = 1)
+         ) STRICT;
+         INSERT OR IGNORE INTO remote_access_settings
+             (singleton, passkeys_enabled, password_totp_enabled,
+              recovery_codes_enabled, session_days)
+             VALUES (1, 1, 1, 1, 30);",
     )
 }
 
@@ -1929,6 +2019,26 @@ fn migrate_v5_to_v6(transaction: &Transaction<'_>) -> Result<(), StoreError> {
     transaction.execute_batch(
         "ALTER TABLE device_enrollments ADD COLUMN encrypted_totp BLOB;
          UPDATE schema_version SET version = 6 WHERE singleton = 1;",
+    )?;
+    Ok(())
+}
+
+fn migrate_v6_to_v7(transaction: &Transaction<'_>) -> Result<(), StoreError> {
+    transaction.execute_batch(
+        "CREATE TABLE IF NOT EXISTS remote_access_settings (
+             singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+             passkeys_enabled INTEGER NOT NULL CHECK (passkeys_enabled IN (0, 1)),
+             password_totp_enabled INTEGER NOT NULL CHECK (password_totp_enabled IN (0, 1)),
+             recovery_codes_enabled INTEGER NOT NULL CHECK (recovery_codes_enabled IN (0, 1)),
+             session_days INTEGER NOT NULL CHECK (session_days BETWEEN 1 AND 365),
+             CHECK (passkeys_enabled = 1 OR password_totp_enabled = 1),
+             CHECK (recovery_codes_enabled = 0 OR password_totp_enabled = 1)
+         ) STRICT;
+         INSERT OR IGNORE INTO remote_access_settings
+             (singleton, passkeys_enabled, password_totp_enabled,
+              recovery_codes_enabled, session_days)
+             VALUES (1, 1, 1, 1, 30);
+         UPDATE schema_version SET version = 7 WHERE singleton = 1;",
     )?;
     Ok(())
 }
@@ -2277,6 +2387,60 @@ mod tests {
     }
 
     #[test]
+    fn revokes_only_other_sessions_for_the_same_account() {
+        let (_temporary, store) = store();
+        let account_id = Uuid::new_v4();
+        let other_account_id = Uuid::new_v4();
+        store
+            .create_auth_account(
+                account_id,
+                &AccountOwner::Administrator,
+                "Administrator",
+                None,
+                None,
+                &[9_u8; 32],
+            )
+            .unwrap();
+        let site_id = SiteId::new("alpha").unwrap();
+        let guest_id = GuestId::new("family").unwrap();
+        let mut store = store;
+        store.put_site(&site("alpha", Vec::new())).unwrap();
+        store.put_guest(&guest(&site_id, "family")).unwrap();
+        store
+            .create_auth_account(
+                other_account_id,
+                &AccountOwner::Guest { site_id, guest_id },
+                "Family",
+                None,
+                None,
+                &[7_u8; 32],
+            )
+            .unwrap();
+        let current = SessionToken::generate().unwrap();
+        let other = SessionToken::generate().unwrap();
+        let unrelated = SessionToken::generate().unwrap();
+        for (id, token) in [
+            (account_id, &current),
+            (account_id, &other),
+            (other_account_id, &unrelated),
+        ] {
+            store
+                .put_session(id, token, &CsrfToken::generate().unwrap(), 100, 200, 120)
+                .unwrap();
+        }
+
+        assert_eq!(
+            store
+                .revoke_other_account_sessions(account_id, &current)
+                .unwrap(),
+            1
+        );
+        assert!(store.touch_session(&current, 110).unwrap().is_some());
+        assert!(store.touch_session(&other, 110).unwrap().is_none());
+        assert!(store.touch_session(&unrelated, 110).unwrap().is_some());
+    }
+
+    #[test]
     fn enrollment_tokens_are_hashed_scoped_expiring_and_one_time() {
         let (temporary, mut store) = store();
         let site_id = SiteId::new("alpha").unwrap();
@@ -2533,6 +2697,69 @@ mod tests {
                 emergency_disabled: true,
             }
         );
+    }
+
+    #[test]
+    fn remote_access_policy_defaults_validates_and_persists() {
+        let (temporary, store) = store();
+        assert_eq!(
+            store.remote_access_policy().unwrap(),
+            RemoteAccessPolicy::default()
+        );
+        let policy = RemoteAccessPolicy {
+            passkeys_enabled: true,
+            password_totp_enabled: false,
+            recovery_codes_enabled: false,
+            session_days: 90,
+        };
+        store.set_remote_access_policy(policy).unwrap();
+        assert!(
+            store
+                .set_remote_access_policy(RemoteAccessPolicy {
+                    passkeys_enabled: false,
+                    password_totp_enabled: false,
+                    recovery_codes_enabled: false,
+                    session_days: 30,
+                })
+                .is_err()
+        );
+        drop(store);
+        assert_eq!(
+            Store::open(temporary.path())
+                .unwrap()
+                .remote_access_policy()
+                .unwrap(),
+            policy
+        );
+    }
+
+    #[test]
+    fn migrates_v6_with_the_safe_remote_access_default() {
+        let (temporary, store) = store();
+        drop(store);
+        let connection = Connection::open(temporary.path().join(DATABASE_FILENAME)).unwrap();
+        connection
+            .execute_batch(
+                "DROP TABLE remote_access_settings;
+                 UPDATE schema_version SET version = 6 WHERE singleton = 1;",
+            )
+            .unwrap();
+        drop(connection);
+
+        let migrated = Store::open(temporary.path()).unwrap();
+        assert_eq!(
+            migrated.remote_access_policy().unwrap(),
+            RemoteAccessPolicy::default()
+        );
+        let version: i64 = migrated
+            .connection
+            .query_row(
+                "SELECT version FROM schema_version WHERE singleton = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, DATABASE_SCHEMA_VERSION);
     }
 
     #[test]

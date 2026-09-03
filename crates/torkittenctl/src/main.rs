@@ -15,7 +15,7 @@ use std::{
 
 use torkitten_core::{
     AdminCommand, AdminResponse, ComponentAction, GatewayStatus, ManagedComponent, Mapping,
-    MappingId, MappingTarget, SensitiveString, Site, SiteId, Transport,
+    MappingId, MappingTarget, RemoteAccessPolicy, SensitiveString, Site, SiteId, Transport,
 };
 
 const DEFAULT_SOCKET: &str = "/run/torkitten/admin.sock";
@@ -171,6 +171,7 @@ fn parse_arguments(arguments: Vec<OsString>) -> Result<(Options, ParsedCommand),
         "resume-after-boot" => ParsedCommand::Direct(AdminCommand::SetResumeAfterBoot {
             enabled: parse_on_off(&mut arguments)?,
         }),
+        "remote-policy" => ParsedCommand::Direct(parse_remote_policy(&mut arguments)?),
         "emergency-stop" => ParsedCommand::Direct(AdminCommand::EmergencyDisable),
         "emergency-clear" => ParsedCommand::Direct(AdminCommand::ClearEmergencyDisable),
         "tor" => ParsedCommand::Direct(parse_component(ManagedComponent::Tor, &mut arguments)?),
@@ -261,6 +262,17 @@ fn parse_component(
         _ => return Err("component action must be start, stop, or restart".to_owned()),
     };
     Ok(AdminCommand::ControlComponent { component, action })
+}
+
+fn parse_remote_policy(arguments: &mut VecDeque<OsString>) -> Result<AdminCommand, String> {
+    let policy = RemoteAccessPolicy {
+        passkeys_enabled: parse_on_off(arguments)?,
+        password_totp_enabled: parse_on_off(arguments)?,
+        recovery_codes_enabled: parse_on_off(arguments)?,
+        session_days: required_number(arguments, "session days")?,
+    };
+    policy.validate().map_err(|error| error.to_string())?;
+    Ok(AdminCommand::SetRemoteAccessPolicy { policy })
 }
 
 fn generate_site(options: &Options, site_id: SiteId, display_name: String) -> Result<(), String> {
@@ -419,6 +431,13 @@ fn print_status(status: &GatewayStatus) {
     println!("Tor: {:?}", status.tor);
     println!("Caddy: {:?}", status.caddy);
     println!("Resume after boot: {}", status.resume_after_boot);
+    println!(
+        "Remote access: passkeys {}, password + TOTP {}, recovery codes {}, sessions {} days",
+        on_off(status.remote_access_policy.passkeys_enabled),
+        on_off(status.remote_access_policy.password_totp_enabled),
+        on_off(status.remote_access_policy.recovery_codes_enabled),
+        status.remote_access_policy.session_days,
+    );
     for site in &status.sites {
         println!(
             "{} [{}] {}",
@@ -442,6 +461,10 @@ fn print_status(status: &GatewayStatus) {
             );
         }
     }
+}
+
+const fn on_off(enabled: bool) -> &'static str {
+    if enabled { "on" } else { "off" }
 }
 
 trait SiteStatusLabel {
@@ -536,7 +559,8 @@ fn usage() -> &'static str {
        enable-mapping SITE ID | disable-mapping SITE ID | remove-mapping SITE ID\n\
        test-tcp-mapping SITE LOOPBACK PORT\n\
        open-bootstrap SITE [SECONDS] | close-bootstrap SITE\n\
-       resume-after-boot on|off | emergency-stop | emergency-clear\n\
+       resume-after-boot on|off | remote-policy PASSKEYS PASSWORD_TOTP RECOVERY SESSION_DAYS\n\
+       emergency-stop | emergency-clear\n\
        tor start|stop|restart | caddy start|stop|restart"
 }
 
@@ -587,6 +611,26 @@ mod tests {
     }
 
     #[test]
+    fn parses_and_validates_remote_access_policy() {
+        let (_, command) =
+            parse_arguments(arguments(&["remote-policy", "on", "off", "off", "90"])).unwrap();
+        assert!(matches!(
+            command,
+            ParsedCommand::Direct(AdminCommand::SetRemoteAccessPolicy { policy })
+                if policy == RemoteAccessPolicy {
+                    passkeys_enabled: true,
+                    password_totp_enabled: false,
+                    recovery_codes_enabled: false,
+                    session_days: 90,
+                }
+        ));
+        assert!(
+            parse_arguments(arguments(&["remote-policy", "off", "off", "off", "30",])).is_err()
+        );
+        assert!(parse_arguments(arguments(&["remote-policy", "on", "off", "on", "30",])).is_err());
+    }
+
+    #[test]
     fn exchanges_the_shared_newline_delimited_ipc_schema() {
         let temporary = tempfile::tempdir().unwrap();
         let socket = temporary.path().join("admin.sock");
@@ -607,6 +651,7 @@ mod tests {
                     tor: torkitten_core::ComponentState::Stopped,
                     caddy: torkitten_core::ComponentState::Stopped,
                     resume_after_boot: true,
+                    remote_access_policy: torkitten_core::RemoteAccessPolicy::default(),
                 },
             };
             serde_json::to_writer(stream, &response).unwrap();

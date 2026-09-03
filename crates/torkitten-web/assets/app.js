@@ -139,4 +139,29 @@
       button.disabled = false;
     }
   });
+
+  const revokeOtherSessionsForm = document.querySelector("[data-revoke-other-sessions]");
+  if (revokeOtherSessionsForm) revokeOtherSessionsForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const button = revokeOtherSessionsForm.querySelector("button[type=submit]");
+    const status = revokeOtherSessionsForm.querySelector("[data-revoke-other-sessions-status]");
+    button.disabled = true;
+    status.textContent = "Signing out other devices…";
+    status.dataset.state = "pending";
+    try {
+      const response = await fetch(revokeOtherSessionsForm.action, {
+        method: "POST",
+        credentials: "same-origin",
+        body: new URLSearchParams(new FormData(revokeOtherSessionsForm)),
+      });
+      if (!response.ok) throw new Error(`Request failed (${response.status})`);
+      status.textContent = "Other devices are signed out. This session is still active.";
+      status.dataset.state = "success";
+      button.disabled = false;
+    } catch (_) {
+      status.textContent = "Could not sign out other devices. Check the connection and try again.";
+      status.dataset.state = "failure";
+      button.disabled = false;
+    }
+  });
 })();

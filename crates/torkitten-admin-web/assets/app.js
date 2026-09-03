@@ -75,6 +75,30 @@ for (const form of document.querySelectorAll("#setup-form, #login-form")) {
   });
 }
 
+const remotePolicyForm = document.querySelector("#remote-policy-form");
+if (remotePolicyForm) remotePolicyForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const data = new FormData(remotePolicyForm);
+  const passkeysEnabled = data.has("passkeys_enabled");
+  const passwordTotpEnabled = data.has("password_totp_enabled");
+  const recoveryCodesEnabled = data.has("recovery_codes_enabled");
+  if (!passkeysEnabled && !passwordTotpEnabled) {
+    showNotice("Keep passkeys or password plus TOTP enabled.", "error");
+    return;
+  }
+  if (recoveryCodesEnabled && !passwordTotpEnabled) {
+    showNotice("Recovery codes require password plus TOTP.", "error");
+    return;
+  }
+  const button = remotePolicyForm.querySelector("button[type=submit]");
+  await pending(button, "Saving…", () => api("/api/settings/remote-access", {
+    passkeys_enabled: passkeysEnabled,
+    password_totp_enabled: passwordTotpEnabled,
+    recovery_codes_enabled: recoveryCodesEnabled,
+    session_days: Number(data.get("session_days")),
+  }));
+});
+
 const generatorDialog = document.querySelector("#generator-dialog");
 const candidateAddress = document.querySelector("#candidate-address");
 const candidateCount = document.querySelector("#candidate-count");

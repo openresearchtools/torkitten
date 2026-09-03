@@ -3,7 +3,9 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
-use crate::{Device, DeviceId, Guest, GuestId, Mapping, MappingId, Site, SiteId};
+use crate::{
+    Device, DeviceId, Guest, GuestId, Mapping, MappingId, RemoteAccessPolicy, Site, SiteId,
+};
 
 #[derive(Clone, Deserialize, Serialize, Zeroize, ZeroizeOnDrop)]
 #[serde(transparent)]
@@ -130,6 +132,9 @@ pub enum AdminCommand {
     SetResumeAfterBoot {
         enabled: bool,
     },
+    SetRemoteAccessPolicy {
+        policy: RemoteAccessPolicy,
+    },
     EmergencyDisable,
     ClearEmergencyDisable,
 }
@@ -189,6 +194,7 @@ pub struct GatewayStatus {
     pub tor: ComponentState,
     pub caddy: ComponentState,
     pub resume_after_boot: bool,
+    pub remote_access_policy: RemoteAccessPolicy,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -289,6 +295,10 @@ pub enum RemoteCommand {
         site_id: SiteId,
         session: SensitiveString,
     },
+    LogoutOtherGuestSessions {
+        site_id: SiteId,
+        session: SensitiveString,
+    },
     BootstrapCertificate {
         site_id: SiteId,
         path: String,
@@ -323,6 +333,7 @@ pub struct PortalContext {
     pub guest_id: Option<GuestId>,
     pub guest_display_name: Option<String>,
     pub mappings: Vec<PortalMapping>,
+    pub remote_access_policy: RemoteAccessPolicy,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -346,14 +357,17 @@ pub enum RemoteResponse {
         expires_unix: i64,
         totp_secret: Option<SensitiveString>,
         totp_uri: Option<SensitiveString>,
+        remote_access_policy: RemoteAccessPolicy,
     },
     GuestAuthenticated {
         session: SensitiveString,
         expires_unix: i64,
+        max_age_seconds: u64,
     },
     EnrollmentCompleted {
         session: SensitiveString,
         expires_unix: i64,
+        max_age_seconds: u64,
         recovery_codes: Vec<SensitiveString>,
     },
     PasskeyRegistrationStarted {
@@ -365,6 +379,9 @@ pub enum RemoteResponse {
         public_key: serde_json::Value,
     },
     LoggedOut,
+    OtherSessionsRevoked {
+        count: usize,
+    },
     BootstrapCertificate {
         certificate_pem: String,
         expires_unix: i64,

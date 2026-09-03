@@ -193,16 +193,39 @@
         {% endfor %}
       </section>
 
-      <section id="settings" class="settings-card">
-        <div>
-          <h2>Publication settings</h2>
-          <p>Closing this window never stops enabled sites.</p>
+      <section id="settings" class="settings-stack">
+        <div class="settings-card publication-settings">
+          <div>
+            <h2>Publication settings</h2>
+            <p>Closing this window never stops enabled sites.</p>
+          </div>
+          <button class="switch-row" type="button" data-action="resume" data-enabled="{% if resume_after_boot %}true{% else %}false{% endif %}">
+            <span><strong>Resume enabled sites after boot</strong><small>Preserves the emergency-stop latch.</small></span>
+            <span class="switch{% if resume_after_boot %} enabled{% endif %}" role="switch" aria-checked="{% if resume_after_boot %}true{% else %}false{% endif %}"><span></span></span>
+          </button>
+          <button class="button danger" type="button" data-action="emergency-stop">Stop all publication</button>
         </div>
-        <button class="switch-row" type="button" data-action="resume" data-enabled="{% if resume_after_boot %}true{% else %}false{% endif %}">
-          <span><strong>Resume enabled sites after boot</strong><small>Preserves the emergency-stop latch.</small></span>
-          <span class="switch{% if resume_after_boot %} enabled{% endif %}" role="switch" aria-checked="{% if resume_after_boot %}true{% else %}false{% endif %}"><span></span></span>
-        </button>
-        <button class="button danger" type="button" data-action="emergency-stop">Stop all publication</button>
+        <form id="remote-policy-form" class="settings-card remote-policy-card">
+          <div>
+            <h2>Remote login policy</h2>
+            <p>These controls apply to every protected onion site. Existing sessions keep their original expiry.</p>
+          </div>
+          <div class="policy-controls">
+            <label class="check-row"><input name="passkeys_enabled" type="checkbox"{% if remote_policy.passkeys_enabled %} checked{% endif %}><span><strong>Passkeys</strong><small>Require user verification when the device supports it.</small></span></label>
+            <label class="check-row"><input name="password_totp_enabled" type="checkbox"{% if remote_policy.password_totp_enabled %} checked{% endif %}><span><strong>Password + TOTP</strong><small>Portable fallback requiring both factors.</small></span></label>
+            <label class="check-row"><input name="recovery_codes_enabled" type="checkbox"{% if remote_policy.recovery_codes_enabled %} checked{% endif %}><span><strong>Recovery codes</strong><small>One-time second factors for password login.</small></span></label>
+            <label>Guest session lifetime
+              <select name="session_days">
+                <option value="1"{% if remote_policy.session_days == 1 %} selected{% endif %}>1 day</option>
+                <option value="7"{% if remote_policy.session_days == 7 %} selected{% endif %}>7 days</option>
+                <option value="30"{% if remote_policy.session_days == 30 %} selected{% endif %}>30 days</option>
+                <option value="90"{% if remote_policy.session_days == 90 %} selected{% endif %}>90 days</option>
+                <option value="365"{% if remote_policy.session_days == 365 %} selected{% endif %}>365 days</option>
+              </select>
+            </label>
+            <button class="button primary" type="submit">Save remote policy</button>
+          </div>
+        </form>
       </section>
     </main>
   </div>

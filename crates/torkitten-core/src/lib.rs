@@ -4,7 +4,10 @@ mod access;
 mod config;
 mod ipc;
 
-pub use access::{AccountOwner, Device, Guest};
+pub use access::{
+    AccountOwner, DEFAULT_REMOTE_SESSION_DAYS, Device, Guest, MAXIMUM_REMOTE_SESSION_DAYS,
+    MINIMUM_REMOTE_SESSION_DAYS, RemoteAccessPolicy,
+};
 pub use config::{
     DeviceId, GatewayConfig, GuestId, Mapping, MappingId, MappingTarget, Site, SiteId, Transport,
     ValidationError,

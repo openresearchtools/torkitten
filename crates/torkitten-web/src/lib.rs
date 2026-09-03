@@ -36,13 +36,12 @@ use torkitten_auth::{
     CsrfToken, ExpectedOrigin, SessionToken, clear_remote_session_cookie, remote_session_cookie,
 };
 use torkitten_core::{
-    GuestId, GuestSecondFactor, MappingId, PortalContext, PortalMapping, PublishedSite,
-    RemoteCommand, RemoteResponse, SensitiveString, SiteId,
+    GuestId, GuestSecondFactor, MAXIMUM_REMOTE_SESSION_DAYS, MappingId, PortalContext,
+    PortalMapping, PublishedSite, RemoteCommand, RemoteResponse, SensitiveString, SiteId,
 };
 
 const SESSION_COOKIE: &str = "__Host-torkitten_session";
 const CSRF_COOKIE: &str = "__Host-torkitten_csrf";
-const REMOTE_SESSION_SECONDS: u64 = 30 * 86_400;
 const MAXIMUM_IPC_RESPONSE_BYTES: u64 = 1024 * 1024;
 const IPC_TIMEOUT: Duration = Duration::from_secs(10);
 const RECONCILE_INTERVAL: Duration = Duration::from_secs(2);
@@ -201,6 +200,7 @@ fn portal_router(state: SiteState) -> Router {
         .route("/passkey/start", post(start_passkey_login))
         .route("/passkey/finish", post(finish_passkey_login))
         .route("/logout", post(logout))
+        .route("/sessions/revoke-others", post(logout_other_sessions))
         .route("/enroll/{token}", get(enrollment).post(complete_enrollment))
         .route(
             "/enroll/{token}/passkey/start",
@@ -253,6 +253,9 @@ fn render_portal(context: PortalContext, headers: &HeaderMap) -> WebResult<Respo
         onion_hostname: context.onion_hostname,
         guest_display_name: context.guest_display_name,
         mappings: context.mappings,
+        passkeys_enabled: context.remote_access_policy.passkeys_enabled,
+        password_totp_enabled: context.remote_access_policy.password_totp_enabled,
+        recovery_codes_enabled: context.remote_access_policy.recovery_codes_enabled,
         csrf: csrf.expose().to_owned(),
     };
     html_with_csrf(template.render().map_err(WebError::Template)?, &csrf)
@@ -277,6 +280,7 @@ async fn enrollment(
         expires_unix,
         totp_secret,
         totp_uri,
+        remote_access_policy,
         ..
     } = response
     else {
@@ -289,6 +293,8 @@ async fn enrollment(
         expires_unix,
         totp_secret: totp_secret.map(|secret| secret.expose().to_owned()),
         totp_uri: totp_uri.map(|uri| uri.expose().to_owned()),
+        passkeys_enabled: remote_access_policy.passkeys_enabled,
+        password_totp_enabled: remote_access_policy.password_totp_enabled,
         csrf: csrf.expose().to_owned(),
     };
     html_with_csrf(template.render().map_err(WebError::Template)?, &csrf)
@@ -321,19 +327,26 @@ async fn complete_enrollment(
     let RemoteResponse::EnrollmentCompleted {
         session,
         expires_unix,
+        max_age_seconds,
         recovery_codes,
     } = response
     else {
         return Err(WebError::from_response(response));
     };
-    let recovery_codes = recovery_codes
+    let recovery_codes: Vec<String> = recovery_codes
         .iter()
         .map(|code| code.expose().to_owned())
         .collect();
-    let page = RecoveryTemplate { recovery_codes }
-        .render()
-        .map_err(WebError::Template)?;
-    authenticated_response(&session, expires_unix, Some(page))
+    let page = if recovery_codes.is_empty() {
+        None
+    } else {
+        Some(
+            RecoveryTemplate { recovery_codes }
+                .render()
+                .map_err(WebError::Template)?,
+        )
+    };
+    authenticated_response(&session, expires_unix, max_age_seconds, page)
 }
 
 #[derive(Serialize)]
@@ -395,12 +408,13 @@ async fn finish_passkey_enrollment(
     let RemoteResponse::EnrollmentCompleted {
         session,
         expires_unix,
+        max_age_seconds,
         ..
     } = response
     else {
         return Err(WebError::from_response(response));
     };
-    authenticated_response(&session, expires_unix, None)
+    authenticated_response(&session, expires_unix, max_age_seconds, None)
 }
 
 #[derive(Deserialize)]
@@ -436,11 +450,12 @@ async fn login(
     let RemoteResponse::GuestAuthenticated {
         session,
         expires_unix,
+        max_age_seconds,
     } = response
     else {
         return Err(WebError::from_response(response));
     };
-    authenticated_response(&session, expires_unix, None)
+    authenticated_response(&session, expires_unix, max_age_seconds, None)
 }
 
 #[derive(Deserialize)]
@@ -501,11 +516,12 @@ async fn finish_passkey_login(
     let RemoteResponse::GuestAuthenticated {
         session,
         expires_unix,
+        max_age_seconds,
     } = response
     else {
         return Err(WebError::from_response(response));
     };
-    authenticated_response(&session, expires_unix, None)
+    authenticated_response(&session, expires_unix, max_age_seconds, None)
 }
 
 #[derive(Deserialize)]
@@ -539,13 +555,35 @@ async fn logout(
     Ok(response)
 }
 
+async fn logout_other_sessions(
+    State(state): State<SiteState>,
+    headers: HeaderMap,
+    Form(input): Form<LogoutInput>,
+) -> WebResult<Response> {
+    validate_mutation(&state, &headers, input.csrf.expose())?;
+    let session = cookie(&headers, SESSION_COOKIE).ok_or(WebError::Unauthorized)?;
+    let response = request_daemon(
+        &state.daemon_socket,
+        RemoteCommand::LogoutOtherGuestSessions {
+            site_id: state.site_id.clone(),
+            session: SensitiveString::new(session),
+        },
+    )
+    .await?;
+    let RemoteResponse::OtherSessionsRevoked { .. } = response else {
+        return Err(WebError::from_response(response));
+    };
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
 fn authenticated_response(
     encoded_session: &SensitiveString,
     expires_unix: i64,
+    max_age_seconds: u64,
     page: Option<String>,
 ) -> WebResult<Response> {
     let session = SessionToken::parse(encoded_session.expose().to_owned())?;
-    let cookie = remote_session_cookie(&session, REMOTE_SESSION_SECONDS)?;
+    let cookie = remote_session_cookie(&session, max_age_seconds)?;
     let mut response = if let Some(page) = page {
         Html(page).into_response()
     } else {
@@ -756,9 +794,10 @@ fn csrf_token(headers: &HeaderMap) -> WebResult<CsrfToken> {
 }
 
 fn html_with_csrf(page: String, csrf: &CsrfToken) -> WebResult<Response> {
+    let max_age_seconds = u64::from(MAXIMUM_REMOTE_SESSION_DAYS) * 24 * 60 * 60;
     let cookie = format!(
-        "{CSRF_COOKIE}={}; Path=/; Max-Age={REMOTE_SESSION_SECONDS}; Secure; HttpOnly; SameSite=Strict",
-        csrf.expose()
+        "{CSRF_COOKIE}={}; Path=/; Max-Age={max_age_seconds}; Secure; HttpOnly; SameSite=Strict",
+        csrf.expose(),
     );
     let mut response = Html(page).into_response();
     response.headers_mut().append(
@@ -856,6 +895,9 @@ struct PortalTemplate {
     onion_hostname: String,
     guest_display_name: Option<String>,
     mappings: Vec<PortalMapping>,
+    passkeys_enabled: bool,
+    password_totp_enabled: bool,
+    recovery_codes_enabled: bool,
     csrf: String,
 }
 
@@ -867,6 +909,8 @@ struct EnrollmentTemplate {
     expires_unix: i64,
     totp_secret: Option<String>,
     totp_uri: Option<String>,
+    passkeys_enabled: bool,
+    password_totp_enabled: bool,
     csrf: String,
 }
 
@@ -921,6 +965,9 @@ impl WebError {
             Self::NotFound => StatusCode::NOT_FOUND,
             Self::DaemonResponse { code, .. } if code == "not_found" => StatusCode::NOT_FOUND,
             Self::DaemonResponse { code, .. } if code == "unauthorized" => StatusCode::UNAUTHORIZED,
+            Self::DaemonResponse { code, .. } if code == "authentication_method_disabled" => {
+                StatusCode::FORBIDDEN
+            }
             Self::Validation(_) => StatusCode::BAD_REQUEST,
             Self::Daemon(_)
             | Self::DaemonResponse { .. }
@@ -1007,6 +1054,15 @@ mod tests {
             ),
         );
         assert_eq!(cookie(&headers, SESSION_COOKIE).as_deref(), Some("valid"));
+    }
+
+    #[test]
+    fn stale_pages_cannot_invoke_a_locally_disabled_login_method() {
+        let error = WebError::DaemonResponse {
+            code: "authentication_method_disabled".to_owned(),
+            message: "disabled".to_owned(),
+        };
+        assert_eq!(error.status(), StatusCode::FORBIDDEN);
     }
 
     #[test]
@@ -1160,6 +1216,7 @@ mod tests {
                         display_name: "Application".to_owned(),
                         virtual_port: 8443,
                     }],
+                    remote_access_policy: torkitten_core::RemoteAccessPolicy::default(),
                 },
             },
         );
@@ -1173,6 +1230,7 @@ mod tests {
         assert!(body.contains(&format!("https://{ONION}:8443/")));
         assert!(body.contains("/assets/app.js"));
         assert!(body.contains("data-logout"));
+        assert!(body.contains("data-revoke-other-sessions"));
         assert!(!body.contains("127.0.0.1"));
         assert!(matches!(
             daemon.await.unwrap(),
@@ -1190,6 +1248,7 @@ mod tests {
             &RemoteResponse::GuestAuthenticated {
                 session: SensitiveString::new(session.expose()),
                 expires_unix: 2_000_000_000,
+                max_age_seconds: 2_592_000,
             },
         );
         let csrf = CsrfToken::generate().unwrap();
@@ -1218,6 +1277,7 @@ mod tests {
             .to_str()
             .unwrap();
         assert!(set_cookie.starts_with("__Host-torkitten_session="));
+        assert!(set_cookie.contains("Max-Age=2592000"));
         assert!(set_cookie.contains("; Secure; HttpOnly; SameSite=Strict"));
         assert!(matches!(
             daemon.await.unwrap(),
@@ -1302,6 +1362,76 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn guest_can_revoke_other_sessions_without_losing_the_current_cookie() {
+        let temporary = tempfile::tempdir().unwrap();
+        let socket = temporary.path().join("daemon.sock");
+        let daemon = mock_daemon(&socket, &RemoteResponse::OtherSessionsRevoked { count: 2 });
+        let csrf = CsrfToken::generate().unwrap();
+        let session = SessionToken::generate().unwrap();
+        let response = portal_router(site_state(socket))
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/sessions/revoke-others")
+                    .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .header(ORIGIN, format!("https://{ONION}"))
+                    .header(
+                        COOKIE,
+                        format!(
+                            "{CSRF_COOKIE}={}; {SESSION_COOKIE}={}",
+                            csrf.expose(),
+                            session.expose()
+                        ),
+                    )
+                    .body(Body::from(format!("csrf={}", csrf.expose())))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert!(response.headers().get(SET_COOKIE).is_none());
+        assert!(matches!(
+            daemon.await.unwrap(),
+            RemoteCommand::LogoutOtherGuestSessions { site_id, session: received }
+                if site_id.as_str() == "alpha" && received.expose() == session.expose()
+        ));
+    }
+
+    #[test]
+    fn portal_renders_only_locally_enabled_authentication_methods() {
+        let password_only = PortalTemplate {
+            display_name: "Alpha".to_owned(),
+            onion_hostname: ONION.to_owned(),
+            guest_display_name: None,
+            mappings: Vec::new(),
+            passkeys_enabled: false,
+            password_totp_enabled: true,
+            recovery_codes_enabled: false,
+            csrf: "csrf".to_owned(),
+        }
+        .render()
+        .unwrap();
+        assert!(!password_only.contains("data-passkey-login"));
+        assert!(password_only.contains("Use password and a second factor"));
+        assert!(!password_only.contains("value=\"recovery\""));
+
+        let passkey_only = PortalTemplate {
+            display_name: "Alpha".to_owned(),
+            onion_hostname: ONION.to_owned(),
+            guest_display_name: None,
+            mappings: Vec::new(),
+            passkeys_enabled: true,
+            password_totp_enabled: false,
+            recovery_codes_enabled: false,
+            csrf: "csrf".to_owned(),
+        }
+        .render()
+        .unwrap();
+        assert!(passkey_only.contains("data-passkey-login"));
+        assert!(!passkey_only.contains("Use password and a second factor"));
+    }
+
+    #[tokio::test]
     async fn passkey_enrollment_start_is_origin_and_csrf_bound() {
         let temporary = tempfile::tempdir().unwrap();
         let socket = temporary.path().join("daemon.sock");
@@ -1351,6 +1481,7 @@ mod tests {
             &RemoteResponse::GuestAuthenticated {
                 session: SensitiveString::new(session.expose()),
                 expires_unix: 2_000_000_000,
+                max_age_seconds: 2_592_000,
             },
         );
         let csrf = CsrfToken::generate().unwrap();

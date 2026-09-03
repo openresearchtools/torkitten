@@ -16,6 +16,9 @@ p { color: #b8c0cf; line-height: 1.6; }
 .apps { display: grid; gap: 12px; padding: 0; list-style: none; }
 .apps a { display: flex; justify-content: space-between; align-items: center; padding: 16px 18px; border: 1px solid #394252; border-radius: 12px; color: #f4f6fb; text-decoration: none; background: #202630; }
 .apps a:hover { border-color: #7ee0bb; }
+.session-controls { margin-top: 24px; padding-top: 18px; border-top: 1px solid #303744; }
+.session-controls h2 { margin-bottom: 6px; }
+.session-controls form { margin-top: 12px; }
 .muted { color: #8f9aaf; }
 code { overflow-wrap: anywhere; color: #dce4f2; }
 a { color: #8fc8ff; }
