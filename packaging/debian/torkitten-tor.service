@@ -15,6 +15,7 @@ ExecStartPre=/usr/lib/torkitten/torkitten-tor-prepare
 ExecStart=/usr/lib/torkitten/tor -f /var/lib/torkitten/tor/torrc
 Restart=on-failure
 RestartSec=5s
+KillSignal=SIGINT
 TimeoutStopSec=30s
 UMask=0027
 NoNewPrivileges=yes
