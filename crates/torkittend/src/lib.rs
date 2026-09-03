@@ -26,7 +26,8 @@ use torkitten_auth::{CsrfToken, EnrollmentToken, SessionToken, hash_password, ve
 use torkitten_core::{
     AccountOwner, AdminCommand, AdminResponse, ComponentAction, ComponentState, Device, DeviceId,
     GatewayConfig, GatewayMode, GatewayStatus, Guest, GuestAccessStatus, GuestId, ManagedComponent,
-    Mapping, MappingId, MappingTarget, Site, SiteId, SiteStatus,
+    Mapping, MappingId, MappingTarget, PortalContext, PortalMapping, PublishedSite, RemoteCommand,
+    RemoteResponse, Site, SiteId, SiteStatus,
 };
 use torkitten_proxy::{CaddyError, CaddyInstance, CaddyPaths, ProxyConfig, ProxySite};
 use torkitten_tor::{
@@ -71,6 +72,11 @@ impl DaemonPaths {
     #[must_use]
     pub fn admin_socket(&self) -> PathBuf {
         self.runtime_directory.join("admin.sock")
+    }
+
+    #[must_use]
+    pub fn remote_socket(&self) -> PathBuf {
+        self.runtime_directory.join("remote.sock")
     }
 
     fn database_directory(&self) -> PathBuf {
@@ -291,6 +297,221 @@ impl<S: ServiceControl> Daemon<S> {
                 message: error.to_string(),
             },
         }
+    }
+
+    /// Handles one command from the onion-facing web boundary. This protocol
+    /// intentionally contains no local-administration operations.
+    #[must_use]
+    pub fn handle_remote(&mut self, command: RemoteCommand, now_unix: i64) -> RemoteResponse {
+        match self.handle_remote_inner(command, now_unix) {
+            Ok(response) => response,
+            Err(error) => RemoteResponse::Error {
+                code: error.code().to_owned(),
+                message: error.to_string(),
+            },
+        }
+    }
+
+    fn handle_remote_inner(
+        &mut self,
+        command: RemoteCommand,
+        now_unix: i64,
+    ) -> Result<RemoteResponse, DaemonError> {
+        if !self.initialized()? {
+            return Err(DaemonError::NotInitialized);
+        }
+        let settings = self.store.publication_settings()?;
+        if settings.emergency_disabled || !self.maintenance_enabled {
+            return match command {
+                RemoteCommand::PublishedSites => {
+                    Ok(RemoteResponse::PublishedSites { sites: Vec::new() })
+                }
+                _ => Err(DaemonError::RemoteUnavailable),
+            };
+        }
+        match command {
+            RemoteCommand::PublishedSites => self.remote_published_sites(),
+            RemoteCommand::PortalContext { site_id, session } => {
+                self.remote_portal_context(&site_id, session.as_ref(), now_unix)
+            }
+            RemoteCommand::AuthorizeMapping {
+                site_id,
+                mapping_id,
+                session,
+            } => {
+                let site = self.required_remote_site(&site_id)?;
+                let mapping = site
+                    .mappings
+                    .iter()
+                    .find(|mapping| mapping.id == mapping_id && mapping.enabled)
+                    .ok_or(DaemonError::RemoteUnauthorized)?;
+                let guest = self.authorized_remote_guest(&site_id, session.expose(), now_unix)?;
+                let permissions = self.store.guest_permissions(&site_id, &guest.id)?;
+                if !permissions.contains(&mapping.id) {
+                    return Err(DaemonError::RemoteUnauthorized);
+                }
+                Ok(RemoteResponse::MappingAuthorized { guest_id: guest.id })
+            }
+            RemoteCommand::EnrollmentDetails { site_id, token } => {
+                self.remote_enrollment_details(&site_id, token.expose(), now_unix)
+            }
+            RemoteCommand::BootstrapCertificate { site_id, path } => {
+                self.required_remote_site(&site_id)?;
+                let window = self
+                    .bootstrap_windows
+                    .get(&site_id)
+                    .filter(|window| window.expires_unix > now_unix)
+                    .ok_or(DaemonError::BootstrapNotFound)?;
+                let expected_path = format!("/{}/root-ca.pem", window.path_token);
+                if path != expected_path {
+                    return Err(DaemonError::BootstrapNotFound);
+                }
+                Ok(RemoteResponse::BootstrapCertificate {
+                    certificate_pem: self.authority.public_root_certificate_pem().to_owned(),
+                    expires_unix: window.expires_unix,
+                })
+            }
+        }
+    }
+
+    fn remote_published_sites(&self) -> Result<RemoteResponse, DaemonError> {
+        let sites = self
+            .store
+            .gateway_config()?
+            .sites
+            .into_iter()
+            .filter(|site| site.enabled)
+            .filter_map(|site| {
+                self.tor
+                    .onion_hostname(&site.id)
+                    .ok()
+                    .map(|onion_hostname| PublishedSite {
+                        site_id: site.id,
+                        onion_hostname,
+                    })
+            })
+            .collect();
+        Ok(RemoteResponse::PublishedSites { sites })
+    }
+
+    fn remote_portal_context(
+        &self,
+        site_id: &SiteId,
+        session: Option<&torkitten_core::SensitiveString>,
+        now_unix: i64,
+    ) -> Result<RemoteResponse, DaemonError> {
+        let site = self.required_remote_site(site_id)?;
+        let onion_hostname = self.tor.onion_hostname(site_id)?;
+        let guest = match session {
+            Some(session) => {
+                match self.authorized_remote_guest(site_id, session.expose(), now_unix) {
+                    Ok(guest) => Some(guest),
+                    Err(DaemonError::RemoteUnauthorized | DaemonError::Token(_)) => None,
+                    Err(error) => return Err(error),
+                }
+            }
+            None => None,
+        };
+        let permissions = guest
+            .as_ref()
+            .map(|guest| self.store.guest_permissions(site_id, &guest.id))
+            .transpose()?
+            .unwrap_or_default();
+        let mappings = site
+            .mappings
+            .into_iter()
+            .filter(|mapping| mapping.enabled && permissions.contains(&mapping.id))
+            .map(|mapping| PortalMapping {
+                id: mapping.id,
+                display_name: mapping.display_name,
+                virtual_port: mapping.virtual_port,
+            })
+            .collect();
+        Ok(RemoteResponse::PortalContext {
+            context: PortalContext {
+                site_id: site.id,
+                display_name: site.display_name,
+                onion_hostname,
+                guest_id: guest.as_ref().map(|guest| guest.id.clone()),
+                guest_display_name: guest.map(|guest| guest.display_name),
+                mappings,
+            },
+        })
+    }
+
+    fn remote_enrollment_details(
+        &self,
+        site_id: &SiteId,
+        encoded_token: &str,
+        now_unix: i64,
+    ) -> Result<RemoteResponse, DaemonError> {
+        self.required_remote_site(site_id)?;
+        let token = EnrollmentToken::parse(encoded_token.to_owned())
+            .map_err(|_| DaemonError::EnrollmentNotFound)?;
+        let enrollment = self
+            .store
+            .device_enrollment(&token, now_unix)?
+            .filter(|enrollment| enrollment.site_id == *site_id)
+            .ok_or(DaemonError::EnrollmentNotFound)?;
+        let guest = self.required_guest(site_id, &enrollment.guest_id)?;
+        let device = self
+            .store
+            .devices(site_id, &guest.id)?
+            .into_iter()
+            .find(|device| device.id == enrollment.device_id && device.enabled)
+            .filter(|_| guest.enabled)
+            .ok_or(DaemonError::EnrollmentNotFound)?;
+        Ok(RemoteResponse::EnrollmentDetails {
+            site_id: site_id.clone(),
+            guest_id: guest.id,
+            guest_display_name: guest.display_name,
+            device_id: device.id,
+            device_display_name: device.display_name,
+            expires_unix: enrollment.expires_unix,
+        })
+    }
+
+    fn required_remote_site(&self, site_id: &SiteId) -> Result<Site, DaemonError> {
+        let site = self.required_site(site_id)?;
+        if site.enabled {
+            Ok(site)
+        } else {
+            Err(DaemonError::RemoteUnavailable)
+        }
+    }
+
+    fn authorized_remote_guest(
+        &self,
+        site_id: &SiteId,
+        encoded_session: &str,
+        now_unix: i64,
+    ) -> Result<Guest, DaemonError> {
+        let session = SessionToken::parse(encoded_session.to_owned())
+            .map_err(|_| DaemonError::RemoteUnauthorized)?;
+        let record = self
+            .store
+            .touch_session(&session, now_unix)?
+            .ok_or(DaemonError::RemoteUnauthorized)?;
+        let account = self
+            .store
+            .auth_account(record.account_id)?
+            .ok_or(DaemonError::RemoteUnauthorized)?;
+        let AccountOwner::Guest {
+            site_id: account_site_id,
+            guest_id,
+        } = account.owner
+        else {
+            return Err(DaemonError::RemoteUnauthorized);
+        };
+        if account_site_id != *site_id {
+            return Err(DaemonError::RemoteUnauthorized);
+        }
+        self.required_guest(site_id, &guest_id).and_then(|guest| {
+            guest
+                .enabled
+                .then_some(guest)
+                .ok_or(DaemonError::RemoteUnauthorized)
+        })
     }
 
     /// Closes expired bootstrap listeners and discovers newly-created onion
@@ -1339,10 +1560,15 @@ pub async fn serve<S: ServiceControl>(
     mut daemon: Daemon<S>,
     socket_path: &Path,
 ) -> Result<(), DaemonError> {
+    let remote_socket_path = daemon.paths.remote_socket();
     prepare_socket_path(socket_path).await?;
+    prepare_socket_path(&remote_socket_path).await?;
     let listener = UnixListener::bind(socket_path)?;
+    let remote_listener = UnixListener::bind(&remote_socket_path)?;
     fs::set_permissions(socket_path, fs::Permissions::from_mode(0o660))?;
+    fs::set_permissions(&remote_socket_path, fs::Permissions::from_mode(0o600))?;
     let _socket_guard = SocketGuard(socket_path.to_path_buf());
+    let _remote_socket_guard = SocketGuard(remote_socket_path);
     let mut maintenance = tokio::time::interval(Duration::from_secs(2));
     maintenance.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
@@ -1362,6 +1588,13 @@ pub async fn serve<S: ServiceControl>(
                     handle_connection(&mut daemon, stream),
                 ).await;
             }
+            accepted = remote_listener.accept() => {
+                let (stream, _) = accepted?;
+                let _ = tokio::time::timeout(
+                    IPC_REQUEST_TIMEOUT,
+                    handle_remote_connection(&mut daemon, stream),
+                ).await;
+            }
         }
     }
 }
@@ -1378,6 +1611,27 @@ async fn handle_connection<S: ServiceControl>(
         Err(error) => AdminResponse::Error {
             code: "invalid_request".to_owned(),
             message: format!("invalid administration request: {error}"),
+        },
+    };
+    let mut encoded = serde_json::to_vec(&response)?;
+    encoded.push(b'\n');
+    writer.write_all(&encoded).await?;
+    writer.shutdown().await?;
+    Ok(())
+}
+
+async fn handle_remote_connection<S: ServiceControl>(
+    daemon: &mut Daemon<S>,
+    stream: UnixStream,
+) -> Result<(), DaemonError> {
+    let (reader, mut writer) = stream.into_split();
+    let mut reader = BufReader::new(reader);
+    let request = read_bounded_line(&mut reader).await?;
+    let response = match serde_json::from_slice::<RemoteCommand>(&request) {
+        Ok(command) => daemon.handle_remote(command, current_unix_time()?),
+        Err(error) => RemoteResponse::Error {
+            code: "invalid_request".to_owned(),
+            message: format!("invalid remote request: {error}"),
         },
     };
     let mut encoded = serde_json::to_vec(&response)?;
@@ -1597,6 +1851,14 @@ pub enum DaemonError {
     InvalidBootstrapDuration(u32),
     #[error("publication is blocked by the persistent emergency latch")]
     EmergencyLatchSet,
+    #[error("remote publication is unavailable")]
+    RemoteUnavailable,
+    #[error("remote guest authorization failed")]
+    RemoteUnauthorized,
+    #[error("certificate bootstrap resource was not found")]
+    BootstrapNotFound,
+    #[error("device enrollment was not found or has expired")]
+    EnrollmentNotFound,
     #[error("generated onion candidate was not found")]
     CandidateNotFound,
     #[error("generated onion candidate expired")]
@@ -1654,7 +1916,7 @@ impl DaemonError {
         match self {
             Self::NotInitialized => "not_initialized",
             Self::AlreadyInitialized => "already_initialized",
-            Self::InvalidCredentials => "unauthorized",
+            Self::InvalidCredentials | Self::RemoteUnauthorized => "unauthorized",
             Self::InvalidCsrf => "invalid_csrf",
             Self::SiteAlreadyExists(_) => "site_exists",
             Self::BootstrapSiteDisabled(_) | Self::InvalidBootstrapDuration(_) => {
@@ -1668,6 +1930,8 @@ impl DaemonError {
             | Self::DeviceNotFound(_)
             | Self::ClientAuth(_) => "invalid_access",
             Self::EmergencyLatchSet => "emergency_disabled",
+            Self::RemoteUnavailable => "remote_unavailable",
+            Self::BootstrapNotFound | Self::EnrollmentNotFound => "not_found",
             Self::CandidateNotFound | Self::CandidateExpired => "invalid_candidate",
             Self::Validation(_) => "validation_failed",
             Self::InvalidDeviceSecret | Self::Store(_) => "state_failed",
@@ -2214,6 +2478,101 @@ mod tests {
         );
     }
 
+    #[test]
+    fn remote_protocol_exposes_only_scoped_portal_access() {
+        let (_temporary, mut daemon, _services) = daemon();
+        initialize(&mut daemon);
+        create_generated_test_site(&mut daemon);
+        let site_id = SiteId::new("alpha").unwrap();
+        let guest_id = GuestId::new("family").unwrap();
+        let response = daemon.handle(
+            AdminCommand::EnrollDevice {
+                guest: Guest {
+                    site_id: site_id.clone(),
+                    id: guest_id.clone(),
+                    display_name: "Family".to_owned(),
+                    enabled: true,
+                },
+                device: Device {
+                    site_id: site_id.clone(),
+                    guest_id: guest_id.clone(),
+                    id: DeviceId::new("phone").unwrap(),
+                    display_name: "Phone".to_owned(),
+                    tor_client_name: "phone".to_owned(),
+                    enabled: true,
+                },
+                mapping_ids: vec![MappingId::new("app").unwrap()],
+            },
+            NOW + 2,
+        );
+        let AdminResponse::DeviceEnrolled { enrollment_url, .. } = response else {
+            panic!("expected device enrollment");
+        };
+        let enrollment_token = enrollment_url.expose().rsplit('/').next().unwrap();
+        assert!(matches!(
+            daemon.handle_remote(
+                RemoteCommand::EnrollmentDetails {
+                    site_id: site_id.clone(),
+                    token: SensitiveString::new(enrollment_token),
+                },
+                NOW + 3,
+            ),
+            RemoteResponse::EnrollmentDetails { guest_id: id, .. } if id == guest_id
+        ));
+
+        let account_id = Uuid::new_v4();
+        daemon
+            .store
+            .create_auth_account(
+                account_id,
+                &AccountOwner::Guest {
+                    site_id: site_id.clone(),
+                    guest_id: guest_id.clone(),
+                },
+                "Family",
+                None,
+                None,
+                &[7_u8; 32],
+            )
+            .unwrap();
+        let session = SessionToken::generate().unwrap();
+        daemon
+            .store
+            .put_session(
+                account_id,
+                &session,
+                &CsrfToken::generate().unwrap(),
+                NOW + 3,
+                NOW + 3_600,
+                NOW + 600,
+            )
+            .unwrap();
+        let response = daemon.handle_remote(
+            RemoteCommand::PortalContext {
+                site_id: site_id.clone(),
+                session: Some(SensitiveString::new(session.expose())),
+            },
+            NOW + 4,
+        );
+        let RemoteResponse::PortalContext { context } = response else {
+            panic!("expected portal context");
+        };
+        assert_eq!(context.guest_id, Some(guest_id.clone()));
+        assert_eq!(context.mappings.len(), 1);
+        assert_eq!(context.mappings[0].virtual_port, 8443);
+        assert!(matches!(
+            daemon.handle_remote(
+                RemoteCommand::AuthorizeMapping {
+                    site_id,
+                    mapping_id: MappingId::new("app").unwrap(),
+                    session: SensitiveString::new(session.expose()),
+                },
+                NOW + 5,
+            ),
+            RemoteResponse::MappingAuthorized { guest_id: id } if id == guest_id
+        ));
+    }
+
     fn create_generated_test_site(daemon: &mut Daemon<FakeServices>) {
         let AdminResponse::SiteCandidate { candidate_id, .. } =
             daemon.handle(AdminCommand::GenerateSiteCandidate, NOW)
@@ -2275,6 +2634,28 @@ mod tests {
             panic!("expected bootstrap response");
         };
         assert!(url.starts_with(&format!("http://{ONION}/")));
+        let path = url.strip_prefix(&format!("http://{ONION}")).unwrap();
+        assert!(matches!(
+            daemon.handle_remote(
+                RemoteCommand::BootstrapCertificate {
+                    site_id: site_id.clone(),
+                    path: path.to_owned(),
+                },
+                NOW + 3,
+            ),
+            RemoteResponse::BootstrapCertificate { certificate_pem, .. }
+                if certificate_pem.contains("BEGIN CERTIFICATE")
+        ));
+        assert!(matches!(
+            daemon.handle_remote(
+                RemoteCommand::BootstrapCertificate {
+                    site_id: site_id.clone(),
+                    path: "/root-ca.pem".to_owned(),
+                },
+                NOW + 3,
+            ),
+            RemoteResponse::Error { code, .. } if code == "not_found"
+        ));
         let torrc = fs::read_to_string(daemon.tor.torrc_path()).unwrap();
         assert_eq!(torrc.matches("HiddenServicePort 80 ").count(), 1);
 
@@ -2330,6 +2711,27 @@ mod tests {
             panic!("expected status response");
         };
         assert_eq!(status.mode, GatewayMode::Uninitialized);
+    }
+
+    #[tokio::test]
+    async fn remote_ipc_rejects_the_administration_schema() {
+        let (_temporary, mut daemon, _services) = daemon();
+        let (server, mut client) = UnixStream::pair().unwrap();
+        let server_task = async { handle_remote_connection(&mut daemon, server).await };
+        let client_task = async {
+            let mut request = serde_json::to_vec(&AdminCommand::EmergencyDisable).unwrap();
+            request.push(b'\n');
+            client.write_all(&request).await.unwrap();
+            let mut response = Vec::new();
+            client.read_to_end(&mut response).await.unwrap();
+            serde_json::from_slice::<RemoteResponse>(&response).unwrap()
+        };
+        let (server_result, response) = tokio::join!(server_task, client_task);
+        server_result.unwrap();
+        assert!(matches!(
+            response,
+            RemoteResponse::Error { code, .. } if code == "invalid_request"
+        ));
     }
 
     #[test]

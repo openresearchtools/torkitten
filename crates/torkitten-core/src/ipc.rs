@@ -236,6 +236,82 @@ pub enum AdminResponse {
     },
 }
 
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(tag = "command", rename_all = "snake_case")]
+pub enum RemoteCommand {
+    PublishedSites,
+    PortalContext {
+        site_id: SiteId,
+        session: Option<SensitiveString>,
+    },
+    AuthorizeMapping {
+        site_id: SiteId,
+        mapping_id: MappingId,
+        session: SensitiveString,
+    },
+    EnrollmentDetails {
+        site_id: SiteId,
+        token: SensitiveString,
+    },
+    BootstrapCertificate {
+        site_id: SiteId,
+        path: String,
+    },
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct PublishedSite {
+    pub site_id: SiteId,
+    pub onion_hostname: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct PortalMapping {
+    pub id: MappingId,
+    pub display_name: String,
+    pub virtual_port: u16,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct PortalContext {
+    pub site_id: SiteId,
+    pub display_name: String,
+    pub onion_hostname: String,
+    pub guest_id: Option<GuestId>,
+    pub guest_display_name: Option<String>,
+    pub mappings: Vec<PortalMapping>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(tag = "result", rename_all = "snake_case")]
+pub enum RemoteResponse {
+    PublishedSites {
+        sites: Vec<PublishedSite>,
+    },
+    PortalContext {
+        context: PortalContext,
+    },
+    MappingAuthorized {
+        guest_id: GuestId,
+    },
+    EnrollmentDetails {
+        site_id: SiteId,
+        guest_id: GuestId,
+        guest_display_name: String,
+        device_id: DeviceId,
+        device_display_name: String,
+        expires_unix: i64,
+    },
+    BootstrapCertificate {
+        certificate_pem: String,
+        expires_unix: i64,
+    },
+    Error {
+        code: String,
+        message: String,
+    },
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -259,5 +335,18 @@ mod tests {
         assert_eq!(encoded["command"], "set_mapping_enabled");
         assert_eq!(encoded["site_id"], "personal");
         assert_eq!(encoded["mapping_id"], "photos");
+    }
+
+    #[test]
+    fn remote_protocol_has_no_administration_commands() {
+        let command = RemoteCommand::AuthorizeMapping {
+            site_id: SiteId::new("personal").unwrap(),
+            mapping_id: MappingId::new("photos").unwrap(),
+            session: SensitiveString::new("secret"),
+        };
+        let encoded = serde_json::to_value(command).unwrap();
+        assert_eq!(encoded["command"], "authorize_mapping");
+        assert!(encoded.get("component").is_none());
+        assert!(encoded.get("action").is_none());
     }
 }
