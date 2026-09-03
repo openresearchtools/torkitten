@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/torkitten-core",
+    "crates/torkitten-proxy",
     "crates/torkitten-tor",
     "crates/torkitten-vault",
 ]
