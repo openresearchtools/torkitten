@@ -260,6 +260,38 @@ evidence includes real-Caddy tests for multiple Cookie and Set-Cookie fields,
 reserved-name prefix/case handling, ordinary application sessions, WebSockets,
 SSE, uploads, and authorization failure.
 
+### COMPAT-001 — Dedicated ports do not isolate application cookie namespaces
+
+Status: OPEN; ARCHITECTURE DECISION REQUIRED
+
+Current contract conflict: browser cookies are scoped by name, host, and path,
+not by port. Independent existing applications published as
+`https://site.onion:8443/` and `https://site.onion:8444/` therefore receive one
+another's cookies, can overwrite identical cookie names such as `session`, and
+share the browser's per-host cookie quota. Selectively isolating Torkitten's
+reserved cookies under SEC-003 is necessary but cannot make arbitrary
+application cookie namespaces independent.
+
+Compatibility impact: one application can retain its own login and cookies if
+they fit browser limits and do not collide with reserved names. Multiple
+independent cookie-heavy applications on one hostname cannot be promised full
+compatibility merely because their ports differ.
+
+Recommended direction: retain one v3 onion identity but assign each mapping a
+Tor virtual-host prefix such as `notes.<onion-address>.onion`, terminate every
+mapping on HTTPS 443, and give every mapping host-only application and gateway
+cookies. The permanent portal can provide sign-on without repeated credentials
+by exchanging a short-lived, single-use authorization code and minting a
+host-local session on first access. The Tor specification explicitly permits an
+ignored prefix before a v3 onion address for virtual hosting.
+
+This direction requires an explicit contract change plus coordinated updates to
+TLS issuance, Caddy host routing, mapping URLs, return-target validation,
+onboarding, QR codes, and browser/Tor tests. Proxy-side renaming of every
+application cookie is not recommended as the primary design because it is
+complex, shares browser host quotas, and cannot guarantee transparent behavior
+for arbitrary existing applications.
+
 ### BOUNDARY-001 — Security surfaces must not cross code/listener/credential/UI boundaries
 
 Status: OPEN AUDIT
