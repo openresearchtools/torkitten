@@ -12,11 +12,14 @@ base64.workspace = true
 data-encoding.workspace = true
 getrandom.workspace = true
 hmac.workspace = true
+serde_json.workspace = true
 sha1.workspace = true
 sha2.workspace = true
 subtle.workspace = true
 thiserror.workspace = true
 url.workspace = true
+uuid.workspace = true
+webauthn-rs.workspace = true
 zeroize.workspace = true
 
 [lints]

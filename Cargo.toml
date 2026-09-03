@@ -32,6 +32,7 @@ tempfile = "3"
 thiserror = "2"
 url = "2"
 uuid = { version = "1", features = ["serde", "v4"] }
+webauthn-rs = "0.5.5"
 x25519-dalek = { version = "2", features = ["static_secrets", "zeroize"] }
 zeroize = { version = "1", features = ["derive"] }
 
