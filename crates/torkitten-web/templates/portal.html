@@ -51,25 +51,37 @@
             <input type="hidden" name="csrf" value="{{ csrf }}">
             <input type="hidden" data-return-to value="{{ return_to }}">
             <input type="hidden" data-return-mapping value="{{ return_mapping }}">
+            <h3>Passkey</h3>
+            <p>Use this device's screen lock, fingerprint, or face. An external security key is available separately.</p>
             <label>Guest ID <input data-passkey-guest required maxlength="64" autocomplete="username"></label>
-            <button type="button" data-passkey-login>Sign in with a passkey</button>
+            <button type="button" data-passkey-login="platform">Sign in with this device</button>
+            <button type="button" class="secondary" data-passkey-login="security-key">Use a hardware security key</button>
             <p class="status" data-passkey-status role="status" aria-live="polite"></p>
           </div>
           {% endif %}
           {% if password_totp_enabled %}
           <details>
-            <summary>Use password and a second factor</summary>
-            <form method="post" action="/login">
+            <summary>Use password and authenticator app</summary>
+            <form data-password-login>
               <input type="hidden" name="csrf" value="{{ csrf }}">
-              <input type="hidden" name="return_to" value="{{ return_to }}">
-              <input type="hidden" name="return_mapping" value="{{ return_mapping }}">
-              <label>Guest ID <input name="guest_id" required maxlength="64" autocomplete="username"></label>
-              <label>Password <input type="password" name="password" required autocomplete="current-password"></label>
-              <label>Second factor
-                <select name="factor_kind"><option value="totp">Authenticator code</option>{% if recovery_codes_enabled %}<option value="recovery">Recovery code</option>{% endif %}</select>
-              </label>
-              <label>Code <input name="factor" required autocomplete="one-time-code"></label>
-              <button type="submit" class="secondary">Sign in with password</button>
+              <input type="hidden" data-return-to value="{{ return_to }}">
+              <input type="hidden" data-return-mapping value="{{ return_mapping }}">
+              <div class="auth-step" data-password-step>
+                <h3>Password</h3>
+                <label>Guest ID <input name="guest_id" required maxlength="64" autocomplete="username"></label>
+                <label>Password <input type="password" name="password" required autocomplete="current-password"></label>
+                <button type="submit" class="secondary">Continue</button>
+              </div>
+              <div class="auth-step" data-totp-step hidden>
+                <h3>Authenticator code</h3>
+                <p>The password was accepted. Now enter the current six-digit code from your authenticator app.</p>
+                <label>Authenticator code <input name="totp_code" required disabled inputmode="numeric" pattern="[0-9]{6}" autocomplete="one-time-code"></label>
+                <div class="button-row">
+                  <button type="button" class="secondary" data-password-back>Use another account</button>
+                  <button type="submit">Sign in</button>
+                </div>
+              </div>
+              <p class="status" data-password-status role="status" aria-live="polite"></p>
             </form>
           </details>
           {% endif %}

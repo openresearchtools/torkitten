@@ -59,6 +59,11 @@ validated_id!(SiteId, validate_site_id, InvalidSiteId);
 validated_id!(MappingId, validate_mapping_id, InvalidMappingId);
 validated_id!(GuestId, validate_guest_id, InvalidGuestId);
 validated_id!(DeviceId, validate_device_id, InvalidDeviceId);
+validated_id!(
+    AdministratorUsername,
+    validate_administrator_username,
+    InvalidAdministratorUsername
+);
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -270,6 +275,16 @@ fn validate_device_id(value: &str) -> Result<(), ValidationError> {
     }
 }
 
+fn validate_administrator_username(value: &str) -> Result<(), ValidationError> {
+    if valid_identifier(value) {
+        Ok(())
+    } else {
+        Err(ValidationError::InvalidAdministratorUsername(
+            value.to_owned(),
+        ))
+    }
+}
+
 fn valid_identifier(value: &str) -> bool {
     let valid_length = (1..=64).contains(&value.len());
     let valid_edges = !value.starts_with('-') && !value.ends_with('-');
@@ -308,6 +323,10 @@ pub enum ValidationError {
     InvalidGuestId(String),
     #[error("device id must be 1-64 lowercase ASCII letters, digits, or interior hyphens: {0}")]
     InvalidDeviceId(String),
+    #[error(
+        "administrator username must be 1-64 lowercase ASCII letters, digits, or interior hyphens: {0}"
+    )]
+    InvalidAdministratorUsername(String),
     #[error("site display name must be 1-128 characters without control characters")]
     InvalidSiteDisplayName,
     #[error("mapping display name must be 1-128 characters without control characters")]
@@ -320,8 +339,8 @@ pub enum ValidationError {
     InvalidTorClientName(String),
     #[error("remote access must keep passkeys or password plus TOTP enabled")]
     NoRemoteLoginMethod,
-    #[error("recovery codes require password plus TOTP authentication")]
-    RecoveryRequiresPasswordTotp,
+    #[error("guest recovery codes are disabled; a local administrator must reset guest login")]
+    GuestRecoveryDisabled,
     #[error("remote session lifetime must be between 1 and 365 days, got {0}")]
     InvalidRemoteSessionDays(u16),
     #[error("virtual port cannot be zero")]
@@ -441,6 +460,20 @@ mod tests {
                 SiteId::new("alpha").unwrap()
             ))
         );
+    }
+
+    #[test]
+    fn administrator_username_is_a_bounded_safe_identifier() {
+        assert_eq!(
+            AdministratorUsername::new("local-admin").unwrap().as_str(),
+            "local-admin"
+        );
+        for invalid in ["", "Admin", "admin user", "-admin", "admin-", "admin/name"] {
+            assert!(matches!(
+                AdministratorUsername::new(invalid),
+                Err(ValidationError::InvalidAdministratorUsername(_))
+            ));
+        }
     }
 
     #[test]

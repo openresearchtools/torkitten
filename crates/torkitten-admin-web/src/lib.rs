@@ -29,9 +29,9 @@ use torkitten_auth::{
     local_admin_session_cookie,
 };
 use torkitten_core::{
-    AdminCommand, AdminResponse, ComponentAction, ComponentState, Device, DeviceId, GatewayMode,
-    GatewayStatus, Guest, GuestId, ManagedComponent, Mapping, MappingId, MappingTarget,
-    RemoteAccessPolicy, SensitiveString, Site, SiteId, Transport,
+    AdminCommand, AdminResponse, AdministratorUsername, ComponentAction, ComponentState, Device,
+    DeviceId, GatewayMode, GatewayStatus, Guest, GuestId, ManagedComponent, Mapping, MappingId,
+    MappingTarget, RemoteAccessPolicy, SensitiveString, Site, SiteId, Transport,
 };
 
 const SESSION_COOKIE: &str = "torkitten_admin_session";
@@ -158,6 +158,10 @@ fn router(daemon_socket: PathBuf, origin: ExpectedOrigin) -> Router {
         .route("/api/setup", post(setup))
         .route("/api/login", post(login))
         .route("/api/logout", post(logout))
+        .route(
+            "/api/settings/administrator",
+            post(change_administrator_credentials),
+        )
         .route("/api/qr", post(qr_code))
         .route("/api/generator/candidate", post(generate_candidate))
         .route("/api/sites", post(create_site))
@@ -190,6 +194,10 @@ fn router(daemon_socket: PathBuf, origin: ExpectedOrigin) -> Router {
         .route(
             "/api/sites/{site_id}/guests/{guest_id}/remove",
             post(remove_guest),
+        )
+        .route(
+            "/api/sites/{site_id}/guests/{guest_id}/reset-login",
+            post(reset_guest_authentication),
         )
         .route("/api/settings/resume", post(set_resume_after_boot))
         .route(
@@ -269,41 +277,54 @@ async fn api_status(
 }
 
 #[derive(Deserialize)]
-struct PasswordInput {
+struct AdministratorCredentialsInput {
+    username: String,
     password: String,
 }
 
 async fn setup(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(input): Json<PasswordInput>,
+    Json(input): Json<AdministratorCredentialsInput>,
 ) -> ApiResult<Response> {
     validate_origin(&state, &headers)?;
+    let username = AdministratorUsername::new(input.username).map_err(ApiError::Validation)?;
     expect_ok(
         request_daemon(
             &state,
             AdminCommand::Initialize {
+                username: username.clone(),
                 password: SensitiveString::new(input.password.clone()),
             },
         )
         .await?,
     )?;
-    authenticate(&state, input.password).await
+    authenticate(&state, username, input.password).await
 }
 
 async fn login(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(input): Json<PasswordInput>,
+    Json(input): Json<AdministratorCredentialsInput>,
 ) -> ApiResult<Response> {
     validate_origin(&state, &headers)?;
-    authenticate(&state, input.password).await
+    authenticate(
+        &state,
+        AdministratorUsername::new(input.username).map_err(ApiError::Validation)?,
+        input.password,
+    )
+    .await
 }
 
-async fn authenticate(state: &AppState, password: String) -> ApiResult<Response> {
+async fn authenticate(
+    state: &AppState,
+    username: AdministratorUsername,
+    password: String,
+) -> ApiResult<Response> {
     let response = request_daemon(
         state,
         AdminCommand::AuthenticateAdministrator {
+            username,
             password: SensitiveString::new(password),
         },
     )
@@ -343,6 +364,37 @@ async fn logout(State(state): State<AppState>, headers: HeaderMap) -> ApiResult<
             AdminCommand::LogoutAdministrator {
                 session: SensitiveString::new(auth.session),
                 csrf: SensitiveString::new(auth.csrf),
+            },
+        )
+        .await?,
+    )?;
+    let mut response = Json(json!({ "ok": true })).into_response();
+    response.headers_mut().append(
+        SET_COOKIE,
+        HeaderValue::from_static(clear_local_admin_session_cookie()),
+    );
+    response.headers_mut().append(
+        SET_COOKIE,
+        HeaderValue::from_static("torkitten_admin_csrf=; Path=/; Max-Age=0; SameSite=Strict"),
+    );
+    Ok(response)
+}
+
+async fn change_administrator_credentials(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<AdministratorCredentialsInput>,
+) -> ApiResult<Response> {
+    if !authorize_mutation(&state, &headers).await? {
+        return Err(ApiError::FreshAuthenticationRequired);
+    }
+    let username = AdministratorUsername::new(input.username).map_err(ApiError::Validation)?;
+    expect_ok(
+        request_daemon(
+            &state,
+            AdminCommand::ResetAdministrator {
+                username,
+                password: SensitiveString::new(input.password),
             },
         )
         .await?,
@@ -792,6 +844,22 @@ async fn remove_guest(
     .await
 }
 
+async fn reset_guest_authentication(
+    State(state): State<AppState>,
+    Path((site_id, guest_id)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> ApiResult<Json<AdminResponse>> {
+    authorized_command(
+        &state,
+        &headers,
+        AdminCommand::ResetGuestAuthentication {
+            site_id: parse_site_id(site_id)?,
+            guest_id: GuestId::new(guest_id).map_err(ApiError::Validation)?,
+        },
+    )
+    .await
+}
+
 async fn set_resume_after_boot(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -811,7 +879,6 @@ async fn set_resume_after_boot(
 struct RemoteAccessPolicyInput {
     passkeys_enabled: bool,
     password_totp_enabled: bool,
-    recovery_codes_enabled: bool,
     session_days: u16,
 }
 
@@ -827,7 +894,7 @@ async fn set_remote_access_policy(
             policy: RemoteAccessPolicy {
                 passkeys_enabled: input.passkeys_enabled,
                 password_totp_enabled: input.password_totp_enabled,
-                recovery_codes_enabled: input.recovery_codes_enabled,
+                recovery_codes_enabled: false,
                 session_days: input.session_days,
             },
         },
@@ -1045,6 +1112,8 @@ enum IpcError {
 enum ApiError {
     #[error("authentication is required")]
     Unauthorized,
+    #[error("sign in again before changing administrator credentials")]
+    FreshAuthenticationRequired,
     #[error("request origin or CSRF verification failed")]
     Forbidden,
     #[error("{0}")]
@@ -1079,7 +1148,7 @@ impl ApiError {
 
     fn status(&self) -> StatusCode {
         match self {
-            Self::Unauthorized => StatusCode::UNAUTHORIZED,
+            Self::Unauthorized | Self::FreshAuthenticationRequired => StatusCode::UNAUTHORIZED,
             Self::Forbidden | Self::Origin(_) => StatusCode::FORBIDDEN,
             Self::BadRequest(_) | Self::Validation(_) | Self::Token(_) | Self::Cookie(_) => {
                 StatusCode::BAD_REQUEST
@@ -1130,7 +1199,6 @@ struct IndexTemplate {
 struct RemotePolicyView {
     passkeys_enabled: bool,
     password_totp_enabled: bool,
-    recovery_codes_enabled: bool,
     session_days: u16,
 }
 
@@ -1146,7 +1214,6 @@ impl IndexTemplate {
             remote_policy: RemotePolicyView {
                 passkeys_enabled: status.remote_access_policy.passkeys_enabled,
                 password_totp_enabled: status.remote_access_policy.password_totp_enabled,
-                recovery_codes_enabled: status.remote_access_policy.recovery_codes_enabled,
                 session_days: status.remote_access_policy.session_days,
             },
             sites: status.sites.iter().map(SiteView::from_status).collect(),
@@ -1368,6 +1435,7 @@ mod tests {
         assert!(html.contains("http://127.0.0.1:3000"));
         assert!(html.contains("mapping-row"));
         assert!(html.contains("id=\"remote-policy-form\""));
+        assert!(html.contains("id=\"administrator-credentials-form\""));
         assert!(html.contains("Save remote policy"));
         assert!(html.contains("value=\"30\" selected"));
         assert!(html.contains("https://apps.apple.com/us/app/orbot/id1609461599"));
@@ -1441,11 +1509,13 @@ mod tests {
                     (0, AdminCommand::Status) => AdminResponse::Status {
                         status: uninitialized_status(),
                     },
-                    (1, AdminCommand::Initialize { password }) => {
+                    (1, AdminCommand::Initialize { username, password }) => {
+                        assert_eq!(username.as_str(), "admin");
                         assert_eq!(password.expose(), "long-enough-password");
                         AdminResponse::Ok
                     }
-                    (2, AdminCommand::AuthenticateAdministrator { password }) => {
+                    (2, AdminCommand::AuthenticateAdministrator { username, password }) => {
+                        assert_eq!(username.as_str(), "admin");
                         assert_eq!(password.expose(), "long-enough-password");
                         AdminResponse::AdministratorAuthenticated {
                             session: SensitiveString::new(fake_session.clone()),
@@ -1505,7 +1575,7 @@ mod tests {
             .clone()
             .oneshot(json_request(
                 "/api/setup",
-                r#"{"password":"long-enough-password"}"#,
+                r#"{"username":"admin","password":"long-enough-password"}"#,
                 None,
                 None,
             ))
@@ -1551,13 +1621,163 @@ mod tests {
         let policy_response = app
             .oneshot(json_request(
                 "/api/settings/remote-access",
-                r#"{"passkeys_enabled":true,"password_totp_enabled":false,"recovery_codes_enabled":false,"session_days":90}"#,
+                r#"{"passkeys_enabled":true,"password_totp_enabled":false,"session_days":90}"#,
                 Some(&cookie_header),
                 Some(&csrf_value),
             ))
             .await
             .unwrap();
         assert_eq!(policy_response.status(), StatusCode::OK);
+        daemon.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn fresh_local_session_can_replace_administrator_credentials() {
+        let temporary = tempfile::tempdir().unwrap();
+        let socket = temporary.path().join("admin.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let session = SessionToken::generate().unwrap();
+        let csrf = CsrfToken::generate().unwrap();
+        let session_value = session.expose().to_owned();
+        let csrf_value = csrf.expose().to_owned();
+        let expected_session = session_value.clone();
+        let expected_csrf = csrf_value.clone();
+        let daemon = tokio::spawn(async move {
+            for request_number in 0..2 {
+                let (stream, _) = listener.accept().await.unwrap();
+                let (reader, mut writer) = stream.into_split();
+                let mut line = String::new();
+                BufReader::new(reader).read_line(&mut line).await.unwrap();
+                let command = serde_json::from_str::<AdminCommand>(&line).unwrap();
+                let response = match (request_number, command) {
+                    (0, AdminCommand::AuthorizeAdministratorMutation { session, csrf }) => {
+                        assert_eq!(session.expose(), expected_session);
+                        assert_eq!(csrf.expose(), expected_csrf);
+                        AdminResponse::AdministratorAuthorized { fresh: true }
+                    }
+                    (1, AdminCommand::ResetAdministrator { username, password }) => {
+                        assert_eq!(username.as_str(), "replacement-admin");
+                        assert_eq!(password.expose(), "replacement password");
+                        AdminResponse::Ok
+                    }
+                    (_, command) => panic!("unexpected daemon request: {command:?}"),
+                };
+                let mut encoded = serde_json::to_vec(&response).unwrap();
+                encoded.push(b'\n');
+                writer.write_all(&encoded).await.unwrap();
+            }
+        });
+        let app = router(
+            socket,
+            ExpectedOrigin::parse("http://127.0.0.1:12755").unwrap(),
+        );
+        let cookies = format!("{SESSION_COOKIE}={session_value}; {CSRF_COOKIE}={csrf_value}");
+        let response = app
+            .oneshot(json_request(
+                "/api/settings/administrator",
+                r#"{"username":"replacement-admin","password":"replacement password"}"#,
+                Some(&cookies),
+                Some(&csrf_value),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers().get_all(SET_COOKIE).iter().count(), 2);
+        for cookie in response.headers().get_all(SET_COOKIE) {
+            assert!(cookie.to_str().unwrap().contains("Max-Age=0"));
+        }
+        daemon.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn stale_local_session_cannot_replace_administrator_credentials() {
+        let temporary = tempfile::tempdir().unwrap();
+        let socket = temporary.path().join("admin.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let session = SessionToken::generate().unwrap();
+        let csrf = CsrfToken::generate().unwrap();
+        let session_value = session.expose().to_owned();
+        let csrf_value = csrf.expose().to_owned();
+        let daemon = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (reader, mut writer) = stream.into_split();
+            let mut line = String::new();
+            BufReader::new(reader).read_line(&mut line).await.unwrap();
+            assert!(matches!(
+                serde_json::from_str::<AdminCommand>(&line).unwrap(),
+                AdminCommand::AuthorizeAdministratorMutation { .. }
+            ));
+            let mut encoded =
+                serde_json::to_vec(&AdminResponse::AdministratorAuthorized { fresh: false })
+                    .unwrap();
+            encoded.push(b'\n');
+            writer.write_all(&encoded).await.unwrap();
+        });
+        let app = router(
+            socket,
+            ExpectedOrigin::parse("http://127.0.0.1:12755").unwrap(),
+        );
+        let cookies = format!("{SESSION_COOKIE}={session_value}; {CSRF_COOKIE}={csrf_value}");
+        let response = app
+            .oneshot(json_request(
+                "/api/settings/administrator",
+                r#"{"username":"replacement-admin","password":"replacement password"}"#,
+                Some(&cookies),
+                Some(&csrf_value),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        daemon.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn local_administrator_can_reset_guest_login_without_removing_the_guest() {
+        let temporary = tempfile::tempdir().unwrap();
+        let socket = temporary.path().join("admin.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let session = SessionToken::generate().unwrap();
+        let csrf = CsrfToken::generate().unwrap();
+        let session_value = session.expose().to_owned();
+        let csrf_value = csrf.expose().to_owned();
+        let daemon = tokio::spawn(async move {
+            for request_number in 0..2 {
+                let (stream, _) = listener.accept().await.unwrap();
+                let (reader, mut writer) = stream.into_split();
+                let mut line = String::new();
+                BufReader::new(reader).read_line(&mut line).await.unwrap();
+                let command = serde_json::from_str::<AdminCommand>(&line).unwrap();
+                let response = match (request_number, command) {
+                    (0, AdminCommand::AuthorizeAdministratorMutation { .. }) => {
+                        AdminResponse::AdministratorAuthorized { fresh: true }
+                    }
+                    (1, AdminCommand::ResetGuestAuthentication { site_id, guest_id }) => {
+                        assert_eq!(site_id.as_str(), "alpha");
+                        assert_eq!(guest_id.as_str(), "family");
+                        AdminResponse::Ok
+                    }
+                    (_, command) => panic!("unexpected daemon request: {command:?}"),
+                };
+                let mut encoded = serde_json::to_vec(&response).unwrap();
+                encoded.push(b'\n');
+                writer.write_all(&encoded).await.unwrap();
+            }
+        });
+        let app = router(
+            socket,
+            ExpectedOrigin::parse("http://127.0.0.1:12755").unwrap(),
+        );
+        let cookies = format!("{SESSION_COOKIE}={session_value}; {CSRF_COOKIE}={csrf_value}");
+        let response = app
+            .oneshot(json_request(
+                "/api/sites/alpha/guests/family/reset-login",
+                "{}",
+                Some(&cookies),
+                Some(&csrf_value),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
         daemon.await.unwrap();
     }
 

@@ -13,8 +13,8 @@ use torkitten_auth::{
     decode_passkey, encode_passkey, passkey_credential_id,
 };
 use torkitten_core::{
-    AccountOwner, Device, DeviceId, GatewayConfig, Guest, GuestId, Mapping, MappingId,
-    RemoteAccessPolicy, Site, SiteId, ValidationError,
+    AccountOwner, AdministratorUsername, Device, DeviceId, GatewayConfig, Guest, GuestId, Mapping,
+    MappingId, RemoteAccessPolicy, Site, SiteId, ValidationError,
 };
 use uuid::Uuid;
 use zeroize::Zeroizing;
@@ -23,7 +23,7 @@ use crate::{EncryptedSecret, VaultCipher, cipher::CipherError, key::KeyError};
 
 const DATABASE_FILENAME: &str = "state.sqlite3";
 const KEY_FILENAME: &str = "secrets/vault.key";
-const DATABASE_SCHEMA_VERSION: i64 = 7;
+const DATABASE_SCHEMA_VERSION: i64 = 9;
 const LEGACY_SITE_ID: &str = "default";
 const LEGACY_SITE_DISPLAY_NAME: &str = "Default site";
 
@@ -1129,6 +1129,71 @@ impl Store {
         }
     }
 
+    /// Atomically replaces the local administrator username and password and
+    /// revokes every browser session. The protected local control socket is the
+    /// recovery boundary when the previous credentials are unavailable.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the administrator account is missing or SQLite
+    /// cannot commit both changes.
+    pub fn reset_administrator_credentials(
+        &mut self,
+        username: &AdministratorUsername,
+        password_hash: &PasswordHashValue,
+    ) -> Result<usize, StoreError> {
+        let username = AdministratorUsername::new(username.as_str())?;
+        let transaction = self.connection.transaction()?;
+        let account_id = transaction
+            .query_row(
+                "SELECT id FROM auth_accounts WHERE kind = 'administrator'",
+                [],
+                |row| row.get::<_, Vec<u8>>(0),
+            )
+            .optional()?
+            .ok_or(StoreError::AdministratorNotFound)?;
+        transaction.execute(
+            "UPDATE auth_accounts SET display_name = ?2, password_hash = ?3 WHERE id = ?1",
+            params![
+                account_id.as_slice(),
+                username.as_str(),
+                password_hash.as_str()
+            ],
+        )?;
+        let revoked = transaction.execute(
+            "UPDATE sessions SET revoked = 1 WHERE account_id = ?1 AND revoked = 0",
+            [account_id.as_slice()],
+        )?;
+        transaction.commit()?;
+        Ok(revoked)
+    }
+
+    /// Atomically removes a guest's login credentials, passkeys, sessions,
+    /// and outstanding enrollment links while preserving its Tor devices and
+    /// mapping permissions.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when SQLite cannot commit the reset.
+    pub fn reset_guest_authentication(
+        &mut self,
+        site_id: &SiteId,
+        guest_id: &GuestId,
+    ) -> Result<bool, StoreError> {
+        let transaction = self.connection.transaction()?;
+        transaction.execute(
+            "DELETE FROM device_enrollments WHERE site_id = ?1 AND guest_id = ?2",
+            params![site_id.as_str(), guest_id.as_str()],
+        )?;
+        let removed = transaction.execute(
+            "DELETE FROM auth_accounts
+             WHERE kind = 'guest' AND site_id = ?1 AND guest_id = ?2",
+            params![site_id.as_str(), guest_id.as_str()],
+        )?;
+        transaction.commit()?;
+        Ok(removed != 0)
+    }
+
     /// Replaces or clears an account's encrypted TOTP secret.
     ///
     /// # Errors
@@ -1621,6 +1686,8 @@ impl Store {
                 migrate_v4_to_v5(&transaction)?;
                 migrate_v5_to_v6(&transaction)?;
                 migrate_v6_to_v7(&transaction)?;
+                migrate_v7_to_v8(&transaction)?;
+                migrate_v8_to_v9(&transaction)?;
             }
             Some(2) => {
                 migrate_v2_to_v3(&transaction)?;
@@ -1628,23 +1695,40 @@ impl Store {
                 migrate_v4_to_v5(&transaction)?;
                 migrate_v5_to_v6(&transaction)?;
                 migrate_v6_to_v7(&transaction)?;
+                migrate_v7_to_v8(&transaction)?;
+                migrate_v8_to_v9(&transaction)?;
             }
             Some(3) => {
                 migrate_v3_to_v4(&transaction)?;
                 migrate_v4_to_v5(&transaction)?;
                 migrate_v5_to_v6(&transaction)?;
                 migrate_v6_to_v7(&transaction)?;
+                migrate_v7_to_v8(&transaction)?;
+                migrate_v8_to_v9(&transaction)?;
             }
             Some(4) => {
                 migrate_v4_to_v5(&transaction)?;
                 migrate_v5_to_v6(&transaction)?;
                 migrate_v6_to_v7(&transaction)?;
+                migrate_v7_to_v8(&transaction)?;
+                migrate_v8_to_v9(&transaction)?;
             }
             Some(5) => {
                 migrate_v5_to_v6(&transaction)?;
                 migrate_v6_to_v7(&transaction)?;
+                migrate_v7_to_v8(&transaction)?;
+                migrate_v8_to_v9(&transaction)?;
             }
-            Some(6) => migrate_v6_to_v7(&transaction)?,
+            Some(6) => {
+                migrate_v6_to_v7(&transaction)?;
+                migrate_v7_to_v8(&transaction)?;
+                migrate_v8_to_v9(&transaction)?;
+            }
+            Some(7) => {
+                migrate_v7_to_v8(&transaction)?;
+                migrate_v8_to_v9(&transaction)?;
+            }
+            Some(8) => migrate_v8_to_v9(&transaction)?,
             Some(DATABASE_SCHEMA_VERSION) => create_current_schema(&transaction)?,
             Some(other) => return Err(StoreError::UnsupportedSchema(other)),
         }
@@ -1907,7 +1991,7 @@ fn create_access_schema(transaction: &Transaction<'_>) -> Result<(), rusqlite::E
          INSERT OR IGNORE INTO remote_access_settings
              (singleton, passkeys_enabled, password_totp_enabled,
               recovery_codes_enabled, session_days)
-             VALUES (1, 1, 1, 1, 30);",
+             VALUES (1, 1, 1, 0, 30);",
     )
 }
 
@@ -2037,8 +2121,24 @@ fn migrate_v6_to_v7(transaction: &Transaction<'_>) -> Result<(), StoreError> {
          INSERT OR IGNORE INTO remote_access_settings
              (singleton, passkeys_enabled, password_totp_enabled,
               recovery_codes_enabled, session_days)
-             VALUES (1, 1, 1, 1, 30);
+             VALUES (1, 1, 1, 0, 30);
          UPDATE schema_version SET version = 7 WHERE singleton = 1;",
+    )?;
+    Ok(())
+}
+
+fn migrate_v7_to_v8(transaction: &Transaction<'_>) -> Result<(), StoreError> {
+    transaction.execute_batch(
+        "UPDATE remote_access_settings SET recovery_codes_enabled = 0 WHERE singleton = 1;
+         UPDATE schema_version SET version = 8 WHERE singleton = 1;",
+    )?;
+    Ok(())
+}
+
+fn migrate_v8_to_v9(transaction: &Transaction<'_>) -> Result<(), StoreError> {
+    transaction.execute_batch(
+        "UPDATE auth_accounts SET display_name = 'admin' WHERE kind = 'administrator';
+         UPDATE schema_version SET version = 9 WHERE singleton = 1;",
     )?;
     Ok(())
 }
@@ -2089,6 +2189,8 @@ pub enum StoreError {
     DuplicatePermission(MappingId),
     #[error("authentication account not found: {0}")]
     AccountNotFound(Uuid),
+    #[error("local administrator account not found")]
+    AdministratorNotFound,
     #[error("invalid or nil authentication account UUID")]
     InvalidAccountId,
     #[error("invalid authentication account owner")]
@@ -2384,6 +2486,182 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn administrator_reset_replaces_credentials_and_revokes_every_admin_session() {
+        let (_temporary, mut store) = store();
+        let administrator_id = Uuid::new_v4();
+        let old_password = hash_password("old administrator password").unwrap();
+        store
+            .create_auth_account(
+                administrator_id,
+                &AccountOwner::Administrator,
+                "Administrator",
+                Some(&old_password),
+                None,
+                &[9_u8; 32],
+            )
+            .unwrap();
+
+        let site_id = SiteId::new("alpha").unwrap();
+        let guest_id = GuestId::new("family").unwrap();
+        let guest_account_id = Uuid::new_v4();
+        store.put_site(&site("alpha", Vec::new())).unwrap();
+        store.put_guest(&guest(&site_id, "family")).unwrap();
+        store
+            .create_auth_account(
+                guest_account_id,
+                &AccountOwner::Guest { site_id, guest_id },
+                "Family",
+                None,
+                None,
+                &[7_u8; 32],
+            )
+            .unwrap();
+
+        let first_admin_session = SessionToken::generate().unwrap();
+        let second_admin_session = SessionToken::generate().unwrap();
+        let guest_session = SessionToken::generate().unwrap();
+        for (account_id, token) in [
+            (administrator_id, &first_admin_session),
+            (administrator_id, &second_admin_session),
+            (guest_account_id, &guest_session),
+        ] {
+            store
+                .put_session(
+                    account_id,
+                    token,
+                    &CsrfToken::generate().unwrap(),
+                    100,
+                    200,
+                    120,
+                )
+                .unwrap();
+        }
+
+        let new_password = hash_password("new administrator password").unwrap();
+        assert_eq!(
+            store
+                .reset_administrator_credentials(
+                    &AdministratorUsername::new("new-admin").unwrap(),
+                    &new_password,
+                )
+                .unwrap(),
+            2
+        );
+
+        let administrator = store
+            .auth_account_for_owner(&AccountOwner::Administrator)
+            .unwrap()
+            .unwrap();
+        assert_eq!(administrator.display_name, "new-admin");
+        let persisted_hash = administrator.password_hash.as_ref().unwrap();
+        assert!(verify_password("new administrator password", persisted_hash).unwrap());
+        assert!(!verify_password("old administrator password", persisted_hash).unwrap());
+        assert!(
+            store
+                .touch_session(&first_admin_session, 110)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            store
+                .touch_session(&second_admin_session, 110)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            store.touch_session(&guest_session, 110).unwrap().is_some(),
+            "administrator recovery must not revoke guest sessions"
+        );
+    }
+
+    #[test]
+    fn guest_authentication_reset_preserves_guest_device_and_permissions() {
+        let (_temporary, mut store) = store();
+        let site_id = SiteId::new("alpha").unwrap();
+        let guest_id = GuestId::new("family").unwrap();
+        let device_id = DeviceId::new("phone").unwrap();
+        let mapping_id = MappingId::new("app").unwrap();
+        store
+            .put_site(&site("alpha", vec![mapping("app", 8443)]))
+            .unwrap();
+        store.put_guest(&guest(&site_id, "family")).unwrap();
+        store
+            .put_device(&device(&site_id, &guest_id, "phone"), b"client key")
+            .unwrap();
+        store
+            .set_guest_permissions(&site_id, &guest_id, std::slice::from_ref(&mapping_id))
+            .unwrap();
+
+        let enrollment = EnrollmentToken::generate().unwrap();
+        store
+            .put_device_enrollment(&enrollment, &site_id, &guest_id, &device_id, 100, 200)
+            .unwrap();
+        let account_id = Uuid::new_v4();
+        let owner = AccountOwner::Guest {
+            site_id: site_id.clone(),
+            guest_id: guest_id.clone(),
+        };
+        let password = hash_password("guest password").unwrap();
+        let totp = TotpSecret::generate().unwrap();
+        let recovery_pepper = [11_u8; 32];
+        store
+            .create_auth_account(
+                account_id,
+                &owner,
+                "Family",
+                Some(&password),
+                Some(&totp),
+                &recovery_pepper,
+            )
+            .unwrap();
+        let recovery_code = generate_recovery_codes(1).unwrap().remove(0);
+        store
+            .replace_recovery_codes(account_id, &[recovery_code.digest(&recovery_pepper)], 100)
+            .unwrap();
+        let session = SessionToken::generate().unwrap();
+        store
+            .put_session(
+                account_id,
+                &session,
+                &CsrfToken::generate().unwrap(),
+                100,
+                200,
+                120,
+            )
+            .unwrap();
+
+        assert!(
+            store
+                .reset_guest_authentication(&site_id, &guest_id)
+                .unwrap()
+        );
+        assert!(store.auth_account_for_owner(&owner).unwrap().is_none());
+        assert!(store.touch_session(&session, 110).unwrap().is_none());
+        assert!(store.device_enrollment(&enrollment, 110).unwrap().is_none());
+        assert!(store.guest(&site_id, &guest_id).unwrap().is_some());
+        let preserved_device = store
+            .device(&site_id, &guest_id, &device_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(preserved_device.secret_material.as_slice(), b"client key");
+        assert_eq!(
+            store.guest_permissions(&site_id, &guest_id).unwrap(),
+            vec![mapping_id]
+        );
+        let dependent_auth_rows: i64 = store
+            .connection
+            .query_row(
+                "SELECT
+                     (SELECT COUNT(*) FROM recovery_codes WHERE account_id = ?1) +
+                     (SELECT COUNT(*) FROM sessions WHERE account_id = ?1)",
+                [account_id.as_bytes().as_slice()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(dependent_auth_rows, 0);
     }
 
     #[test]
@@ -2760,6 +3038,81 @@ mod tests {
             )
             .unwrap();
         assert_eq!(version, DATABASE_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn migrates_v7_by_forcing_guest_recovery_codes_off() {
+        let (temporary, store) = store();
+        drop(store);
+        let connection = Connection::open(temporary.path().join(DATABASE_FILENAME)).unwrap();
+        connection
+            .execute_batch(
+                "UPDATE remote_access_settings
+                     SET passkeys_enabled = 1,
+                         password_totp_enabled = 1,
+                         recovery_codes_enabled = 1,
+                         session_days = 90
+                   WHERE singleton = 1;
+                 UPDATE schema_version SET version = 7 WHERE singleton = 1;",
+            )
+            .unwrap();
+        drop(connection);
+
+        let migrated = Store::open(temporary.path()).unwrap();
+        assert_eq!(
+            migrated.remote_access_policy().unwrap(),
+            RemoteAccessPolicy {
+                passkeys_enabled: true,
+                password_totp_enabled: true,
+                recovery_codes_enabled: false,
+                session_days: 90,
+            }
+        );
+        let version: i64 = migrated
+            .connection
+            .query_row(
+                "SELECT version FROM schema_version WHERE singleton = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, DATABASE_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn migrates_v8_administrator_identity_to_the_documented_default() {
+        let (temporary, store) = store();
+        let password = hash_password("existing administrator password").unwrap();
+        store
+            .create_auth_account(
+                Uuid::new_v4(),
+                &AccountOwner::Administrator,
+                "Administrator",
+                Some(&password),
+                None,
+                &[9_u8; 32],
+            )
+            .unwrap();
+        drop(store);
+        let connection = Connection::open(temporary.path().join(DATABASE_FILENAME)).unwrap();
+        connection
+            .execute_batch("UPDATE schema_version SET version = 8 WHERE singleton = 1;")
+            .unwrap();
+        drop(connection);
+
+        let migrated = Store::open(temporary.path()).unwrap();
+        let administrator = migrated
+            .auth_account_for_owner(&AccountOwner::Administrator)
+            .unwrap()
+            .unwrap();
+        assert_eq!(administrator.display_name, "admin");
+        assert!(
+            verify_password(
+                "existing administrator password",
+                administrator.password_hash.as_ref().unwrap()
+            )
+            .unwrap()
+        );
     }
 
     #[test]

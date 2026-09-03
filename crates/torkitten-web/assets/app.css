@@ -24,6 +24,11 @@ code { overflow-wrap: anywhere; color: #dce4f2; }
 a { color: #8fc8ff; }
 form { display: grid; gap: 14px; margin-top: 20px; }
 .passkey-panel { display: grid; gap: 14px; margin-top: 20px; }
+.passkey-panel h3, .auth-step h3 { margin: 0; }
+.passkey-panel p, .auth-step p { margin: 0; }
+.auth-step { display: grid; gap: 14px; }
+.button-row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+[hidden] { display: none !important; }
 details { margin-top: 22px; border-top: 1px solid #303744; padding-top: 18px; }
 summary { cursor: pointer; color: #aeb8c8; font-weight: 650; }
 label { display: grid; gap: 6px; color: #cbd3df; }
@@ -35,3 +40,4 @@ button:disabled { cursor: wait; opacity: .68; }
 .status[data-state="pending"] { color: #f0c96b; }
 .status[data-state="success"] { color: #7ee0bb; }
 .status[data-state="failure"] { color: #ff9c9c; }
+@media (max-width: 520px) { .button-row { grid-template-columns: 1fr; } }

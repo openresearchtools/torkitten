@@ -20,14 +20,14 @@ impl RemoteAccessPolicy {
     ///
     /// # Errors
     ///
-    /// Returns an error for a lockout policy, a recovery-code policy without
-    /// password authentication, or an out-of-range session lifetime.
+    /// Returns an error for a lockout policy, guest recovery-code access, or
+    /// an out-of-range session lifetime.
     pub fn validate(&self) -> Result<(), ValidationError> {
         if !self.passkeys_enabled && !self.password_totp_enabled {
             return Err(ValidationError::NoRemoteLoginMethod);
         }
-        if self.recovery_codes_enabled && !self.password_totp_enabled {
-            return Err(ValidationError::RecoveryRequiresPasswordTotp);
+        if self.recovery_codes_enabled {
+            return Err(ValidationError::GuestRecoveryDisabled);
         }
         if !(MINIMUM_REMOTE_SESSION_DAYS..=MAXIMUM_REMOTE_SESSION_DAYS).contains(&self.session_days)
         {
@@ -47,7 +47,7 @@ impl Default for RemoteAccessPolicy {
         Self {
             passkeys_enabled: true,
             password_totp_enabled: true,
-            recovery_codes_enabled: true,
+            recovery_codes_enabled: false,
             session_days: DEFAULT_REMOTE_SESSION_DAYS,
         }
     }
@@ -242,7 +242,7 @@ mod tests {
                 session_days: 30,
             }
             .validate(),
-            Err(ValidationError::RecoveryRequiresPasswordTotp)
+            Err(ValidationError::GuestRecoveryDisabled)
         ));
         assert!(matches!(
             RemoteAccessPolicy {

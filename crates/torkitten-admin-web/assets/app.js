@@ -54,11 +54,13 @@ async function pending(button, label, operation, reload = true) {
       button.removeAttribute("aria-busy");
       button.innerHTML = original;
     }
+    return true;
   } catch (error) {
     showNotice(error.message, "error");
     button.disabled = false;
     button.removeAttribute("aria-busy");
     button.innerHTML = original;
+    return false;
   }
 }
 
@@ -71,7 +73,16 @@ for (const form of document.querySelectorAll("#setup-form, #login-form")) {
       return;
     }
     const button = form.querySelector("button[type=submit]");
-    await pending(button, "Signing in…", () => api(form.dataset.endpoint, { password: data.get("password") }));
+    const authenticated = await pending(
+      button,
+      form.id === "setup-form" ? "Creating…" : "Signing in…",
+      () => api(form.dataset.endpoint, {
+        username: data.get("username"),
+        password: data.get("password"),
+      }),
+      false,
+    );
+    if (authenticated) window.location.replace("/");
   });
 }
 
@@ -81,22 +92,33 @@ if (remotePolicyForm) remotePolicyForm.addEventListener("submit", async (event) 
   const data = new FormData(remotePolicyForm);
   const passkeysEnabled = data.has("passkeys_enabled");
   const passwordTotpEnabled = data.has("password_totp_enabled");
-  const recoveryCodesEnabled = data.has("recovery_codes_enabled");
   if (!passkeysEnabled && !passwordTotpEnabled) {
     showNotice("Keep passkeys or password plus TOTP enabled.", "error");
-    return;
-  }
-  if (recoveryCodesEnabled && !passwordTotpEnabled) {
-    showNotice("Recovery codes require password plus TOTP.", "error");
     return;
   }
   const button = remotePolicyForm.querySelector("button[type=submit]");
   await pending(button, "Saving…", () => api("/api/settings/remote-access", {
     passkeys_enabled: passkeysEnabled,
     password_totp_enabled: passwordTotpEnabled,
-    recovery_codes_enabled: recoveryCodesEnabled,
     session_days: Number(data.get("session_days")),
   }));
+});
+
+const administratorCredentialsForm = document.querySelector("#administrator-credentials-form");
+if (administratorCredentialsForm) administratorCredentialsForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const data = new FormData(administratorCredentialsForm);
+  if (data.get("password") !== data.get("confirmation")) {
+    showNotice("The password confirmation does not match.", "error");
+    return;
+  }
+  if (!window.confirm("Change the local administrator and sign out every administration session?")) return;
+  const button = administratorCredentialsForm.querySelector("button[type=submit]");
+  const changed = await pending(button, "Changing…", () => api("/api/settings/administrator", {
+    username: data.get("username"),
+    password: data.get("password"),
+  }), false);
+  if (changed) window.location.replace("/");
 });
 
 const generatorDialog = document.querySelector("#generator-dialog");
@@ -487,6 +509,12 @@ document.addEventListener("click", async (event) => {
     const guestId = button.closest("[data-guest-id]").dataset.guestId;
     if (!window.confirm("Remove this guest?")) return;
     await pending(button, "Removing…", () => api(`/api/sites/${encodeURIComponent(siteId)}/guests/${encodeURIComponent(guestId)}/remove`));
+    return;
+  }
+  if (action === "reset-guest-login") {
+    const guestId = button.closest("[data-guest-id]").dataset.guestId;
+    if (!window.confirm("Reset this guest’s login? Existing passkeys, password, TOTP, sessions, recovery data, and pending enrollment links will stop working. Tor device keys and mapping grants remain.")) return;
+    await pending(button, "Resetting…", () => api(`/api/sites/${encodeURIComponent(siteId)}/guests/${encodeURIComponent(guestId)}/reset-login`));
     return;
   }
   if (action === "edit-mapping") {

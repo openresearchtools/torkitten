@@ -24,6 +24,25 @@ the persistent administrator; later visits use normal revocable sessions. The
 named volume preserves identities, certificates, sites, mappings, guests, and
 settings when the container is replaced.
 
+## Administrator credential recovery
+
+Routine administration uses the browser and never requires container exec. If
+both the administrator username and password are unavailable, control of the
+container is the local recovery authority. Set a replacement username and enter
+the new password on standard input:
+
+```sh
+podman exec -i torkitten \
+  /opt/torkitten/bin/torkittenctl \
+  --socket /tmp/torkitten/admin.sock \
+  reset-administrator replacement-admin
+```
+
+Use `docker exec -i` in a Docker deployment. The password is never accepted as
+a command-line argument. A successful reset revokes every existing local
+administration session. The administration socket remains inside the container;
+do not publish or mount it into another container.
+
 The only published container port is the administration service, and it is
 bound to host loopback. Onion virtual ports are internal Unix sockets and must
 never be added to `ports:`.

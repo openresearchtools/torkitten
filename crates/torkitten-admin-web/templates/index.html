@@ -17,8 +17,11 @@
       <h1>Set up Torkitten</h1>
       <p class="muted">Create the permanent local administrator. This account controls publication and is never exposed through Tor.</p>
       <form id="setup-form" class="stack" data-endpoint="/api/setup">
+        <label>Administrator username
+          <input name="username" minlength="1" maxlength="64" pattern="[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?" autocomplete="username" value="admin" required autofocus>
+        </label>
         <label>Administrator password
-          <input name="password" type="password" minlength="12" maxlength="1024" autocomplete="new-password" required autofocus>
+          <input name="password" type="password" minlength="12" maxlength="1024" autocomplete="new-password" required>
         </label>
         <label>Confirm password
           <input name="confirmation" type="password" minlength="12" maxlength="1024" autocomplete="new-password" required>
@@ -36,8 +39,11 @@
       <h1>Welcome back</h1>
       <p class="muted">Sign in to manage onion sites and localhost mappings.</p>
       <form id="login-form" class="stack" data-endpoint="/api/login">
+        <label>Administrator username
+          <input name="username" maxlength="64" autocomplete="username" value="admin" required autofocus>
+        </label>
         <label>Administrator password
-          <input name="password" type="password" autocomplete="current-password" required autofocus>
+          <input name="password" type="password" autocomplete="current-password" required>
         </label>
         <button class="button primary" type="submit">Sign in</button>
       </form>
@@ -184,6 +190,7 @@
                   <span class="device-chip" data-device-id="{{ device.id }}">{{ device.display_name }} <button type="button" aria-label="Revoke {{ device.display_name }}" data-action="revoke-device">×</button></span>
                   {% endfor %}
                 </div>
+                <button class="text-button" type="button" data-action="reset-guest-login">Reset guest login</button>
                 {% if guest.devices.is_empty() %}<button class="text-button danger-text" type="button" data-action="remove-guest">Remove guest</button>{% endif %}
               </div>
               {% endfor %}
@@ -208,12 +215,11 @@
         <form id="remote-policy-form" class="settings-card remote-policy-card">
           <div>
             <h2>Remote login policy</h2>
-            <p>These controls apply to every protected onion site. Existing sessions keep their original expiry.</p>
+            <p>These controls apply to every protected onion site. Guest login recovery is performed only by a local administrator.</p>
           </div>
           <div class="policy-controls">
             <label class="check-row"><input name="passkeys_enabled" type="checkbox"{% if remote_policy.passkeys_enabled %} checked{% endif %}><span><strong>Passkeys</strong><small>Require user verification when the device supports it.</small></span></label>
             <label class="check-row"><input name="password_totp_enabled" type="checkbox"{% if remote_policy.password_totp_enabled %} checked{% endif %}><span><strong>Password + TOTP</strong><small>Portable fallback requiring both factors.</small></span></label>
-            <label class="check-row"><input name="recovery_codes_enabled" type="checkbox"{% if remote_policy.recovery_codes_enabled %} checked{% endif %}><span><strong>Recovery codes</strong><small>One-time second factors for password login.</small></span></label>
             <label>Guest session lifetime
               <select name="session_days">
                 <option value="1"{% if remote_policy.session_days == 1 %} selected{% endif %}>1 day</option>
@@ -224,6 +230,18 @@
               </select>
             </label>
             <button class="button primary" type="submit">Save remote policy</button>
+          </div>
+        </form>
+        <form id="administrator-credentials-form" class="settings-card remote-policy-card">
+          <div>
+            <h2>Local administrator</h2>
+            <p>Change the local username and password. This signs out every administration session. Forgotten credentials can be replaced only through the OS-authorized local CLI.</p>
+          </div>
+          <div class="policy-controls">
+            <label>New administrator username<input name="username" maxlength="64" pattern="[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?" autocomplete="username" required></label>
+            <label>New password<input name="password" type="password" minlength="12" maxlength="1024" autocomplete="new-password" required></label>
+            <label>Confirm new password<input name="confirmation" type="password" minlength="12" maxlength="1024" autocomplete="new-password" required></label>
+            <button class="button primary" type="submit">Change administrator</button>
           </div>
         </form>
       </section>

@@ -14,8 +14,9 @@ use std::{
 };
 
 use torkitten_core::{
-    AdminCommand, AdminResponse, ComponentAction, GatewayStatus, ManagedComponent, Mapping,
-    MappingId, MappingTarget, RemoteAccessPolicy, SensitiveString, Site, SiteId, Transport,
+    AdminCommand, AdminResponse, AdministratorUsername, ComponentAction, GatewayStatus,
+    ManagedComponent, Mapping, MappingId, MappingTarget, RemoteAccessPolicy, SensitiveString, Site,
+    SiteId, Transport,
 };
 
 const DEFAULT_SOCKET: &str = "/run/torkitten/admin.sock";
@@ -58,7 +59,12 @@ struct Options {
 #[derive(Debug)]
 enum ParsedCommand {
     Direct(AdminCommand),
-    Initialize,
+    Initialize {
+        username: AdministratorUsername,
+    },
+    ResetAdministrator {
+        username: AdministratorUsername,
+    },
     GenerateSite {
         site_id: SiteId,
         display_name: String,
@@ -72,21 +78,14 @@ impl ParsedCommand {
     fn into_admin_command(self) -> Result<AdminCommand, String> {
         match self {
             Self::Direct(command) => Ok(command),
-            Self::Initialize => {
-                eprint!("Administrator password (read from stdin): ");
-                io::stderr().flush().map_err(|error| error.to_string())?;
-                let mut password = String::new();
-                io::stdin()
-                    .lock()
-                    .read_line(&mut password)
-                    .map_err(|error| error.to_string())?;
-                while matches!(password.as_bytes().last(), Some(b'\n' | b'\r')) {
-                    password.pop();
-                }
-                Ok(AdminCommand::Initialize {
-                    password: SensitiveString::new(password),
-                })
-            }
+            Self::Initialize { username } => Ok(AdminCommand::Initialize {
+                username,
+                password: read_password("Administrator password")?,
+            }),
+            Self::ResetAdministrator { username } => Ok(AdminCommand::ResetAdministrator {
+                username,
+                password: read_password("New administrator password")?,
+            }),
             Self::GenerateSite { .. } | Self::RotateSite { .. } => {
                 Err("internal command dispatch error".to_owned())
             }
@@ -116,7 +115,12 @@ fn parse_arguments(arguments: Vec<OsString>) -> Result<(Options, ParsedCommand),
     let verb = required_text(&mut arguments, "command")?;
     let command = match verb.as_str() {
         "status" => ParsedCommand::Direct(AdminCommand::Status),
-        "initialize" => ParsedCommand::Initialize,
+        "initialize" => ParsedCommand::Initialize {
+            username: administrator_username(&mut arguments)?,
+        },
+        "reset-administrator" => ParsedCommand::ResetAdministrator {
+            username: administrator_username(&mut arguments)?,
+        },
         "generate-site" => ParsedCommand::GenerateSite {
             site_id: SiteId::new(required_text(&mut arguments, "site id")?)
                 .map_err(|error| error.to_string())?,
@@ -168,6 +172,11 @@ fn parse_arguments(arguments: Vec<OsString>) -> Result<(Options, ParsedCommand),
         "close-bootstrap" => ParsedCommand::Direct(AdminCommand::CloseCertificateBootstrap {
             site_id: site_id(&mut arguments)?,
         }),
+        "reset-guest-login" => ParsedCommand::Direct(AdminCommand::ResetGuestAuthentication {
+            site_id: site_id(&mut arguments)?,
+            guest_id: torkitten_core::GuestId::new(required_text(&mut arguments, "guest id")?)
+                .map_err(|error| error.to_string())?,
+        }),
         "resume-after-boot" => ParsedCommand::Direct(AdminCommand::SetResumeAfterBoot {
             enabled: parse_on_off(&mut arguments)?,
         }),
@@ -182,6 +191,20 @@ fn parse_arguments(arguments: Vec<OsString>) -> Result<(Options, ParsedCommand),
         return Err("unexpected trailing arguments".to_owned());
     }
     Ok((Options { socket, json }, command))
+}
+
+fn read_password(prompt: &str) -> Result<SensitiveString, String> {
+    eprint!("{prompt} (read from stdin): ");
+    io::stderr().flush().map_err(|error| error.to_string())?;
+    let mut password = String::new();
+    io::stdin()
+        .lock()
+        .read_line(&mut password)
+        .map_err(|error| error.to_string())?;
+    while matches!(password.as_bytes().last(), Some(b'\n' | b'\r')) {
+        password.pop();
+    }
+    Ok(SensitiveString::new(password))
 }
 
 fn parse_tcp_mapping(arguments: &mut VecDeque<OsString>) -> Result<AdminCommand, String> {
@@ -268,7 +291,7 @@ fn parse_remote_policy(arguments: &mut VecDeque<OsString>) -> Result<AdminComman
     let policy = RemoteAccessPolicy {
         passkeys_enabled: parse_on_off(arguments)?,
         password_totp_enabled: parse_on_off(arguments)?,
-        recovery_codes_enabled: parse_on_off(arguments)?,
+        recovery_codes_enabled: false,
         session_days: required_number(arguments, "session days")?,
     };
     policy.validate().map_err(|error| error.to_string())?;
@@ -432,10 +455,9 @@ fn print_status(status: &GatewayStatus) {
     println!("Caddy: {:?}", status.caddy);
     println!("Resume after boot: {}", status.resume_after_boot);
     println!(
-        "Remote access: passkeys {}, password + TOTP {}, recovery codes {}, sessions {} days",
+        "Remote access: passkeys {}, password + TOTP {}, sessions {} days",
         on_off(status.remote_access_policy.passkeys_enabled),
         on_off(status.remote_access_policy.password_totp_enabled),
-        on_off(status.remote_access_policy.recovery_codes_enabled),
         status.remote_access_policy.session_days,
     );
     for site in &status.sites {
@@ -484,6 +506,13 @@ impl SiteStatusLabel for torkitten_core::SiteStatus {
 
 fn site_id(arguments: &mut VecDeque<OsString>) -> Result<SiteId, String> {
     SiteId::new(required_text(arguments, "site id")?).map_err(|error| error.to_string())
+}
+
+fn administrator_username(
+    arguments: &mut VecDeque<OsString>,
+) -> Result<AdministratorUsername, String> {
+    AdministratorUsername::new(required_text(arguments, "administrator username")?)
+        .map_err(|error| error.to_string())
 }
 
 fn mapping_id(arguments: &mut VecDeque<OsString>) -> Result<MappingId, String> {
@@ -551,7 +580,8 @@ fn parse_on_off(arguments: &mut VecDeque<OsString>) -> Result<bool, String> {
 fn usage() -> &'static str {
     "usage: torkittenctl [--socket PATH] [--json] COMMAND ...\n\
      commands:\n\
-       status | initialize | generate-site ID NAME | rename-site ID NAME\n\
+       status | initialize USERNAME | reset-administrator USERNAME\n\
+       generate-site ID NAME | rename-site ID NAME\n\
        enable-site ID | disable-site ID | stop-site ID | restart-site ID\n\
        rotate-site ID | remove-site ID\n\
        add-tcp-mapping SITE ID NAME VPORT LOOPBACK PORT [http|https|h2c]\n\
@@ -559,7 +589,8 @@ fn usage() -> &'static str {
        enable-mapping SITE ID | disable-mapping SITE ID | remove-mapping SITE ID\n\
        test-tcp-mapping SITE LOOPBACK PORT\n\
        open-bootstrap SITE [SECONDS] | close-bootstrap SITE\n\
-       resume-after-boot on|off | remote-policy PASSKEYS PASSWORD_TOTP RECOVERY SESSION_DAYS\n\
+       reset-guest-login SITE GUEST\n\
+       resume-after-boot on|off | remote-policy PASSKEYS PASSWORD_TOTP SESSION_DAYS\n\
        emergency-stop | emergency-clear\n\
        tor start|stop|restart | caddy start|stop|restart"
 }
@@ -613,7 +644,7 @@ mod tests {
     #[test]
     fn parses_and_validates_remote_access_policy() {
         let (_, command) =
-            parse_arguments(arguments(&["remote-policy", "on", "off", "off", "90"])).unwrap();
+            parse_arguments(arguments(&["remote-policy", "on", "off", "90"])).unwrap();
         assert!(matches!(
             command,
             ParsedCommand::Direct(AdminCommand::SetRemoteAccessPolicy { policy })
@@ -624,10 +655,49 @@ mod tests {
                     session_days: 90,
                 }
         ));
+        assert!(parse_arguments(arguments(&["remote-policy", "off", "off", "30"])).is_err());
         assert!(
-            parse_arguments(arguments(&["remote-policy", "off", "off", "off", "30",])).is_err()
+            parse_arguments(arguments(&["remote-policy", "on", "off", "on", "30"])).is_err(),
+            "the former recovery-code argument must be rejected"
         );
-        assert!(parse_arguments(arguments(&["remote-policy", "on", "off", "on", "30",])).is_err());
+    }
+
+    #[test]
+    fn parses_local_authentication_reset_commands_without_password_arguments() {
+        let (_, command) = parse_arguments(arguments(&["initialize", "admin"])).unwrap();
+        assert!(matches!(
+            command,
+            ParsedCommand::Initialize { username } if username.as_str() == "admin"
+        ));
+        assert!(parse_arguments(arguments(&["initialize"])).is_err());
+
+        let (_, command) =
+            parse_arguments(arguments(&["reset-administrator", "replacement-admin"])).unwrap();
+        assert!(matches!(
+            command,
+            ParsedCommand::ResetAdministrator { username }
+                if username.as_str() == "replacement-admin"
+        ));
+        assert!(
+            parse_arguments(arguments(&[
+                "reset-administrator",
+                "replacement-admin",
+                "password-on-command-line"
+            ]))
+            .is_err(),
+            "administrator passwords must never be accepted as CLI arguments"
+        );
+
+        let (_, command) =
+            parse_arguments(arguments(&["reset-guest-login", "alpha", "family"])).unwrap();
+        assert!(matches!(
+            command,
+            ParsedCommand::Direct(AdminCommand::ResetGuestAuthentication {
+                site_id,
+                guest_id,
+            }) if site_id.as_str() == "alpha" && guest_id.as_str() == "family"
+        ));
+        assert!(parse_arguments(arguments(&["reset-administrator"])).is_err());
     }
 
     #[test]

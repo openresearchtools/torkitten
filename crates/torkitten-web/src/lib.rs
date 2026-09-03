@@ -36,8 +36,8 @@ use torkitten_auth::{
     CsrfToken, ExpectedOrigin, SessionToken, clear_remote_session_cookie, remote_session_cookie,
 };
 use torkitten_core::{
-    GuestId, GuestSecondFactor, MAXIMUM_REMOTE_SESSION_DAYS, MappingId, PortalContext,
-    PortalMapping, PublishedSite, RemoteCommand, RemoteResponse, SensitiveString, SiteId,
+    GuestId, MAXIMUM_REMOTE_SESSION_DAYS, MappingId, PortalContext, PortalMapping, PublishedSite,
+    RemoteCommand, RemoteResponse, SensitiveString, SiteId,
 };
 
 const SESSION_COOKIE: &str = "__Host-torkitten_session";
@@ -197,7 +197,8 @@ fn portal_router(state: SiteState) -> Router {
         .route("/", get(portal))
         .route("/assets/app.css", get(stylesheet))
         .route("/assets/app.js", get(javascript))
-        .route("/login", post(login))
+        .route("/login/password", post(start_password_login))
+        .route("/login/totp", post(finish_password_login))
         .route("/passkey/start", post(start_passkey_login))
         .route("/passkey/finish", post(finish_passkey_login))
         .route("/logout", post(logout))
@@ -270,7 +271,6 @@ fn render_portal(
         mappings: context.mappings,
         passkeys_enabled: context.remote_access_policy.passkeys_enabled,
         password_totp_enabled: context.remote_access_policy.password_totp_enabled,
-        recovery_codes_enabled: context.remote_access_policy.recovery_codes_enabled,
         return_to: query.return_to.unwrap_or_default(),
         return_mapping: query.return_mapping.unwrap_or_default(),
         csrf: csrf.expose().to_owned(),
@@ -345,25 +345,12 @@ async fn complete_enrollment(
         session,
         expires_unix,
         max_age_seconds,
-        recovery_codes,
+        ..
     } = response
     else {
         return Err(WebError::from_response(response));
     };
-    let recovery_codes: Vec<String> = recovery_codes
-        .iter()
-        .map(|code| code.expose().to_owned())
-        .collect();
-    let page = if recovery_codes.is_empty() {
-        None
-    } else {
-        Some(
-            RecoveryTemplate { recovery_codes }
-                .render()
-                .map_err(WebError::Template)?,
-        )
-    };
-    authenticated_response(&session, expires_unix, max_age_seconds, page, None)
+    authenticated_response(&session, expires_unix, max_age_seconds, None, None)
 }
 
 #[derive(Serialize)]
@@ -435,40 +422,59 @@ async fn finish_passkey_enrollment(
 }
 
 #[derive(Deserialize)]
-struct LoginInput {
+struct StartPasswordLoginInput {
     guest_id: String,
     password: SensitiveString,
-    factor_kind: String,
-    factor: SensitiveString,
-    return_to: Option<String>,
-    return_mapping: Option<String>,
-    csrf: SensitiveString,
 }
 
-async fn login(
+#[derive(Serialize)]
+struct PasswordChallenge {
+    challenge: String,
+}
+
+async fn start_password_login(
     State(state): State<SiteState>,
     headers: HeaderMap,
-    Form(input): Form<LoginInput>,
-) -> WebResult<Response> {
-    validate_mutation(&state, &headers, input.csrf.expose())?;
-    let return_to = validated_return_target(
-        &state,
-        input.return_mapping.as_deref(),
-        input.return_to.as_deref(),
-    )
-    .await;
-    let second_factor = match input.factor_kind.as_str() {
-        "totp" => GuestSecondFactor::Totp(input.factor),
-        "recovery" => GuestSecondFactor::RecoveryCode(input.factor),
-        _ => return Err(WebError::Unauthorized),
-    };
+    Json(input): Json<StartPasswordLoginInput>,
+) -> WebResult<Json<PasswordChallenge>> {
+    validate_header_mutation(&state, &headers)?;
     let response = request_daemon(
         &state.daemon_socket,
-        RemoteCommand::AuthenticateGuest {
+        RemoteCommand::StartPasswordAuthentication {
             site_id: state.site_id.clone(),
             guest_id: GuestId::new(input.guest_id).map_err(WebError::Validation)?,
             password: input.password,
-            second_factor,
+        },
+    )
+    .await?;
+    let RemoteResponse::PasswordAuthenticationStarted { challenge } = response else {
+        return Err(WebError::from_response(response));
+    };
+    Ok(Json(PasswordChallenge {
+        challenge: challenge.expose().to_owned(),
+    }))
+}
+
+#[derive(Deserialize)]
+struct FinishPasswordLoginInput {
+    challenge: SensitiveString,
+    totp_code: SensitiveString,
+    return_to: Option<String>,
+    return_mapping: Option<String>,
+}
+
+async fn finish_password_login(
+    State(state): State<SiteState>,
+    headers: HeaderMap,
+    Json(input): Json<FinishPasswordLoginInput>,
+) -> WebResult<Response> {
+    validate_header_mutation(&state, &headers)?;
+    let response = request_daemon(
+        &state.daemon_socket,
+        RemoteCommand::FinishPasswordAuthentication {
+            site_id: state.site_id.clone(),
+            challenge: input.challenge,
+            totp_code: input.totp_code,
         },
     )
     .await?;
@@ -480,11 +486,16 @@ async fn login(
     else {
         return Err(WebError::from_response(response));
     };
-    authenticated_response(
+    let return_to = validated_return_target(
+        &state,
+        input.return_mapping.as_deref(),
+        input.return_to.as_deref(),
+    )
+    .await;
+    authenticated_fetch_response(
         &session,
         expires_unix,
         max_age_seconds,
-        None,
         return_to.as_deref(),
     )
 }
@@ -1092,7 +1103,6 @@ struct PortalTemplate {
     mappings: Vec<PortalMapping>,
     passkeys_enabled: bool,
     password_totp_enabled: bool,
-    recovery_codes_enabled: bool,
     return_to: String,
     return_mapping: String,
     csrf: String,
@@ -1109,12 +1119,6 @@ struct EnrollmentTemplate {
     passkeys_enabled: bool,
     password_totp_enabled: bool,
     csrf: String,
-}
-
-#[derive(Template)]
-#[template(path = "recovery.html")]
-struct RecoveryTemplate {
-    recovery_codes: Vec<String>,
 }
 
 type WebResult<T> = Result<T, WebError>;
@@ -1530,37 +1534,93 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn login_requires_origin_and_csrf_then_sets_secure_host_cookie() {
+    async fn password_login_starts_a_site_and_guest_bound_challenge() {
         let temporary = tempfile::tempdir().unwrap();
         let socket = temporary.path().join("daemon.sock");
-        let session = SessionToken::generate().unwrap();
+        let challenge = SessionToken::generate().unwrap();
         let daemon = mock_daemon(
             &socket,
-            &RemoteResponse::GuestAuthenticated {
-                session: SensitiveString::new(session.expose()),
-                expires_unix: 2_000_000_000,
-                max_age_seconds: 2_592_000,
+            &RemoteResponse::PasswordAuthenticationStarted {
+                challenge: SensitiveString::new(challenge.expose()),
             },
         );
         let csrf = CsrfToken::generate().unwrap();
-        let body = format!(
-            "guest_id=family&password=correct%20horse%20battery%20staple&factor_kind=totp&factor=123456&csrf={}",
-            csrf.expose()
-        );
+        let body = serde_json::json!({
+            "guest_id": "family",
+            "password": "correct horse battery staple",
+        });
         let response = portal_router(site_state(socket))
             .oneshot(
                 Request::builder()
                     .method(Method::POST)
-                    .uri("/login")
-                    .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .uri("/login/password")
+                    .header(CONTENT_TYPE, "application/json")
                     .header(ORIGIN, format!("https://{ONION}"))
                     .header(COOKIE, format!("{CSRF_COOKIE}={}", csrf.expose()))
-                    .body(Body::from(body))
+                    .header("x-csrf-token", csrf.expose())
+                    .body(Body::from(body.to_string()))
                     .unwrap(),
             )
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(response.headers().get(SET_COOKIE).is_none());
+        let response_body = response.into_body().collect().await.unwrap().to_bytes();
+        let response_body: serde_json::Value = serde_json::from_slice(&response_body).unwrap();
+        assert_eq!(response_body["challenge"], challenge.expose());
+        assert!(matches!(
+            daemon.await.unwrap(),
+            RemoteCommand::StartPasswordAuthentication { site_id, guest_id, password }
+                if site_id.as_str() == "alpha"
+                    && guest_id.as_str() == "family"
+                    && password.expose() == "correct horse battery staple"
+        ));
+    }
+
+    #[tokio::test]
+    async fn totp_finishes_the_challenge_then_revalidates_the_return_target() {
+        let temporary = tempfile::tempdir().unwrap();
+        let socket = temporary.path().join("daemon.sock");
+        let session = SessionToken::generate().unwrap();
+        let challenge = SessionToken::generate().unwrap();
+        let daemon = mock_daemon_sequence(
+            &socket,
+            &[
+                RemoteResponse::GuestAuthenticated {
+                    session: SensitiveString::new(session.expose()),
+                    expires_unix: 2_000_000_000,
+                    max_age_seconds: 2_592_000,
+                },
+                RemoteResponse::MappingReturnValidated,
+            ],
+        );
+        let csrf = CsrfToken::generate().unwrap();
+        let target = format!("https://{ONION}:8443/api/items?q=one%20two");
+        let body = serde_json::json!({
+            "challenge": challenge.expose(),
+            "totp_code": "123456",
+            "return_mapping": "app",
+            "return_to": &target,
+        });
+        let response = portal_router(site_state(socket))
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/login/totp")
+                    .header(CONTENT_TYPE, "application/json")
+                    .header(ORIGIN, format!("https://{ONION}"))
+                    .header(COOKIE, format!("{CSRF_COOKIE}={}", csrf.expose()))
+                    .header("x-csrf-token", csrf.expose())
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert_eq!(
+            response.headers().get("x-torkitten-return-to").unwrap(),
+            &target
+        );
         let set_cookie = response
             .headers()
             .get(SET_COOKIE)
@@ -1570,87 +1630,37 @@ mod tests {
         assert!(set_cookie.starts_with("__Host-torkitten_session="));
         assert!(set_cookie.contains("Max-Age=2592000"));
         assert!(set_cookie.contains("; Secure; HttpOnly; SameSite=Strict"));
-        assert!(matches!(
-            daemon.await.unwrap(),
-            RemoteCommand::AuthenticateGuest {
-                guest_id,
-                second_factor: GuestSecondFactor::Totp(_),
-                ..
-            } if guest_id.as_str() == "family"
-        ));
-    }
-
-    #[tokio::test]
-    async fn password_login_returns_to_a_revalidated_mapping_path() {
-        let temporary = tempfile::tempdir().unwrap();
-        let socket = temporary.path().join("daemon.sock");
-        let session = SessionToken::generate().unwrap();
-        let daemon = mock_daemon_sequence(
-            &socket,
-            &[
-                RemoteResponse::MappingReturnValidated,
-                RemoteResponse::GuestAuthenticated {
-                    session: SensitiveString::new(session.expose()),
-                    expires_unix: 2_000_000_000,
-                    max_age_seconds: 2_592_000,
-                },
-            ],
-        );
-        let csrf = CsrfToken::generate().unwrap();
-        let target = format!("https://{ONION}:8443/api/items?q=one%20two");
-        let body = url::form_urlencoded::Serializer::new(String::new())
-            .append_pair("guest_id", "family")
-            .append_pair("password", "correct horse battery staple")
-            .append_pair("factor_kind", "totp")
-            .append_pair("factor", "123456")
-            .append_pair("return_mapping", "app")
-            .append_pair("return_to", &target)
-            .append_pair("csrf", csrf.expose())
-            .finish();
-        let response = portal_router(site_state(socket))
-            .oneshot(
-                Request::builder()
-                    .method(Method::POST)
-                    .uri("/login")
-                    .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
-                    .header(ORIGIN, format!("https://{ONION}"))
-                    .header(COOKIE, format!("{CSRF_COOKIE}={}", csrf.expose()))
-                    .body(Body::from(body))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::SEE_OTHER);
-        assert_eq!(response.headers().get(LOCATION).unwrap(), &target);
         let commands = daemon.await.unwrap();
         assert!(matches!(
             &commands[0],
-            RemoteCommand::ValidateMappingReturn { mapping_id, virtual_port, .. }
-                if mapping_id.as_str() == "app" && *virtual_port == 8443
+            RemoteCommand::FinishPasswordAuthentication {
+                challenge: received_challenge,
+                totp_code,
+                ..
+            } if received_challenge.expose() == challenge.expose()
+                && totp_code.expose() == "123456"
         ));
         assert!(matches!(
             &commands[1],
-            RemoteCommand::AuthenticateGuest { guest_id, .. }
-                if guest_id.as_str() == "family"
+            RemoteCommand::ValidateMappingReturn { mapping_id, virtual_port, .. }
+                if mapping_id.as_str() == "app" && *virtual_port == 8443
         ));
     }
 
     #[tokio::test]
     async fn login_rejects_wrong_origin_before_contacting_daemon() {
         let csrf = CsrfToken::generate().unwrap();
-        let body = format!(
-            "guest_id=family&password=password&factor_kind=totp&factor=123456&csrf={}",
-            csrf.expose()
-        );
+        let body = serde_json::json!({"guest_id": "family", "password": "password"});
         let response = portal_router(site_state(PathBuf::from("/unused/daemon.sock")))
             .oneshot(
                 Request::builder()
                     .method(Method::POST)
-                    .uri("/login")
-                    .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .uri("/login/password")
+                    .header(CONTENT_TYPE, "application/json")
                     .header(ORIGIN, "https://different.onion")
                     .header(COOKIE, format!("{CSRF_COOKIE}={}", csrf.expose()))
-                    .body(Body::from(body))
+                    .header("x-csrf-token", csrf.expose())
+                    .body(Body::from(body.to_string()))
                     .unwrap(),
             )
             .await
@@ -1752,7 +1762,6 @@ mod tests {
             mappings: Vec::new(),
             passkeys_enabled: false,
             password_totp_enabled: true,
-            recovery_codes_enabled: false,
             return_to: String::new(),
             return_mapping: String::new(),
             csrf: "csrf".to_owned(),
@@ -1760,8 +1769,10 @@ mod tests {
         .render()
         .unwrap();
         assert!(!password_only.contains("data-passkey-login"));
-        assert!(password_only.contains("Use password and a second factor"));
-        assert!(!password_only.contains("value=\"recovery\""));
+        assert!(password_only.contains("Use password and authenticator app"));
+        assert!(password_only.contains("data-password-step"));
+        assert!(password_only.contains("data-totp-step hidden"));
+        assert!(!password_only.to_lowercase().contains("recovery"));
 
         let passkey_only = PortalTemplate {
             display_name: "Alpha".to_owned(),
@@ -1770,15 +1781,47 @@ mod tests {
             mappings: Vec::new(),
             passkeys_enabled: true,
             password_totp_enabled: false,
-            recovery_codes_enabled: false,
             return_to: String::new(),
             return_mapping: String::new(),
             csrf: "csrf".to_owned(),
         }
         .render()
         .unwrap();
-        assert!(passkey_only.contains("data-passkey-login"));
-        assert!(!passkey_only.contains("Use password and a second factor"));
+        assert!(passkey_only.contains("data-passkey-login=\"platform\""));
+        assert!(passkey_only.contains("data-passkey-login=\"security-key\""));
+        assert!(!passkey_only.contains("Use password and authenticator app"));
+    }
+
+    #[test]
+    fn browser_code_prefers_platform_passkeys_and_offers_hardware_keys_explicitly() {
+        let script = include_str!("../assets/app.js");
+        assert!(script.contains("authenticatorAttachment: preference === \"security-key\""));
+        assert!(script.contains("? \"cross-platform\" : \"platform\""));
+        assert!(script.contains("? \"security-key\" : \"client-device\""));
+        assert!(script.contains("/login/password"));
+        assert!(script.contains("/login/totp"));
+        assert!(!script.to_lowercase().contains("recovery"));
+    }
+
+    #[test]
+    fn enrollment_separates_password_totp_and_authenticator_types() {
+        let page = EnrollmentTemplate {
+            guest_display_name: "Family".to_owned(),
+            device_display_name: "Phone".to_owned(),
+            expires_unix: 2_000_000_000,
+            totp_secret: Some("TOTPSECRET".to_owned()),
+            totp_uri: Some("otpauth://totp/example".to_owned()),
+            passkeys_enabled: true,
+            password_totp_enabled: true,
+            csrf: "csrf".to_owned(),
+        }
+        .render()
+        .unwrap();
+        assert!(page.contains("data-passkey-enroll=\"platform\""));
+        assert!(page.contains("data-passkey-enroll=\"security-key\""));
+        assert!(page.contains("data-enrollment-password-step"));
+        assert!(page.contains("data-enrollment-totp-step hidden"));
+        assert!(!page.to_lowercase().contains("recovery"));
     }
 
     #[tokio::test]

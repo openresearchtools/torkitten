@@ -27,14 +27,14 @@ use tokio::{
     net::{UnixListener, UnixStream},
 };
 use torkitten_auth::{
-    CsrfToken, EnrollmentToken, PasskeyError, PasskeyService, PublicKeyCredential, RecoveryCode,
-    RegisterPublicKeyCredential, SessionToken, generate_recovery_codes, hash_password,
-    passkey_credential_id, verify_password,
+    CsrfToken, EnrollmentToken, PasskeyError, PasskeyService, PublicKeyCredential,
+    RegisterPublicKeyCredential, SessionToken, hash_password, passkey_credential_id,
+    verify_password,
 };
 use torkitten_core::{
-    AccountOwner, AdminCommand, AdminResponse, ComponentAction, ComponentState, Device, DeviceId,
-    GatewayConfig, GatewayMode, GatewayStatus, Guest, GuestAccessStatus, GuestId,
-    GuestSecondFactor, ManagedComponent, Mapping, MappingId, MappingTarget, PortalContext,
+    AccountOwner, AdminCommand, AdminResponse, AdministratorUsername, ComponentAction,
+    ComponentState, Device, DeviceId, GatewayConfig, GatewayMode, GatewayStatus, Guest,
+    GuestAccessStatus, GuestId, ManagedComponent, Mapping, MappingId, MappingTarget, PortalContext,
     PortalMapping, PublishedSite, RemoteCommand, RemoteResponse, Site, SiteId, SiteStatus,
 };
 use torkitten_proxy::{CaddyError, CaddyInstance, CaddyPaths, ProxyConfig, ProxySite};
@@ -53,7 +53,9 @@ const DEVICE_ENROLLMENT_SECONDS: i64 = 15 * 60;
 const ADMIN_SESSION_SECONDS: i64 = 30 * 86_400;
 const FRESH_AUTHENTICATION_SECONDS: i64 = 600;
 const PASSKEY_CEREMONY_SECONDS: i64 = 300;
+const PASSWORD_AUTHENTICATION_SECONDS: i64 = 120;
 const MAXIMUM_PENDING_PASSKEY_CEREMONIES: usize = 1024;
+const MAXIMUM_PENDING_PASSWORD_AUTHENTICATIONS: usize = 1024;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DaemonPaths {
@@ -281,6 +283,7 @@ pub struct Daemon<S> {
     passkey_services: HashMap<SiteId, SitePasskeyService>,
     pending_passkey_enrollments: HashMap<[u8; 32], PendingPasskeyEnrollment>,
     pending_passkey_authentications: HashMap<[u8; 32], PendingPasskeyAuthentication>,
+    pending_password_authentications: HashMap<[u8; 32], PendingPasswordAuthentication>,
 }
 
 #[derive(Clone, Debug)]
@@ -311,6 +314,13 @@ struct PendingPasskeyEnrollment {
 }
 
 struct PendingPasskeyAuthentication {
+    site_id: SiteId,
+    guest_id: GuestId,
+    account_id: Uuid,
+    expires_unix: i64,
+}
+
+struct PendingPasswordAuthentication {
     site_id: SiteId,
     guest_id: GuestId,
     account_id: Uuid,
@@ -362,6 +372,7 @@ impl<S: ServiceControl> Daemon<S> {
             passkey_services: HashMap::new(),
             pending_passkey_enrollments: HashMap::new(),
             pending_passkey_authentications: HashMap::new(),
+            pending_password_authentications: HashMap::new(),
         })
     }
 
@@ -475,18 +486,10 @@ impl<S: ServiceControl> Daemon<S> {
                 totp_code.expose(),
                 now_unix,
             ),
-            RemoteCommand::AuthenticateGuest {
-                site_id,
-                guest_id,
-                password,
-                second_factor,
-            } => self.authenticate_remote_guest(
-                &site_id,
-                &guest_id,
-                password.expose(),
-                &second_factor,
-                now_unix,
-            ),
+            command @ (RemoteCommand::StartPasswordAuthentication { .. }
+            | RemoteCommand::FinishPasswordAuthentication { .. }) => {
+                self.handle_remote_password(command, now_unix)
+            }
             RemoteCommand::LogoutGuest { site_id, session } => {
                 self.authorized_remote_guest(&site_id, session.expose(), now_unix)?;
                 let session = SessionToken::parse(session.expose().to_owned())
@@ -570,6 +573,33 @@ impl<S: ServiceControl> Daemon<S> {
                 now_unix,
             ),
             _ => unreachable!("non-passkey command dispatched to passkey handler"),
+        }
+    }
+
+    fn handle_remote_password(
+        &mut self,
+        command: RemoteCommand,
+        now_unix: i64,
+    ) -> Result<RemoteResponse, DaemonError> {
+        match command {
+            RemoteCommand::StartPasswordAuthentication {
+                site_id,
+                guest_id,
+                password,
+            } => {
+                self.start_password_authentication(&site_id, &guest_id, password.expose(), now_unix)
+            }
+            RemoteCommand::FinishPasswordAuthentication {
+                site_id,
+                challenge,
+                totp_code,
+            } => self.finish_password_authentication(
+                &site_id,
+                challenge.expose(),
+                totp_code.expose(),
+                now_unix,
+            ),
+            _ => unreachable!("non-password command dispatched to password handler"),
         }
     }
 
@@ -734,9 +764,9 @@ impl<S: ServiceControl> Daemon<S> {
             guest_id: guest.id.clone(),
         };
         let existing = self.store.auth_account_for_owner(&owner)?;
-        let (account_id, recovery_codes, created_account) = if let Some(account) = existing {
+        let (account_id, created_account) = if let Some(account) = existing {
             Self::verify_password_totp(&account, password, totp_code, now_unix)?;
-            (account.id, Vec::new(), false)
+            (account.id, false)
         } else {
             let factor = self
                 .store
@@ -750,11 +780,6 @@ impl<S: ServiceControl> Daemon<S> {
                 return Err(DaemonError::RemoteUnauthorized);
             }
             let password_hash = hash_password(password)?;
-            let recovery_codes = if policy.recovery_codes_enabled {
-                generate_recovery_codes(10)?
-            } else {
-                Vec::new()
-            };
             let mut recovery_pepper = [0_u8; 32];
             getrandom::fill(&mut recovery_pepper).map_err(DaemonError::Random)?;
             let account_id = Uuid::new_v4();
@@ -766,20 +791,7 @@ impl<S: ServiceControl> Daemon<S> {
                 Some(&factor.totp_secret),
                 &recovery_pepper,
             )?;
-            if !recovery_codes.is_empty() {
-                let digests = recovery_codes
-                    .iter()
-                    .map(|code| code.digest(&recovery_pepper))
-                    .collect::<Vec<_>>();
-                if let Err(error) = self
-                    .store
-                    .replace_recovery_codes(account_id, &digests, now_unix)
-                {
-                    self.store.remove_auth_account(account_id)?;
-                    return Err(error.into());
-                }
-            }
-            (account_id, recovery_codes, true)
+            (account_id, true)
         };
         match self.store.consume_device_enrollment(&token, now_unix) {
             Ok(Some(_)) => {}
@@ -796,7 +808,7 @@ impl<S: ServiceControl> Daemon<S> {
                 return Err(error.into());
             }
         }
-        self.completed_enrollment_response(account_id, &recovery_codes, now_unix)
+        self.completed_enrollment_response(account_id, now_unix)
     }
 
     fn start_passkey_enrollment(
@@ -808,7 +820,7 @@ impl<S: ServiceControl> Daemon<S> {
         if !self.store.remote_access_policy()?.passkeys_enabled {
             return Err(DaemonError::RemoteAuthenticationMethodDisabled);
         }
-        self.purge_pending_passkey_ceremonies(now_unix);
+        self.purge_pending_authentication_ceremonies(now_unix);
         if self.pending_passkey_enrollments.len() >= MAXIMUM_PENDING_PASSKEY_CEREMONIES {
             return Err(PasskeyError::TooManyCeremonies.into());
         }
@@ -973,7 +985,7 @@ impl<S: ServiceControl> Daemon<S> {
                 };
             }
         }
-        self.completed_enrollment_response(pending.account_id, &[], now_unix)
+        self.completed_enrollment_response(pending.account_id, now_unix)
     }
 
     fn start_passkey_authentication(
@@ -985,7 +997,7 @@ impl<S: ServiceControl> Daemon<S> {
         if !self.store.remote_access_policy()?.passkeys_enabled {
             return Err(DaemonError::RemoteAuthenticationMethodDisabled);
         }
-        self.purge_pending_passkey_ceremonies(now_unix);
+        self.purge_pending_authentication_ceremonies(now_unix);
         if self.pending_passkey_authentications.len() >= MAXIMUM_PENDING_PASSKEY_CEREMONIES {
             return Err(PasskeyError::TooManyCeremonies.into());
         }
@@ -1138,18 +1150,22 @@ impl<S: ServiceControl> Daemon<S> {
             .service)
     }
 
-    fn purge_pending_passkey_ceremonies(&mut self, now_unix: i64) {
+    fn purge_pending_authentication_ceremonies(&mut self, now_unix: i64) {
         self.pending_passkey_enrollments
             .retain(|_, pending| pending.expires_unix > now_unix);
         self.pending_passkey_authentications
             .retain(|_, pending| pending.expires_unix > now_unix);
+        self.pending_password_authentications
+            .retain(|_, pending| pending.expires_unix > now_unix);
     }
 
-    fn invalidate_site_passkey_ceremonies(&mut self, site_id: &SiteId) {
+    fn invalidate_site_authentication_ceremonies(&mut self, site_id: &SiteId) {
         self.passkey_services.remove(site_id);
         self.pending_passkey_enrollments
             .retain(|_, pending| pending.site_id != *site_id);
         self.pending_passkey_authentications
+            .retain(|_, pending| pending.site_id != *site_id);
+        self.pending_password_authentications
             .retain(|_, pending| pending.site_id != *site_id);
     }
 
@@ -1168,14 +1184,17 @@ impl<S: ServiceControl> Daemon<S> {
         Ok(())
     }
 
-    fn authenticate_remote_guest(
+    fn start_password_authentication(
         &mut self,
         site_id: &SiteId,
         guest_id: &GuestId,
         password: &str,
-        second_factor: &GuestSecondFactor,
         now_unix: i64,
     ) -> Result<RemoteResponse, DaemonError> {
+        self.purge_pending_authentication_ceremonies(now_unix);
+        if self.pending_password_authentications.len() >= MAXIMUM_PENDING_PASSWORD_AUTHENTICATIONS {
+            return Err(DaemonError::TooManyPasswordAuthentications);
+        }
         self.required_remote_site(site_id)?;
         let policy = self.store.remote_access_policy()?;
         if !policy.password_totp_enabled {
@@ -1199,35 +1218,63 @@ impl<S: ServiceControl> Daemon<S> {
         if !verify_password(password, password_hash)? {
             return Err(DaemonError::RemoteUnauthorized);
         }
-        match second_factor {
-            GuestSecondFactor::Totp(code) => {
-                let secret = account
-                    .totp_secret
-                    .as_ref()
-                    .ok_or(DaemonError::RemoteUnauthorized)?;
-                if !secret.verify(code.expose(), now_unix, 1).unwrap_or(false) {
-                    return Err(DaemonError::RemoteUnauthorized);
-                }
-            }
-            GuestSecondFactor::RecoveryCode(code) => {
-                if !policy.recovery_codes_enabled {
-                    return Err(DaemonError::RemoteAuthenticationMethodDisabled);
-                }
-                let code = RecoveryCode::parse(code.expose())
-                    .map_err(|_| DaemonError::RemoteUnauthorized)?;
-                let pepper: &[u8; 32] = account
-                    .recovery_pepper
-                    .as_slice()
-                    .try_into()
-                    .map_err(|_| DaemonError::RemoteUnauthorized)?;
-                let digest = code.digest(pepper);
-                if !self
-                    .store
-                    .consume_recovery_code(account.id, &digest, now_unix)?
-                {
-                    return Err(DaemonError::RemoteUnauthorized);
-                }
-            }
+        if account.totp_secret.is_none() {
+            return Err(DaemonError::RemoteUnauthorized);
+        }
+        let challenge = SessionToken::generate()?;
+        let expires_unix = now_unix
+            .checked_add(PASSWORD_AUTHENTICATION_SECONDS)
+            .ok_or(DaemonError::InvalidTimestamp(now_unix))?;
+        self.pending_password_authentications.insert(
+            challenge.digest(),
+            PendingPasswordAuthentication {
+                site_id: site_id.clone(),
+                guest_id: guest_id.clone(),
+                account_id: account.id,
+                expires_unix,
+            },
+        );
+        Ok(RemoteResponse::PasswordAuthenticationStarted {
+            challenge: torkitten_core::SensitiveString::new(challenge.expose()),
+        })
+    }
+
+    fn finish_password_authentication(
+        &mut self,
+        site_id: &SiteId,
+        encoded_challenge: &str,
+        totp_code: &str,
+        now_unix: i64,
+    ) -> Result<RemoteResponse, DaemonError> {
+        self.required_remote_site(site_id)?;
+        if !self.store.remote_access_policy()?.password_totp_enabled {
+            return Err(DaemonError::RemoteAuthenticationMethodDisabled);
+        }
+        let challenge = SessionToken::parse(encoded_challenge.to_owned())
+            .map_err(|_| DaemonError::RemoteUnauthorized)?;
+        let pending = self
+            .pending_password_authentications
+            .remove(&challenge.digest())
+            .filter(|pending| pending.expires_unix > now_unix && pending.site_id == *site_id)
+            .ok_or(DaemonError::RemoteUnauthorized)?;
+        let guest = self.required_guest(site_id, &pending.guest_id)?;
+        if !guest.enabled {
+            return Err(DaemonError::RemoteUnauthorized);
+        }
+        let account = self
+            .store
+            .auth_account_for_owner(&AccountOwner::Guest {
+                site_id: site_id.clone(),
+                guest_id: pending.guest_id,
+            })?
+            .filter(|account| account.id == pending.account_id)
+            .ok_or(DaemonError::RemoteUnauthorized)?;
+        let secret = account
+            .totp_secret
+            .as_ref()
+            .ok_or(DaemonError::RemoteUnauthorized)?;
+        if !secret.verify(totp_code, now_unix, 1).unwrap_or(false) {
+            return Err(DaemonError::RemoteUnauthorized);
         }
         let (session, expires_unix, max_age_seconds) =
             self.create_remote_session(account.id, now_unix)?;
@@ -1293,7 +1340,6 @@ impl<S: ServiceControl> Daemon<S> {
     fn completed_enrollment_response(
         &self,
         account_id: Uuid,
-        recovery_codes: &[RecoveryCode],
         now_unix: i64,
     ) -> Result<RemoteResponse, DaemonError> {
         let (session, expires_unix, max_age_seconds) =
@@ -1302,10 +1348,6 @@ impl<S: ServiceControl> Daemon<S> {
             session: torkitten_core::SensitiveString::new(session.expose()),
             expires_unix,
             max_age_seconds,
-            recovery_codes: recovery_codes
-                .iter()
-                .map(|code| torkitten_core::SensitiveString::new(code.expose()))
-                .collect(),
         })
     }
 
@@ -1439,25 +1481,34 @@ impl<S: ServiceControl> Daemon<S> {
                     expires_unix,
                 })
             }
-            AdminCommand::Initialize { password } => {
+            AdminCommand::Initialize { username, password } => {
                 if self.initialized()? {
                     return Err(DaemonError::AlreadyInitialized);
                 }
+                let username = AdministratorUsername::new(username.as_str())?;
                 let password = hash_password(password.expose())?;
                 let mut recovery_pepper = [0_u8; 32];
                 getrandom::fill(&mut recovery_pepper).map_err(DaemonError::Random)?;
                 self.store.create_auth_account(
                     Uuid::new_v4(),
                     &AccountOwner::Administrator,
-                    "Administrator",
+                    username.as_str(),
                     Some(&password),
                     None,
                     &recovery_pepper,
                 )?;
                 Ok(AdminResponse::Ok)
             }
-            AdminCommand::AuthenticateAdministrator { password } => {
-                self.authenticate_administrator(password.expose(), now_unix)
+            AdminCommand::ResetAdministrator { username, password } => {
+                let username = AdministratorUsername::new(username.as_str())?;
+                let password = hash_password(password.expose())?;
+                self.store
+                    .reset_administrator_credentials(&username, &password)?;
+                Ok(AdminResponse::Ok)
+            }
+            AdminCommand::AuthenticateAdministrator { username, password } => {
+                let username = AdministratorUsername::new(username.as_str())?;
+                self.authenticate_administrator(username.as_str(), password.expose(), now_unix)
             }
             AdminCommand::ValidateAdministratorSession { session } => {
                 let fresh = self.authorize_administrator(session.expose(), None, now_unix)?;
@@ -1499,7 +1550,7 @@ impl<S: ServiceControl> Daemon<S> {
                 let mut site = self.required_site(&site_id)?;
                 site.display_name = display_name;
                 let response = self.put_existing_site(&site, now_unix)?;
-                self.invalidate_site_passkey_ceremonies(&site_id);
+                self.invalidate_site_authentication_ceremonies(&site_id);
                 Ok(response)
             }
             AdminCommand::RotateSite {
@@ -1509,7 +1560,7 @@ impl<S: ServiceControl> Daemon<S> {
                 let candidate = self.take_candidate(candidate_id.expose(), now_unix)?;
                 let response =
                     self.rotate_generated_site(&site_id, &candidate.identity, now_unix)?;
-                self.invalidate_site_passkey_ceremonies(&site_id);
+                self.invalidate_site_authentication_ceremonies(&site_id);
                 Ok(response)
             }
             AdminCommand::RemoveSite { site_id } => {
@@ -1524,21 +1575,21 @@ impl<S: ServiceControl> Daemon<S> {
                 self.remove_runtime_tls(&site_id)?;
                 self.tor.remove_site_state(&site_id)?;
                 self.bootstrap_windows.remove(&site_id);
-                self.invalidate_site_passkey_ceremonies(&site_id);
+                self.invalidate_site_authentication_ceremonies(&site_id);
                 Ok(AdminResponse::Ok)
             }
             AdminCommand::SetSiteEnabled { site_id, enabled } => {
                 let mut site = self.required_site(&site_id)?;
                 site.enabled = enabled;
                 let response = self.put_existing_site(&site, now_unix)?;
-                self.invalidate_site_passkey_ceremonies(&site_id);
+                self.invalidate_site_authentication_ceremonies(&site_id);
                 Ok(response)
             }
             AdminCommand::StopSite { site_id } => {
                 let mut site = self.required_site(&site_id)?;
                 site.enabled = false;
                 let response = self.put_existing_site(&site, now_unix)?;
-                self.invalidate_site_passkey_ceremonies(&site_id);
+                self.invalidate_site_authentication_ceremonies(&site_id);
                 Ok(response)
             }
             AdminCommand::RestartSite { site_id } => {
@@ -1617,6 +1668,20 @@ impl<S: ServiceControl> Daemon<S> {
                 if !self.store.remove_guest(&site_id, &guest_id)? {
                     return Err(StoreError::GuestNotFound { site_id, guest_id }.into());
                 }
+                Ok(AdminResponse::Ok)
+            }
+            AdminCommand::ResetGuestAuthentication { site_id, guest_id } => {
+                self.required_guest(&site_id, &guest_id)?;
+                self.store.reset_guest_authentication(&site_id, &guest_id)?;
+                self.pending_passkey_enrollments.retain(|_, pending| {
+                    pending.site_id != site_id || pending.guest_id != guest_id
+                });
+                self.pending_passkey_authentications.retain(|_, pending| {
+                    pending.site_id != site_id || pending.guest_id != guest_id
+                });
+                self.pending_password_authentications.retain(|_, pending| {
+                    pending.site_id != site_id || pending.guest_id != guest_id
+                });
                 Ok(AdminResponse::Ok)
             }
             AdminCommand::SetGuestPermissions {
@@ -1701,16 +1766,23 @@ impl<S: ServiceControl> Daemon<S> {
                 Ok(AdminResponse::Ok)
             }
             AdminCommand::SetRemoteAccessPolicy { policy } => {
+                policy.validate()?;
                 self.store.set_remote_access_policy(policy)?;
                 if !policy.passkeys_enabled {
                     self.pending_passkey_enrollments.clear();
                     self.pending_passkey_authentications.clear();
+                }
+                if !policy.password_totp_enabled {
+                    self.pending_password_authentications.clear();
                 }
                 Ok(AdminResponse::Ok)
             }
             AdminCommand::EmergencyDisable => {
                 self.store.set_emergency_disabled(true)?;
                 self.bootstrap_windows.clear();
+                self.pending_passkey_enrollments.clear();
+                self.pending_passkey_authentications.clear();
+                self.pending_password_authentications.clear();
                 self.maintenance_enabled = false;
                 self.stop_publication()?;
                 Ok(AdminResponse::Ok)
@@ -1987,6 +2059,7 @@ impl<S: ServiceControl> Daemon<S> {
 
     fn authenticate_administrator(
         &self,
+        username: &str,
         password: &str,
         now_unix: i64,
     ) -> Result<AdminResponse, DaemonError> {
@@ -1994,6 +2067,9 @@ impl<S: ServiceControl> Daemon<S> {
             .store
             .auth_account_for_owner(&AccountOwner::Administrator)?
             .ok_or(DaemonError::InvalidCredentials)?;
+        if account.display_name != username {
+            return Err(DaemonError::InvalidCredentials);
+        }
         let password_hash = account
             .password_hash
             .as_ref()
@@ -2783,6 +2859,8 @@ pub enum DaemonError {
     RemoteUnauthorized,
     #[error("this remote authentication method is disabled by local policy")]
     RemoteAuthenticationMethodDisabled,
+    #[error("too many password authentication challenges are pending")]
+    TooManyPasswordAuthentications,
     #[error("certificate bootstrap resource was not found")]
     BootstrapNotFound,
     #[error("device enrollment was not found or has expired")]
@@ -2866,6 +2944,7 @@ impl DaemonError {
             Self::EmergencyLatchSet => "emergency_disabled",
             Self::RemoteUnavailable => "remote_unavailable",
             Self::RemoteAuthenticationMethodDisabled => "authentication_method_disabled",
+            Self::TooManyPasswordAuthentications => "too_many_authentications",
             Self::BootstrapNotFound | Self::EnrollmentNotFound => "not_found",
             Self::CandidateNotFound | Self::CandidateExpired => "invalid_candidate",
             Self::Validation(_) => "validation_failed",
@@ -3014,6 +3093,7 @@ mod tests {
         assert!(matches!(
             daemon.handle(
                 AdminCommand::Initialize {
+                    username: AdministratorUsername::new("admin").unwrap(),
                     password: SensitiveString::new("correct horse battery staple"),
                 },
                 NOW,
@@ -3032,6 +3112,7 @@ mod tests {
         initialize(&mut daemon);
         let response = daemon.handle(
             AdminCommand::Initialize {
+                username: AdministratorUsername::new("other-admin").unwrap(),
                 password: SensitiveString::new("another correct horse password"),
             },
             NOW,
@@ -3049,7 +3130,18 @@ mod tests {
         assert!(matches!(
             daemon.handle(
                 AdminCommand::AuthenticateAdministrator {
+                    username: AdministratorUsername::new("admin").unwrap(),
                     password: SensitiveString::new("wrong password value"),
+                },
+                NOW,
+            ),
+            AdminResponse::Error { code, .. } if code == "unauthorized"
+        ));
+        assert!(matches!(
+            daemon.handle(
+                AdminCommand::AuthenticateAdministrator {
+                    username: AdministratorUsername::new("different-admin").unwrap(),
+                    password: SensitiveString::new("correct horse battery staple"),
                 },
                 NOW,
             ),
@@ -3057,6 +3149,7 @@ mod tests {
         ));
         let AdminResponse::AdministratorAuthenticated { session, csrf, .. } = daemon.handle(
             AdminCommand::AuthenticateAdministrator {
+                username: AdministratorUsername::new("admin").unwrap(),
                 password: SensitiveString::new("correct horse battery staple"),
             },
             NOW,
@@ -3102,6 +3195,58 @@ mod tests {
                 NOW + 2,
             ),
             AdminResponse::Error { code, .. } if code == "unauthorized"
+        ));
+    }
+
+    #[test]
+    fn protected_local_control_can_reset_the_administrator_and_all_sessions() {
+        let (_temporary, mut daemon, _services) = daemon();
+        initialize(&mut daemon);
+        let AdminResponse::AdministratorAuthenticated { session, .. } = daemon.handle(
+            AdminCommand::AuthenticateAdministrator {
+                username: AdministratorUsername::new("admin").unwrap(),
+                password: SensitiveString::new("correct horse battery staple"),
+            },
+            NOW,
+        ) else {
+            panic!("expected authenticated session");
+        };
+        assert!(matches!(
+            daemon.handle(
+                AdminCommand::ResetAdministrator {
+                    username: AdministratorUsername::new("replacement-admin").unwrap(),
+                    password: SensitiveString::new("new local administrator password"),
+                },
+                NOW + 1,
+            ),
+            AdminResponse::Ok
+        ));
+        assert!(matches!(
+            daemon.handle(
+                AdminCommand::ValidateAdministratorSession { session },
+                NOW + 2,
+            ),
+            AdminResponse::Error { code, .. } if code == "unauthorized"
+        ));
+        assert!(matches!(
+            daemon.handle(
+                AdminCommand::AuthenticateAdministrator {
+                    username: AdministratorUsername::new("admin").unwrap(),
+                    password: SensitiveString::new("correct horse battery staple"),
+                },
+                NOW + 2,
+            ),
+            AdminResponse::Error { code, .. } if code == "unauthorized"
+        ));
+        assert!(matches!(
+            daemon.handle(
+                AdminCommand::AuthenticateAdministrator {
+                    username: AdministratorUsername::new("replacement-admin").unwrap(),
+                    password: SensitiveString::new("new local administrator password"),
+                },
+                NOW + 2,
+            ),
+            AdminResponse::AdministratorAuthenticated { .. }
         ));
     }
 
@@ -3499,7 +3644,6 @@ mod tests {
         let RemoteResponse::EnrollmentCompleted {
             expires_unix,
             max_age_seconds,
-            recovery_codes,
             ..
         } = response
         else {
@@ -3507,24 +3651,35 @@ mod tests {
         };
         assert_eq!(expires_unix, NOW + 5 + 7 * 86_400);
         assert_eq!(max_age_seconds, 7 * 86_400);
-        assert!(recovery_codes.is_empty());
         assert!(matches!(
-            daemon.handle_remote(
-                RemoteCommand::AuthenticateGuest {
-                    site_id,
-                    guest_id,
-                    password: SensitiveString::new("correct horse battery staple"),
-                    second_factor: GuestSecondFactor::RecoveryCode(SensitiveString::new(
-                        "AAAA-BBBB-CCCC-DDDD",
-                    )),
+            daemon.handle(
+                AdminCommand::SetRemoteAccessPolicy {
+                    policy: torkitten_core::RemoteAccessPolicy {
+                        passkeys_enabled: true,
+                        password_totp_enabled: true,
+                        recovery_codes_enabled: true,
+                        session_days: 7,
+                    },
                 },
                 NOW + 6,
             ),
-            RemoteResponse::Error { code, .. } if code == "authentication_method_disabled"
+            AdminResponse::Error { code, .. } if code == "validation_failed"
+        ));
+        assert!(matches!(
+            daemon.handle_remote(
+                RemoteCommand::StartPasswordAuthentication {
+                    site_id,
+                    guest_id,
+                    password: SensitiveString::new("wrong password value"),
+                },
+                NOW + 6,
+            ),
+            RemoteResponse::Error { code, .. } if code == "unauthorized"
         ));
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn remote_protocol_exposes_only_scoped_portal_access() {
         let (_temporary, mut daemon, _services) = daemon();
         initialize(&mut daemon);
@@ -3558,30 +3713,43 @@ mod tests {
             },
             NOW + 4,
         );
-        let RemoteResponse::EnrollmentCompleted {
-            session,
-            recovery_codes,
-            ..
-        } = response
-        else {
+        let RemoteResponse::EnrollmentCompleted { session, .. } = response else {
             panic!("expected completed enrollment");
         };
-        assert_eq!(recovery_codes.len(), 10);
-        let recovery_code = recovery_codes[0].expose().to_owned();
-        let second_session = match daemon.handle_remote(
-            RemoteCommand::AuthenticateGuest {
+        let challenge = match daemon.handle_remote(
+            RemoteCommand::StartPasswordAuthentication {
                 site_id: site_id.clone(),
                 guest_id: guest_id.clone(),
                 password: SensitiveString::new("correct horse battery staple"),
-                second_factor: GuestSecondFactor::Totp(SensitiveString::new(
-                    totp.code_at(NOW + 5).unwrap(),
-                )),
+            },
+            NOW + 5,
+        ) {
+            RemoteResponse::PasswordAuthenticationStarted { challenge } => challenge,
+            response => panic!("expected password challenge: {response:?}"),
+        };
+        let challenge_value = challenge.expose().to_owned();
+        let second_session = match daemon.handle_remote(
+            RemoteCommand::FinishPasswordAuthentication {
+                site_id: site_id.clone(),
+                challenge,
+                totp_code: SensitiveString::new(totp.code_at(NOW + 5).unwrap()),
             },
             NOW + 5,
         ) {
             RemoteResponse::GuestAuthenticated { session, .. } => session,
             response => panic!("expected second session: {response:?}"),
         };
+        assert!(matches!(
+            daemon.handle_remote(
+                RemoteCommand::FinishPasswordAuthentication {
+                    site_id: site_id.clone(),
+                    challenge: SensitiveString::new(challenge_value),
+                    totp_code: SensitiveString::new(totp.code_at(NOW + 5).unwrap()),
+                },
+                NOW + 5,
+            ),
+            RemoteResponse::Error { code, .. } if code == "unauthorized"
+        ));
         assert!(matches!(
             daemon.handle_remote(
                 RemoteCommand::LogoutOtherGuestSessions {
@@ -3614,7 +3782,55 @@ mod tests {
             RemoteResponse::Error { code, .. } if code == "not_found"
         ));
         assert_remote_portal_access(&mut daemon, &site_id, &guest_id, session.expose());
-        assert_remote_login_and_logout(&mut daemon, &site_id, &guest_id, &totp, &recovery_code);
+        assert_remote_login_and_logout(&mut daemon, &site_id, &guest_id, &totp);
+        let pending_before_reset = match daemon.handle_remote(
+            RemoteCommand::StartPasswordAuthentication {
+                site_id: site_id.clone(),
+                guest_id: guest_id.clone(),
+                password: SensitiveString::new("correct horse battery staple"),
+            },
+            NOW + 10,
+        ) {
+            RemoteResponse::PasswordAuthenticationStarted { challenge } => challenge,
+            response => panic!("expected challenge before reset: {response:?}"),
+        };
+        assert!(matches!(
+            daemon.handle(
+                AdminCommand::ResetGuestAuthentication {
+                    site_id: site_id.clone(),
+                    guest_id: guest_id.clone(),
+                },
+                NOW + 11,
+            ),
+            AdminResponse::Ok
+        ));
+        assert_eq!(daemon.store.devices(&site_id, &guest_id).unwrap().len(), 1);
+        assert_eq!(
+            daemon.store.guest_permissions(&site_id, &guest_id).unwrap(),
+            [MappingId::new("app").unwrap()]
+        );
+        assert!(matches!(
+            daemon.handle_remote(
+                RemoteCommand::FinishPasswordAuthentication {
+                    site_id: site_id.clone(),
+                    challenge: pending_before_reset,
+                    totp_code: SensitiveString::new(totp.code_at(NOW + 12).unwrap()),
+                },
+                NOW + 12,
+            ),
+            RemoteResponse::Error { code, .. } if code == "unauthorized"
+        ));
+        assert!(matches!(
+            daemon.handle_remote(
+                RemoteCommand::StartPasswordAuthentication {
+                    site_id,
+                    guest_id,
+                    password: SensitiveString::new("correct horse battery staple"),
+                },
+                NOW + 12,
+            ),
+            RemoteResponse::Error { code, .. } if code == "unauthorized"
+        ));
     }
 
     #[test]
@@ -3795,16 +4011,23 @@ mod tests {
         site_id: &SiteId,
         guest_id: &GuestId,
         totp: &torkitten_auth::TotpSecret,
-        recovery_code: &str,
     ) {
-        let response = daemon.handle_remote(
-            RemoteCommand::AuthenticateGuest {
+        let started = daemon.handle_remote(
+            RemoteCommand::StartPasswordAuthentication {
                 site_id: site_id.clone(),
                 guest_id: guest_id.clone(),
                 password: SensitiveString::new("correct horse battery staple"),
-                second_factor: GuestSecondFactor::Totp(SensitiveString::new(
-                    totp.code_at(NOW + 7).unwrap(),
-                )),
+            },
+            NOW + 7,
+        );
+        let RemoteResponse::PasswordAuthenticationStarted { challenge } = started else {
+            panic!("expected password challenge");
+        };
+        let response = daemon.handle_remote(
+            RemoteCommand::FinishPasswordAuthentication {
+                site_id: site_id.clone(),
+                challenge,
+                totp_code: SensitiveString::new(totp.code_at(NOW + 7).unwrap()),
             },
             NOW + 7,
         );
@@ -3820,34 +4043,6 @@ mod tests {
                 NOW + 8,
             ),
             RemoteResponse::LoggedOut
-        ));
-        assert!(matches!(
-            daemon.handle_remote(
-                RemoteCommand::AuthenticateGuest {
-                    site_id: site_id.clone(),
-                    guest_id: guest_id.clone(),
-                    password: SensitiveString::new("correct horse battery staple"),
-                    second_factor: GuestSecondFactor::RecoveryCode(SensitiveString::new(
-                        recovery_code,
-                    )),
-                },
-                NOW + 9,
-            ),
-            RemoteResponse::GuestAuthenticated { .. }
-        ));
-        assert!(matches!(
-            daemon.handle_remote(
-                RemoteCommand::AuthenticateGuest {
-                    site_id: site_id.clone(),
-                    guest_id: guest_id.clone(),
-                    password: SensitiveString::new("correct horse battery staple"),
-                    second_factor: GuestSecondFactor::RecoveryCode(SensitiveString::new(
-                        recovery_code,
-                    )),
-                },
-                NOW + 10,
-            ),
-            RemoteResponse::Error { code, .. } if code == "unauthorized"
         ));
     }
 

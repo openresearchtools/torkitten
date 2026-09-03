@@ -61,16 +61,14 @@ Current verified partial evidence:
   authenticated using guest key events.
 - The package used for that partial test does not include every uncommitted M1
   change and therefore is not final M1 evidence.
-- Targeted core/vault/daemon/CLI tests passed before the latest admin-web and
-  desktop changes. They must be rerun against the final M1 tree.
+- The complete workspace test run passes 144 tests; its seven ignored
+  real-binary tests were then run separately and all seven passed against the
+  downloaded GitHub Actions Tor and Caddy artifacts.
+- Workspace Clippy passes for all targets with warnings denied. Formatting and
+  diff checks pass.
 
 Required before M1 completion:
 
-- Finish every scoped code path, including remote-web removal of recovery and
-  the administrator username migration.
-- Add focused vault migration/reset and CLI parsing tests.
-- Run formatting, checks, tests, and clippy through the repository's Podman
-  workflow.
 - Build the exact package from the completed tree using the downloaded Actions
   Tor and Caddy artifacts.
 - Install and exercise that exact package in all three existing visible VMs.
@@ -80,50 +78,58 @@ Required before M1 completion:
 
 ### AUTH-001 — Passkey UI selects a hardware security key as the primary path
 
-Status: OPEN (M1)
+Status: IMPLEMENTED; LIVE EVIDENCE PENDING (M1)
 
 Required behavior: default to the platform authenticator/device-unlock passkey;
 offer an external hardware security key only as an explicit secondary choice.
 
-Evidence: pending.
+Source and automated evidence: separate platform and hardware-key controls are
+implemented in `torkitten-web`; rendering/browser-option tests pass. Live
+authenticator evidence is pending.
 
 ### AUTH-002 — Password and TOTP are requested in one login step
 
-Status: OPEN (M1)
+Status: IMPLEMENTED; LIVE EVIDENCE PENDING (M1)
 
 Required behavior: stage the portable fallback as password first and TOTP only
 after the password stage succeeds. Preserve generic failure behavior that does
 not disclose account or factor state.
 
-Evidence: pending.
+Source and automated evidence: the remote IPC and daemon implement a bounded,
+one-use, 120-second password challenge before TOTP. Remote-web protocol and
+daemon tests pass. Live portal evidence is pending.
 
 ### AUTH-003 — Guest recovery codes appear in guest UI/API
 
-Status: IN PROGRESS (M1)
+Status: IMPLEMENTED; LIVE EVIDENCE PENDING (M1)
 
 Decision: guest recovery codes are not a guest-facing recovery mechanism.
 Recovery is performed by local administration resetting that guest's auth state
 and issuing a fresh enrollment. Legacy stored data must migrate safely without
 remaining usable for login.
 
-Partial source: core policy, daemon commands, vault migration/reset logic, and
-admin policy input have uncommitted changes. Remote portal/template paths still
-need removal.
-
-Evidence: pending.
+Source and automated evidence: the remote recovery command, HTTP handling,
+template, and UI are removed; the policy is forced off; local guest-login reset
+preserves devices and permissions; migration/reset/protocol tests pass. Legacy
+encrypted recovery storage remains unusable and is scheduled for physical
+schema/code removal during the M2 boundary refactor. Live reset and fresh
+enrollment evidence is pending.
 
 ### AUTH-004 — Local administrator has only a password and no username
 
-Status: OPEN (M1)
+Status: IMPLEMENTED; LIVE EVIDENCE PENDING (M1)
 
 Required behavior: setup and login expose an explicit stable administrator
 identity/username. Existing installations need a deterministic migration.
 
-Evidence: pending.
+Source and automated evidence: a validated administrator username now crosses
+setup, login, protected reset, CLI, daemon, and vault migration. Existing state
+migrates to username `admin`; unit and HTTP boundary tests pass. Live upgrade
+and login evidence is pending.
 
 ### AUTH-005 — Forgotten administrator password can strand an installation
 
-Status: IN PROGRESS (M1)
+Status: IMPLEMENTED; LIVE EVIDENCE PENDING (M1)
 
 Decision:
 
@@ -135,32 +141,50 @@ Decision:
 - Routine administration remains the persistent browser/Wry flow; container
   exec is an exceptional recovery operation only.
 
-Partial live evidence: successful Ubuntu 24.04 reset and visible login. All-VM
-and final-package evidence is pending.
+Source and automated evidence: native/container reset accepts the replacement
+username on the command line and password only on stdin, atomically changes both
+credentials, and revokes all administrator sessions. A fresh authenticated
+administrator can also change credentials in the local UI; a stale session is
+rejected. Partial live evidence exists on Ubuntu 24.04 for the earlier
+password-only reset. All-VM final-package evidence is pending.
 
 ### AUTH-006 — Native Wry window forgets its session after closing
 
-Status: IN PROGRESS (M1)
+Status: IMPLEMENTED; LIVE EVIDENCE PENDING (M1)
 
 Required behavior: use a persistent WebKit data directory beneath the user's XDG
 data directory, reject unsafe/symlinked profile paths, and enforce mode `0700`.
 Closing the window must leave services running; reopening must restore a valid,
 unrevoked session.
 
-Partial source: uncommitted `torkitten-desktop` WebContext/profile changes.
-
-Evidence: compile/test and final-package live reopen test pending.
+Source and automated evidence: Wry uses a persistent WebContext rooted under the
+XDG data directory; unsafe paths are rejected and both directories are enforced
+as mode `0700`. Four desktop tests and strict Clippy pass. Final-package live
+reopen evidence is pending.
 
 ### AUTH-007 — Setup page remains stale after administrator creation
 
-Status: IN PROGRESS (M1)
+Status: IMPLEMENTED; LIVE EVIDENCE PENDING (M1)
 
 Required behavior: successful setup and login immediately navigate to `/`; the
 server decides whether the permanent dashboard or login page is appropriate.
 
-Partial source: uncommitted admin script change.
+Source and automated evidence: setup/login success immediately replaces the
+location with `/`, allowing the server to select the dashboard/login state.
+Admin HTTP tests pass. Live evidence is pending.
 
-Evidence: automated and live tests pending.
+### PROCESS-001 — High-rate interruptions and parallel-agent control
+
+Status: ACTIVE CONSTRAINT
+
+- Conversation compaction does not preserve every old message verbatim; this
+  ledger preserves the actionable defect, decision, status, and evidence.
+- Repeated reports attach to one defect ID rather than multiplying duplicate
+  tickets.
+- This harness permits at most four concurrent agents, not hundreds. The root
+  agent can inspect status, message, interrupt, and review their shared changes.
+- Agents never receive copied OAuth credentials or bypass platform controls.
+- No worker result is accepted without root diff review and integrated tests.
 
 ### SEC-001 — A browser that ignores redirects might access a mapped service
 

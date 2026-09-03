@@ -4,7 +4,8 @@ use serde::{Deserialize, Serialize};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::{
-    Device, DeviceId, Guest, GuestId, Mapping, MappingId, RemoteAccessPolicy, Site, SiteId,
+    AdministratorUsername, Device, DeviceId, Guest, GuestId, Mapping, MappingId,
+    RemoteAccessPolicy, Site, SiteId,
 };
 
 #[derive(Clone, Deserialize, Serialize, Zeroize, ZeroizeOnDrop)]
@@ -35,9 +36,11 @@ pub enum AdminCommand {
     Status,
     GenerateSiteCandidate,
     Initialize {
+        username: AdministratorUsername,
         password: SensitiveString,
     },
     AuthenticateAdministrator {
+        username: AdministratorUsername,
         password: SensitiveString,
     },
     ValidateAdministratorSession {
@@ -50,6 +53,10 @@ pub enum AdminCommand {
     LogoutAdministrator {
         session: SensitiveString,
         csrf: SensitiveString,
+    },
+    ResetAdministrator {
+        username: AdministratorUsername,
+        password: SensitiveString,
     },
     CreateGeneratedSite {
         site: Site,
@@ -100,6 +107,10 @@ pub enum AdminCommand {
         guest: Guest,
     },
     RemoveGuest {
+        site_id: SiteId,
+        guest_id: GuestId,
+    },
+    ResetGuestAuthentication {
         site_id: SiteId,
         guest_id: GuestId,
     },
@@ -280,11 +291,15 @@ pub enum RemoteCommand {
         ceremony: SensitiveString,
         credential: SensitiveString,
     },
-    AuthenticateGuest {
+    StartPasswordAuthentication {
         site_id: SiteId,
         guest_id: GuestId,
         password: SensitiveString,
-        second_factor: GuestSecondFactor,
+    },
+    FinishPasswordAuthentication {
+        site_id: SiteId,
+        challenge: SensitiveString,
+        totp_code: SensitiveString,
     },
     StartPasskeyAuthentication {
         site_id: SiteId,
@@ -308,13 +323,6 @@ pub enum RemoteCommand {
         site_id: SiteId,
         path: String,
     },
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
-pub enum GuestSecondFactor {
-    Totp(SensitiveString),
-    RecoveryCode(SensitiveString),
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -374,7 +382,9 @@ pub enum RemoteResponse {
         session: SensitiveString,
         expires_unix: i64,
         max_age_seconds: u64,
-        recovery_codes: Vec<SensitiveString>,
+    },
+    PasswordAuthenticationStarted {
+        challenge: SensitiveString,
     },
     PasskeyRegistrationStarted {
         ceremony: SensitiveString,
@@ -438,15 +448,22 @@ mod tests {
 
     #[test]
     fn remote_authentication_factors_are_redacted() {
-        let command = RemoteCommand::AuthenticateGuest {
+        let command = RemoteCommand::StartPasswordAuthentication {
             site_id: SiteId::new("personal").unwrap(),
             guest_id: GuestId::new("family").unwrap(),
             password: SensitiveString::new("password secret"),
-            second_factor: GuestSecondFactor::Totp(SensitiveString::new("123456")),
         };
         let debug = format!("{command:?}");
         assert!(!debug.contains("password secret"));
+        let command = RemoteCommand::FinishPasswordAuthentication {
+            site_id: SiteId::new("personal").unwrap(),
+            challenge: SensitiveString::new("challenge secret"),
+            totp_code: SensitiveString::new("123456"),
+        };
+        let debug = format!("{command:?}");
+        assert!(!debug.contains("challenge secret"));
         assert!(!debug.contains("123456"));
+        assert_eq!(debug.matches("[REDACTED]").count(), 2);
     }
 
     #[test]
