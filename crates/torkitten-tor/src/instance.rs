@@ -168,6 +168,37 @@ impl TorInstance {
         Ok(())
     }
 
+    /// Validates a staged candidate with the bundled Tor binary without
+    /// replacing the active configuration.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid input, filesystem failure, or a Tor
+    /// validation failure. The active configuration is never changed.
+    pub fn validate(
+        &self,
+        config: &GatewayConfig,
+        bootstrap_sites: &HashSet<SiteId>,
+    ) -> Result<(), TorError> {
+        self.prepare_directories(config, bootstrap_sites)?;
+        let rendered = self.render_torrc(config, bootstrap_sites)?;
+        let (temporary_path, mut temporary) =
+            create_temporary(&self.paths.state_directory, Some(OsStr::new("torrc")))?;
+        let result = (|| {
+            temporary.write_all(rendered.as_bytes())?;
+            temporary.sync_all()?;
+            fs::set_permissions(&temporary_path, fs::Permissions::from_mode(0o600))?;
+            let output = self.verify_command_for(&temporary_path).output()?;
+            if output.status.success() {
+                Ok(())
+            } else {
+                Err(command_failure(output.status.code(), &output.stderr))
+            }
+        })();
+        let _ = fs::remove_file(&temporary_path);
+        result
+    }
+
     fn prepare_directories(
         &self,
         config: &GatewayConfig,

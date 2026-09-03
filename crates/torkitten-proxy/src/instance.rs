@@ -31,6 +31,19 @@ impl CaddyInstance {
         &self.paths
     }
 
+    /// Renders and provisions a staged configuration with the bundled Caddy
+    /// binary without replacing the active file.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when inputs are invalid, staging fails, or Caddy
+    /// rejects the candidate. The active configuration is never changed.
+    pub fn validate(&self, config: &ProxyConfig) -> Result<(), CaddyError> {
+        self.ensure_directories(config)?;
+        let staged = self.stage(config)?;
+        self.validate_staged(staged.path())
+    }
+
     /// Renders, validates with the real Caddy binary, and atomically installs
     /// a complete configuration without contacting a running process.
     ///

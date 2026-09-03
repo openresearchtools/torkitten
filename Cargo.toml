@@ -6,6 +6,7 @@ members = [
     "crates/torkitten-proxy",
     "crates/torkitten-tor",
     "crates/torkitten-vault",
+    "crates/torkittend",
 ]
 
 [workspace.package]
@@ -33,6 +34,7 @@ subtle = "2"
 tempfile = "3"
 thiserror = "2"
 time = "0.3.55"
+tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "signal", "time"] }
 url = "2"
 uuid = { version = "1", features = ["serde", "v4"] }
 webauthn-rs = "0.5.5"
