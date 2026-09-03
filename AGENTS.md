@@ -46,9 +46,11 @@ One container has one persistent base address:
 Applications use hostname prefixes on that identity:
 
 ```text
-auth.<service-id>.onion       -> Authelia
-api.<service-id>.onion        -> host loopback port 7777
-chat.<service-id>.onion       -> host loopback port 8888
+<service-id>.onion            -> protected service launcher
+auth.<service-id>.onion       -> Authelia login portal
+api.<service-id>.onion        -> protected host loopback port 7777
+chat.<service-id>.onion       -> protected host loopback port 8888
+every unknown hostname        -> deny without contacting an upstream
 ```
 
 Tor exposes only virtual ports 80 and 443. Caddy terminates HTTPS and selects the
@@ -59,6 +61,22 @@ without application-specific rewriting.
 One Authelia cookie scoped to the base onion domain provides one login across
 all prefixes. Adding a prefix does not create an Authelia Application, user,
 group, role, provider, or separate login.
+
+The hostname relationship does not itself enforce authentication. Generated
+Caddy configuration must place an internal Authelia authorization subrequest in
+front of the base launcher and every configured application host. Only an
+explicit successful authorization response can continue to the protected
+handler or reverse proxy. A denial, timeout, malformed response, unavailable
+Authelia service, or any uncertainty returns a denial and never contacts the
+application. Browser redirects to `auth.<service-id>.onion` exist only for login
+user experience; a client which ignores redirects gains no access.
+
+The `auth` host exposes only the Authelia portal and endpoints needed to perform
+login and cannot be placed behind its own forward-authorization check. The
+temporary port-80 public-CA bootstrap is the only other narrowly defined bypass.
+Caddy rejects all unknown hosts before proxy selection, removes caller-supplied
+identity and forwarding headers, constructs the authorization metadata itself,
+and trusts identity headers only from its private Authelia upstream.
 
 ## Authoritative control plane
 
@@ -181,7 +199,9 @@ the complete container state.
   path behavior, WebSockets, SSE, uploads, component failure, and restart
   persistence.
 - Do not claim `.onion` cookie or private-CA browser compatibility until it has
-  passed the pinned Authelia and real Tor Browser tests.
+  passed the pinned Authelia plus every advertised client combination: desktop
+  Tor Browser, iOS Safari/WebKit routed through Orbot, and each supported Android
+  browser routed through Orbot.
 - Keep commits independently revertible. Never commit generated identities,
   credentials, state, binaries, packages, caches, or build output.
 
@@ -239,7 +259,7 @@ Local login verification only
   -> private internal HTTPS
   -> Authelia first-factor and TOTP endpoints
 
-Remote browser
+Remote browser (desktop Tor Browser, or a mobile browser routed through Orbot)
   -> Tor client authorization
   -> one persistent v3 onion service
   -> Caddy private listener and private-CA HTTPS
@@ -372,6 +392,14 @@ for deliberate user download/import, with platform-specific instructions and
 QR codes. Private-CA HTTPS is unsupported on a device whose policy forbids the
 user from installing or trusting the public root; the product must not claim a
 zero-install workaround.
+
+Orbot is a Tor transport for other applications, not the browser that owns web
+state. On mobile, cookie-domain behavior, redirects, TLS trust, WebAuthn, and
+storage are implemented by the actual browser routed through Orbot. Testing
+Orbot alone proves none of those browser behaviors. The supported-client matrix
+must name and test complete pairs, including iOS Safari/WebKit through Orbot and
+the explicitly supported Android browsers through Orbot. Desktop Tor Browser
+remains a separate supported client, not a substitute for the mobile matrix.
 
 For a remote device the local onboarding flow opens a 15-minute onion port-80
 bootstrap containing only:
@@ -507,12 +535,14 @@ the pinned component versions must prove:
 
 1. Current C Tor and Tor Browser route approved prefixes of one v3 onion
    identity to one service while preserving the complete Host value.
-2. The pinned browser and Authelia accept the chosen `.onion` cookie-domain and
-   private-CA configuration. Failure disqualifies that design rather than being
-   hidden with a browser workaround.
-3. Supported Windows, macOS, Linux, iOS, and Android paths can manually import
-   the public CA and Tor client credential; unsupported locked-down devices are
-   identified honestly.
+2. Pinned Authelia and every advertised client combination accept one cookie
+   scoped to the base onion hostname and send it to all approved prefixes. The
+   required matrix includes desktop Tor Browser, iOS Safari/WebKit routed
+   through Orbot, and each supported Android browser routed through Orbot.
+3. Supported Windows, macOS, Linux, iOS, and Android combinations can manually
+   import the public CA and Tor client credential, resolve prefixed onion hosts,
+   complete redirects, and reopen an authenticated session. Unsupported or
+   locked-down combinations are identified honestly.
 4. The pinned Authelia factor endpoints validate the one owner through private
    internal HTTPS while the local browser remains on HTTP localhost.
 5. Local sessions survive a Torkitten restart, revoke correctly, never contain
