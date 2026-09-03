@@ -19,14 +19,17 @@ RUN apt-get update \
         ca-certificates \
         clang \
         git \
+        libgtk-3-dev \
         libcap2 \
         libevent-2.1-7t64 \
         liblzma5 \
         libseccomp2 \
         libssl-dev \
         libsystemd0 \
+        libwebkit2gtk-4.1-dev \
         libzstd1 \
         pkg-config \
+        dpkg-dev \
         zlib1g \
     && rm -rf /var/lib/apt/lists/*
 

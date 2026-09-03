@@ -4,6 +4,7 @@ members = [
     "crates/torkitten-admin-web",
     "crates/torkitten-auth",
     "crates/torkitten-core",
+    "crates/torkitten-desktop",
     "crates/torkitten-proxy",
     "crates/torkitten-tor",
     "crates/torkitten-vault",
@@ -28,6 +29,7 @@ data-encoding = "2"
 ed25519-dalek = { version = "2", features = ["zeroize"] }
 getrandom = "0.4"
 hmac = "0.12"
+gtk = "0.18"
 openssl = "0.10"
 rusqlite = { version = "0.37", features = ["bundled"] }
 rcgen = { version = "0.14.10", features = ["x509-parser"] }
@@ -44,6 +46,7 @@ tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-threa
 url = "2"
 uuid = { version = "1", features = ["serde", "v4"] }
 webauthn-rs = "0.5.5"
+wry = "0.56.1"
 x25519-dalek = { version = "2", features = ["static_secrets", "zeroize"] }
 x509-parser = "0.18"
 zeroize = { version = "1", features = ["derive"] }
