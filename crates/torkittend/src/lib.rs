@@ -1,5 +1,9 @@
 #![forbid(unsafe_code)]
 
+mod direct_service;
+
+pub use direct_service::DirectServiceControl;
+
 use std::{
     collections::{HashMap, HashSet},
     ffi::OsStr,
@@ -145,6 +149,31 @@ pub trait ServiceControl {
     ///
     /// Returns an error when the service manager rejects the reload.
     fn reload(&mut self, component: ManagedComponent) -> Result<(), ServiceError>;
+
+    /// Reconciles container-owned child processes after an unexpected exit.
+    fn reconcile(&mut self) {}
+}
+
+impl<T: ServiceControl + ?Sized> ServiceControl for Box<T> {
+    fn state(&mut self, component: ManagedComponent) -> Result<ComponentState, ServiceError> {
+        (**self).state(component)
+    }
+
+    fn control(
+        &mut self,
+        component: ManagedComponent,
+        action: ComponentAction,
+    ) -> Result<(), ServiceError> {
+        (**self).control(component, action)
+    }
+
+    fn reload(&mut self, component: ManagedComponent) -> Result<(), ServiceError> {
+        (**self).reload(component)
+    }
+
+    fn reconcile(&mut self) {
+        (**self).reconcile();
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -1257,6 +1286,7 @@ impl<S: ServiceControl> Daemon<S> {
     ///
     /// Returns an error for state, validation, service, or file failures.
     pub fn maintenance(&mut self, now_unix: i64) -> Result<(), DaemonError> {
+        self.services.reconcile();
         if !self.maintenance_enabled {
             return Ok(());
         }
