@@ -540,6 +540,7 @@ impl TorInstance {
              BridgeRelay 0\n\
              PublishServerDescriptor 0\n\
              RunAsDaemon 0\n\
+             ShutdownWaitLength 5 seconds\n\
              SafeLogging 1\n\
              Sandbox 1\n\
              Log notice stdout\n",
@@ -898,6 +899,7 @@ mod tests {
             assert!(torrc.contains(disabled), "missing {disabled}");
         }
         assert!(torrc.contains("ClientOnly 1"));
+        assert!(torrc.contains("ShutdownWaitLength 5 seconds"));
         assert_eq!(torrc.matches("HiddenServiceDir ").count(), 2);
         assert_eq!(torrc.matches("HiddenServicePort 80 ").count(), 0);
         assert_eq!(torrc.matches("HiddenServicePort 443 ").count(), 2);
