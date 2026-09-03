@@ -1,0 +1,261 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Torkitten</title>
+  <link rel="stylesheet" href="/assets/app.css">
+  <script src="/assets/app.js" defer></script>
+</head>
+<body data-page="{{ page }}">
+  <div id="notice" class="notice" role="status" aria-live="polite" hidden></div>
+  {% if page == "setup" %}
+  <main class="auth-layout">
+    <section class="auth-card">
+      <div class="brand-mark" aria-hidden="true">T</div>
+      <p class="eyebrow">Private onion gateway</p>
+      <h1>Set up Torkitten</h1>
+      <p class="muted">Create the permanent local administrator. This account controls publication and is never exposed through Tor.</p>
+      <form id="setup-form" class="stack" data-endpoint="/api/setup">
+        <label>Administrator password
+          <input name="password" type="password" minlength="12" maxlength="1024" autocomplete="new-password" required autofocus>
+        </label>
+        <label>Confirm password
+          <input name="confirmation" type="password" minlength="12" maxlength="1024" autocomplete="new-password" required>
+        </label>
+        <button class="button primary" type="submit">Create administrator</button>
+      </form>
+      <p class="local-only">Local control plane · <strong>127.0.0.1 only</strong></p>
+    </section>
+  </main>
+  {% else if page == "login" %}
+  <main class="auth-layout">
+    <section class="auth-card">
+      <div class="brand-mark" aria-hidden="true">T</div>
+      <p class="eyebrow">Local administration</p>
+      <h1>Welcome back</h1>
+      <p class="muted">Sign in to manage onion sites and localhost mappings.</p>
+      <form id="login-form" class="stack" data-endpoint="/api/login">
+        <label>Administrator password
+          <input name="password" type="password" autocomplete="current-password" required autofocus>
+        </label>
+        <button class="button primary" type="submit">Sign in</button>
+      </form>
+      <p class="local-only">Local control plane · <strong>not reachable over Tor</strong></p>
+    </section>
+  </main>
+  {% else %}
+  <div class="app-shell">
+    <aside class="sidebar">
+      <a class="brand" href="/" aria-label="Torkitten dashboard">
+        <span class="brand-mark small" aria-hidden="true">T</span>
+        <span>Torkitten</span>
+      </a>
+      <nav aria-label="Administration">
+        <a class="nav-item active" href="#sites">Onion sites</a>
+        <a class="nav-item" href="#components">Components</a>
+        <a class="nav-item" href="#settings">Settings</a>
+      </nav>
+      <div class="sidebar-footer">
+        <span class="privacy-dot" aria-hidden="true"></span>
+        Machine-side only
+      </div>
+    </aside>
+    <main class="main-content">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">Gateway dashboard</p>
+          <h1>Onion sites</h1>
+        </div>
+        <div class="top-actions">
+          <button class="button" type="button" data-action="refresh">Refresh</button>
+          <button class="button primary" type="button" data-action="open-generator">Generate site</button>
+          <button class="button ghost" type="button" data-action="logout">Sign out</button>
+        </div>
+      </header>
+
+      {% if disabled %}
+      <section class="emergency-banner" role="alert">
+        <div><strong>Emergency stop is active.</strong> All publication is persistently disabled.</div>
+        <button class="button danger-outline" type="button" data-action="emergency-clear">Clear locally</button>
+      </section>
+      {% endif %}
+
+      <section id="components" class="component-strip" aria-label="Gateway components">
+        <div class="component-summary">
+          <span class="status-dot {{ tor_state|lower }}" aria-hidden="true"></span>
+          <div><span class="muted">C Tor</span><strong>{{ tor_state }}</strong></div>
+          <div class="compact-actions">
+            <button type="button" class="text-button" data-component="tor" data-component-action="restart">Restart</button>
+            <button type="button" class="text-button" data-component="tor" data-component-action="stop">Stop</button>
+          </div>
+        </div>
+        <div class="component-summary">
+          <span class="status-dot {{ caddy_state|lower }}" aria-hidden="true"></span>
+          <div><span class="muted">Caddy</span><strong>{{ caddy_state }}</strong></div>
+          <div class="compact-actions">
+            <button type="button" class="text-button" data-component="caddy" data-component-action="restart">Restart</button>
+            <button type="button" class="text-button" data-component="caddy" data-component-action="stop">Stop</button>
+          </div>
+        </div>
+        <div class="component-summary mode-summary">
+          <span class="muted">Gateway</span>
+          <strong>{{ mode }}</strong>
+        </div>
+      </section>
+
+      <section id="sites" class="site-list">
+        {% if sites.is_empty() %}
+        <div class="empty-state">
+          <div class="empty-icon" aria-hidden="true">.onion</div>
+          <h2>No onion sites yet</h2>
+          <p>Create a persistent v3 identity, then add the local applications you want to publish.</p>
+          <button class="button primary" type="button" data-action="open-generator">Generate your first site</button>
+        </div>
+        {% endif %}
+        {% for site in sites %}
+        <details class="site-card" open data-site-id="{{ site.id }}">
+          <summary class="site-summary">
+            <span class="chevron" aria-hidden="true"></span>
+            <span class="site-identity">
+              <span class="site-title-row">
+                <strong>{{ site.display_name }}</strong>
+                <span class="state-badge {{ site.state|lower }}">{{ site.state }}</span>
+              </span>
+              <span class="onion-address">{{ site.onion_hostname }}</span>
+            </span>
+            <button class="copy-button" type="button" data-copy="{{ site.onion_hostname }}" aria-label="Copy onion address">Copy</button>
+            <button class="switch{% if site.enabled %} enabled{% endif %}" type="button" role="switch" aria-checked="{% if site.enabled %}true{% else %}false{% endif %}" data-action="toggle-site" data-enabled="{% if site.enabled %}true{% else %}false{% endif %}" aria-label="Toggle {{ site.display_name }}">
+              <span></span>
+            </button>
+          </summary>
+          <div class="site-body">
+            <div class="site-actions">
+              <button class="button primary subtle" type="button" data-action="connect-device">Connect from another device</button>
+              <button class="button" type="button" data-action="rename-site">Rename</button>
+              <button class="button" type="button" data-action="rotate-site">Rotate identity</button>
+              <button class="button" type="button" data-action="restart-site">Restart</button>
+              <button class="button" type="button" data-action="stop-site">Stop</button>
+              {% if site.bootstrap_open %}
+              <button class="button" type="button" data-action="close-bootstrap">Close certificate download</button>
+              {% else %}
+              <button class="button" type="button" data-action="open-bootstrap">Open certificate download</button>
+              {% endif %}
+              <button class="button danger-outline push-right" type="button" data-action="remove-site">Remove</button>
+            </div>
+            <div class="mapping-heading">
+              <div><h3>Application mappings</h3><p>Each mapping has its own onion port and authorization check.</p></div>
+              <button class="button small" type="button" data-action="open-mapping">Add mapping</button>
+            </div>
+            <div class="mapping-list">
+              {% if site.mappings.is_empty() %}
+              <div class="mapping-empty">No localhost applications are mapped to this site.</div>
+              {% endif %}
+              {% for mapping in site.mappings %}
+              <div class="mapping-row" data-mapping-id="{{ mapping.id }}" data-display-name="{{ mapping.display_name }}" data-virtual-port="{{ mapping.virtual_port }}" data-target-kind="{{ mapping.target_kind }}" data-address="{{ mapping.address }}" data-port="{{ mapping.port }}" data-path="{{ mapping.path }}" data-transport="{{ mapping.transport }}" data-enabled="{% if mapping.enabled %}true{% else %}false{% endif %}">
+                <span class="mapping-rail" aria-hidden="true"></span>
+                <span class="mapping-main">
+                  <strong>{{ mapping.display_name }}</strong>
+                  <span>{{ mapping.target }}</span>
+                </span>
+                <span class="port-chip">:{{ mapping.virtual_port }}</span>
+                <button class="text-button" type="button" data-action="test-mapping">Test</button>
+                <button class="text-button" type="button" data-action="edit-mapping">Edit</button>
+                <button class="text-button danger-text" type="button" data-action="remove-mapping">Remove</button>
+                <button class="switch small-switch{% if mapping.enabled %} enabled{% endif %}" type="button" role="switch" aria-checked="{% if mapping.enabled %}true{% else %}false{% endif %}" data-action="toggle-mapping" data-enabled="{% if mapping.enabled %}true{% else %}false{% endif %}" aria-label="Toggle {{ mapping.display_name }}">
+                  <span></span>
+                </button>
+              </div>
+              {% endfor %}
+            </div>
+          </div>
+        </details>
+        {% endfor %}
+      </section>
+
+      <section id="settings" class="settings-card">
+        <div>
+          <h2>Publication settings</h2>
+          <p>Closing this window never stops enabled sites.</p>
+        </div>
+        <button class="switch-row" type="button" data-action="resume" data-enabled="{% if resume_after_boot %}true{% else %}false{% endif %}">
+          <span><strong>Resume enabled sites after boot</strong><small>Preserves the emergency-stop latch.</small></span>
+          <span class="switch{% if resume_after_boot %} enabled{% endif %}" role="switch" aria-checked="{% if resume_after_boot %}true{% else %}false{% endif %}"><span></span></span>
+        </button>
+        <button class="button danger" type="button" data-action="emergency-stop">Stop all publication</button>
+      </section>
+    </main>
+  </div>
+
+  <dialog id="generator-dialog" class="modal generator-modal">
+    <form method="dialog" class="modal-bar"><button class="icon-button" value="cancel" aria-label="Close">×</button></form>
+    <div class="modal-content">
+      <p class="eyebrow">Persistent v3 identity</p>
+      <h2>Generate an onion site</h2>
+      <p class="muted">Candidates stay temporary until you stop the generator and create the site.</p>
+      <div class="candidate-display" aria-live="polite">
+        <span id="candidate-spinner" class="spinner" aria-hidden="true"></span>
+        <code id="candidate-address">Press Start to generate candidates</code>
+        <span id="candidate-count">0 candidates</span>
+      </div>
+      <div class="generator-controls">
+        <button id="generator-start" class="button primary" type="button">Start</button>
+        <button id="generator-stop" class="button" type="button" disabled>Stop</button>
+      </div>
+      <form id="create-site-form" class="stack generator-form" hidden>
+        <label>Site name<input name="display_name" maxlength="80" required placeholder="Personal dashboard"></label>
+        <label>Site ID<input name="id" pattern="[a-z0-9][a-z0-9-]{0,62}" required placeholder="personal"></label>
+        <button class="button primary" type="submit">Create selected site</button>
+      </form>
+    </div>
+  </dialog>
+
+  <dialog id="mapping-dialog" class="modal">
+    <form method="dialog" class="modal-bar"><button class="icon-button" value="cancel" aria-label="Close">×</button></form>
+    <div class="modal-content">
+      <p class="eyebrow">Site-scoped reverse proxy</p>
+      <h2>Add application mapping</h2>
+      <form id="mapping-form" class="stack">
+        <input name="site_id" type="hidden">
+        <input name="enabled" type="hidden" value="true">
+        <label>Mapping name<input name="display_name" maxlength="80" required placeholder="Photos"></label>
+        <label>Mapping ID<input name="id" pattern="[a-z0-9][a-z0-9-]{0,62}" required placeholder="photos"></label>
+        <div class="field-grid">
+          <label>Onion port<input name="virtual_port" type="number" min="1" max="65535" value="8443" required></label>
+          <label>Upstream protocol<select name="transport"><option value="http">HTTP</option><option value="https">HTTPS</option><option value="h2c">H2C</option></select></label>
+        </div>
+        <label>Target type<select name="target_kind" data-action="target-kind"><option value="tcp">Loopback TCP port</option><option value="unix">Unix socket</option></select></label>
+        <div class="field-grid" data-target="tcp">
+          <label>Numeric loopback address<input name="address" value="127.0.0.1" inputmode="decimal"></label>
+          <label>Local port<input name="port" type="number" min="1" max="65535" placeholder="3000"></label>
+        </div>
+        <label data-target="unix" hidden>Absolute Unix socket path<input name="path" placeholder="/run/my-app/app.sock"></label>
+        <div class="modal-actions">
+          <button class="button" type="button" data-action="test-mapping-form">Test target</button>
+          <button class="button primary" type="submit">Save mapping</button>
+        </div>
+      </form>
+    </div>
+  </dialog>
+
+  <dialog id="device-dialog" class="modal device-modal">
+    <form method="dialog" class="modal-bar"><button class="icon-button" value="cancel" aria-label="Close">×</button></form>
+    <div class="modal-content">
+      <p class="eyebrow">Connect from another device</p>
+      <h2>Device onboarding</h2>
+      <div class="platform-tabs" role="tablist" aria-label="Device platform">
+        <button class="active" type="button" data-platform="ios">iOS</button><button type="button" data-platform="android">Android</button><button type="button" data-platform="linux">Linux</button><button type="button" data-platform="macos">macOS</button><button type="button" data-platform="windows">Windows</button>
+      </div>
+      <ol class="wizard-steps">
+        <li><span>1</span><div><strong>Install Tor access software</strong><p>Use Orbot on mobile or Tor Browser on desktop.</p></div></li>
+        <li><span>2</span><div><strong>Install this device’s Tor authorization</strong><p>A distinct revocable client key will be created for this device.</p></div></li>
+        <li><span>3</span><div><strong>Install Torkitten’s public certificate</strong><p>A temporary 15-minute certificate download will be opened.</p></div></li>
+        <li><span>4</span><div><strong>Enroll the guest login</strong><p>Create or select a guest, then enroll a passkey or password plus TOTP.</p></div></li>
+        <li><span>5</span><div><strong>Open the protected site</strong><p>Future visits use the permanent safe login portal.</p></div></li>
+      </ol>
+      <div class="callout">Device credential issuance will activate after a guest is selected.</div>
+    </div>
+  </dialog>
+  {% endif %}
+</body>
+</html>

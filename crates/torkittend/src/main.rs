@@ -1,11 +1,13 @@
-use std::{env, ffi::OsString, path::PathBuf, process::ExitCode};
+use std::{env, ffi::OsString, net::SocketAddr, path::PathBuf, process::ExitCode};
 
+use torkitten_admin_web::AdminWebConfig;
 use torkittend::{Daemon, DaemonPaths, SystemdServiceControl, serve};
 
 const DEFAULT_STATE_DIRECTORY: &str = "/var/lib/torkitten";
 const DEFAULT_RUNTIME_DIRECTORY: &str = "/run/torkitten";
 const DEFAULT_TOR_BINARY: &str = "/usr/lib/torkitten/tor";
 const DEFAULT_CADDY_BINARY: &str = "/usr/lib/torkitten/caddy";
+const DEFAULT_ADMIN_LISTEN: &str = "127.0.0.1:12755";
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -19,25 +21,45 @@ async fn main() -> ExitCode {
 }
 
 async fn run() -> Result<(), Box<dyn std::error::Error>> {
-    let paths = arguments()?;
+    let options = arguments()?;
     let now = unix_time()?;
-    let socket = paths.admin_socket();
-    let mut daemon = Daemon::open(paths, SystemdServiceControl::default(), now)?;
+    let socket = options.paths.admin_socket();
+    let mut daemon = Daemon::open(options.paths, SystemdServiceControl::default(), now)?;
     daemon.startup(now)?;
-    serve(daemon, &socket).await?;
+    let web = AdminWebConfig::new(options.admin_listen, &socket);
+    tokio::try_join!(
+        async {
+            serve(daemon, &socket)
+                .await
+                .map_err(Box::<dyn std::error::Error>::from)
+        },
+        async {
+            torkitten_admin_web::serve(web)
+                .await
+                .map_err(Box::<dyn std::error::Error>::from)
+        },
+    )?;
     Ok(())
 }
 
-fn arguments() -> Result<DaemonPaths, String> {
+struct LaunchOptions {
+    paths: DaemonPaths,
+    admin_listen: SocketAddr,
+}
+
+fn arguments() -> Result<LaunchOptions, String> {
     let mut state = PathBuf::from(DEFAULT_STATE_DIRECTORY);
     let mut runtime = PathBuf::from(DEFAULT_RUNTIME_DIRECTORY);
     let mut tor = PathBuf::from(DEFAULT_TOR_BINARY);
     let mut caddy = PathBuf::from(DEFAULT_CADDY_BINARY);
+    let mut admin_listen = DEFAULT_ADMIN_LISTEN
+        .parse::<SocketAddr>()
+        .map_err(|_| "invalid built-in administration address".to_owned())?;
     let mut arguments = env::args_os().skip(1);
     while let Some(argument) = arguments.next() {
         if argument == "--help" {
             return Err(
-                "usage: torkittend [--state-dir PATH] [--runtime-dir PATH] [--tor-binary PATH] [--caddy-binary PATH]"
+                "usage: torkittend [--state-dir PATH] [--runtime-dir PATH] [--tor-binary PATH] [--caddy-binary PATH] [--admin-listen LOOPBACK:PORT]"
                     .to_owned(),
             );
         }
@@ -49,10 +71,20 @@ fn arguments() -> Result<DaemonPaths, String> {
             Some("--runtime-dir") => runtime = PathBuf::from(value),
             Some("--tor-binary") => tor = PathBuf::from(value),
             Some("--caddy-binary") => caddy = PathBuf::from(value),
+            Some("--admin-listen") => {
+                admin_listen = value
+                    .to_str()
+                    .ok_or_else(|| "administration address must be valid UTF-8".to_owned())?
+                    .parse()
+                    .map_err(|_| "invalid administration listen address".to_owned())?;
+            }
             _ => return Err(format!("unknown option: {}", display(&argument))),
         }
     }
-    Ok(DaemonPaths::new(state, runtime, tor, caddy))
+    Ok(LaunchOptions {
+        paths: DaemonPaths::new(state, runtime, tor, caddy),
+        admin_listen,
+    })
 }
 
 fn display(value: &OsString) -> String {

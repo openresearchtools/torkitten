@@ -1,5 +1,5 @@
 [package]
-name = "torkittend"
+name = "torkitten-admin-web"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -7,22 +7,19 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-base64.workspace = true
-getrandom.workspace = true
+askama.workspace = true
+axum.workspace = true
+serde.workspace = true
 serde_json.workspace = true
-sha2.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 torkitten-auth = { path = "../torkitten-auth" }
-torkitten-admin-web = { path = "../torkitten-admin-web" }
 torkitten-core = { path = "../torkitten-core" }
-torkitten-proxy = { path = "../torkitten-proxy" }
-torkitten-tor = { path = "../torkitten-tor" }
-torkitten-vault = { path = "../torkitten-vault" }
-uuid.workspace = true
 
 [dev-dependencies]
+http-body-util = "0.1"
 tempfile.workspace = true
+tower = { version = "0.5", features = ["util"] }
 
 [lints]
 workspace = true
