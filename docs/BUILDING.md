@@ -20,6 +20,16 @@ The default build root is `/run/media/user/Data/TorkittenBuild`. Override it wit
 
 Each output directory names the Ubuntu baseline, architecture, upstream release, source tree, and recipe digest. `BUILD-METADATA` records the complete source identity, release flags, toolchain, license location, and binary SHA-256. Repeating an unchanged build reuses its completed output.
 
+Real-binary integration tests accept `TORKITTEN_TOR_BINARY` and
+`TORKITTEN_CADDY_BINARY`. Paths under the external build root are visible as
+`/work` inside the test container. For example, a verified GitHub Actions Tor
+bundle can be exercised without rebuilding it:
+
+```sh
+TORKITTEN_TOR_BINARY=/work/github-actions/<run>/<tor-artifact>/usr/bin/tor \
+  ./tools/cargo-local.sh test -p torkitten-tor -- --ignored
+```
+
 ## GitHub Actions
 
 `.github/workflows/third-party.yml` builds Tor and Caddy concurrently on separate Ubuntu 24.04 runners. Each component has an independent version-and-recipe-derived cache. A cache hit is uploaded directly as a fresh run artifact; a miss builds from the vendored source and then populates that cache. The final job downloads both artifacts exactly as later Torkitten packaging jobs will.

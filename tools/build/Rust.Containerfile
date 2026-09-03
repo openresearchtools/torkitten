@@ -19,8 +19,15 @@ RUN apt-get update \
         ca-certificates \
         clang \
         git \
+        libcap2 \
+        libevent-2.1-7t64 \
+        liblzma5 \
+        libseccomp2 \
         libssl-dev \
+        libsystemd0 \
+        libzstd1 \
         pkg-config \
+        zlib1g \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /src

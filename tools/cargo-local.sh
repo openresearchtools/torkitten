@@ -29,6 +29,12 @@ podman_args=(
     --runroot "$build_real/podman/runroot"
     --tmpdir "$build_real/podman/tmp"
 )
+test_binary_env=()
+for variable in TORKITTEN_TOR_BINARY TORKITTEN_CADDY_BINARY; do
+    if [[ -n ${!variable:-} ]]; then
+        test_binary_env+=(--env "$variable")
+    fi
+done
 containerfile="$repo_real/tools/build/Rust.Containerfile"
 image_key=$(sha256sum "$containerfile" | cut -c 1-16)
 image="localhost/torkitten-rust:ubuntu-24.04-$image_key"
@@ -47,6 +53,7 @@ podman "${podman_args[@]}" run --rm \
     --env CARGO_HOME=/work/cache/cargo \
     --env CARGO_TARGET_DIR=/work/target \
     --env CARGO_INCREMENTAL=0 \
+    "${test_binary_env[@]}" \
     --workdir /src \
     "$image" \
     cargo "$@"
