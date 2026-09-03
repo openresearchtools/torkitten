@@ -13,28 +13,36 @@ use askama::Template;
 use axum::{
     Router,
     body::Body,
-    extract::{Path as AxumPath, State},
+    extract::{Form, Path as AxumPath, State},
     http::{
         HeaderMap, HeaderValue, Method, StatusCode, Uri,
-        header::{CACHE_CONTROL, CONTENT_DISPOSITION, CONTENT_TYPE, COOKIE, LOCATION},
+        header::{
+            CACHE_CONTROL, CONTENT_DISPOSITION, CONTENT_TYPE, COOKIE, LOCATION, ORIGIN, SET_COOKIE,
+        },
     },
     middleware::{self, Next},
     response::{Html, IntoResponse, Response},
-    routing::get,
+    routing::{get, post},
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
+use serde::Deserialize;
 use thiserror::Error;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{UnixListener, UnixStream},
     task::JoinHandle,
 };
+use torkitten_auth::{
+    CsrfToken, ExpectedOrigin, SessionToken, clear_remote_session_cookie, remote_session_cookie,
+};
 use torkitten_core::{
-    MappingId, PortalContext, PortalMapping, PublishedSite, RemoteCommand, RemoteResponse,
-    SensitiveString, SiteId,
+    GuestId, GuestSecondFactor, MappingId, PortalContext, PortalMapping, PublishedSite,
+    RemoteCommand, RemoteResponse, SensitiveString, SiteId,
 };
 
 const SESSION_COOKIE: &str = "__Host-torkitten_session";
+const CSRF_COOKIE: &str = "__Host-torkitten_csrf";
+const REMOTE_SESSION_SECONDS: u64 = 30 * 86_400;
 const MAXIMUM_IPC_RESPONSE_BYTES: u64 = 1024 * 1024;
 const IPC_TIMEOUT: Duration = Duration::from_secs(10);
 const RECONCILE_INTERVAL: Duration = Duration::from_secs(2);
@@ -188,7 +196,9 @@ fn portal_router(state: SiteState) -> Router {
     Router::new()
         .route("/", get(portal))
         .route("/assets/app.css", get(stylesheet))
-        .route("/enroll/{token}", get(enrollment))
+        .route("/login", post(login))
+        .route("/logout", post(logout))
+        .route("/enroll/{token}", get(enrollment).post(complete_enrollment))
         .fallback(not_found)
         .layer(middleware::from_fn(security_headers))
         .with_state(state)
@@ -209,7 +219,7 @@ fn bootstrap_router(state: SiteState) -> Router {
         .with_state(state)
 }
 
-async fn portal(State(state): State<SiteState>, headers: HeaderMap) -> WebResult<Html<String>> {
+async fn portal(State(state): State<SiteState>, headers: HeaderMap) -> WebResult<Response> {
     let session = cookie(&headers, SESSION_COOKIE).map(SensitiveString::new);
     let response = request_daemon(
         &state.daemon_socket,
@@ -222,23 +232,26 @@ async fn portal(State(state): State<SiteState>, headers: HeaderMap) -> WebResult
     let RemoteResponse::PortalContext { context } = response else {
         return Err(WebError::from_response(response));
     };
-    render_portal(context)
+    render_portal(context, &headers)
 }
 
-fn render_portal(context: PortalContext) -> WebResult<Html<String>> {
+fn render_portal(context: PortalContext, headers: &HeaderMap) -> WebResult<Response> {
+    let csrf = csrf_token(headers)?;
     let template = PortalTemplate {
         display_name: context.display_name,
         onion_hostname: context.onion_hostname,
         guest_display_name: context.guest_display_name,
         mappings: context.mappings,
+        csrf: csrf.expose().to_owned(),
     };
-    Ok(Html(template.render().map_err(WebError::Template)?))
+    html_with_csrf(template.render().map_err(WebError::Template)?, &csrf)
 }
 
 async fn enrollment(
     State(state): State<SiteState>,
     AxumPath(token): AxumPath<String>,
-) -> WebResult<Html<String>> {
+    headers: HeaderMap,
+) -> WebResult<Response> {
     let response = request_daemon(
         &state.daemon_socket,
         RemoteCommand::EnrollmentDetails {
@@ -251,17 +264,163 @@ async fn enrollment(
         guest_display_name,
         device_display_name,
         expires_unix,
+        totp_secret,
+        totp_uri,
         ..
     } = response
     else {
         return Err(WebError::from_response(response));
     };
+    let csrf = csrf_token(&headers)?;
     let template = EnrollmentTemplate {
         guest_display_name,
         device_display_name,
         expires_unix,
+        totp_secret: totp_secret.map(|secret| secret.expose().to_owned()),
+        totp_uri: totp_uri.map(|uri| uri.expose().to_owned()),
+        csrf: csrf.expose().to_owned(),
     };
-    Ok(Html(template.render().map_err(WebError::Template)?))
+    html_with_csrf(template.render().map_err(WebError::Template)?, &csrf)
+}
+
+#[derive(Deserialize)]
+struct EnrollmentInput {
+    password: SensitiveString,
+    totp_code: SensitiveString,
+    csrf: SensitiveString,
+}
+
+async fn complete_enrollment(
+    State(state): State<SiteState>,
+    AxumPath(token): AxumPath<String>,
+    headers: HeaderMap,
+    Form(input): Form<EnrollmentInput>,
+) -> WebResult<Response> {
+    validate_mutation(&state, &headers, input.csrf.expose())?;
+    let response = request_daemon(
+        &state.daemon_socket,
+        RemoteCommand::CompletePasswordEnrollment {
+            site_id: state.site_id.clone(),
+            token: SensitiveString::new(token),
+            password: input.password,
+            totp_code: input.totp_code,
+        },
+    )
+    .await?;
+    let RemoteResponse::EnrollmentCompleted {
+        session,
+        expires_unix,
+        recovery_codes,
+    } = response
+    else {
+        return Err(WebError::from_response(response));
+    };
+    let recovery_codes = recovery_codes
+        .iter()
+        .map(|code| code.expose().to_owned())
+        .collect();
+    let page = RecoveryTemplate { recovery_codes }
+        .render()
+        .map_err(WebError::Template)?;
+    authenticated_response(&session, expires_unix, Some(page))
+}
+
+#[derive(Deserialize)]
+struct LoginInput {
+    guest_id: String,
+    password: SensitiveString,
+    factor_kind: String,
+    factor: SensitiveString,
+    csrf: SensitiveString,
+}
+
+async fn login(
+    State(state): State<SiteState>,
+    headers: HeaderMap,
+    Form(input): Form<LoginInput>,
+) -> WebResult<Response> {
+    validate_mutation(&state, &headers, input.csrf.expose())?;
+    let second_factor = match input.factor_kind.as_str() {
+        "totp" => GuestSecondFactor::Totp(input.factor),
+        "recovery" => GuestSecondFactor::RecoveryCode(input.factor),
+        _ => return Err(WebError::Unauthorized),
+    };
+    let response = request_daemon(
+        &state.daemon_socket,
+        RemoteCommand::AuthenticateGuest {
+            site_id: state.site_id.clone(),
+            guest_id: GuestId::new(input.guest_id).map_err(WebError::Validation)?,
+            password: input.password,
+            second_factor,
+        },
+    )
+    .await?;
+    let RemoteResponse::GuestAuthenticated {
+        session,
+        expires_unix,
+    } = response
+    else {
+        return Err(WebError::from_response(response));
+    };
+    authenticated_response(&session, expires_unix, None)
+}
+
+#[derive(Deserialize)]
+struct LogoutInput {
+    csrf: SensitiveString,
+}
+
+async fn logout(
+    State(state): State<SiteState>,
+    headers: HeaderMap,
+    Form(input): Form<LogoutInput>,
+) -> WebResult<Response> {
+    validate_mutation(&state, &headers, input.csrf.expose())?;
+    let session = cookie(&headers, SESSION_COOKIE).ok_or(WebError::Unauthorized)?;
+    let response = request_daemon(
+        &state.daemon_socket,
+        RemoteCommand::LogoutGuest {
+            site_id: state.site_id.clone(),
+            session: SensitiveString::new(session),
+        },
+    )
+    .await?;
+    if !matches!(response, RemoteResponse::LoggedOut) {
+        return Err(WebError::from_response(response));
+    }
+    let mut response = safe_portal_redirect(&state)?;
+    response.headers_mut().append(
+        SET_COOKIE,
+        HeaderValue::from_static(clear_remote_session_cookie()),
+    );
+    Ok(response)
+}
+
+fn authenticated_response(
+    encoded_session: &SensitiveString,
+    expires_unix: i64,
+    page: Option<String>,
+) -> WebResult<Response> {
+    let session = SessionToken::parse(encoded_session.expose().to_owned())?;
+    let cookie = remote_session_cookie(&session, REMOTE_SESSION_SECONDS)?;
+    let mut response = if let Some(page) = page {
+        Html(page).into_response()
+    } else {
+        let mut response = StatusCode::SEE_OTHER.into_response();
+        response
+            .headers_mut()
+            .insert(LOCATION, HeaderValue::from_static("/"));
+        response
+    };
+    response.headers_mut().append(
+        SET_COOKIE,
+        HeaderValue::from_str(cookie.expose()).map_err(WebError::Header)?,
+    );
+    response.headers_mut().insert(
+        "x-torkitten-session-expires",
+        HeaderValue::from_str(&expires_unix.to_string()).map_err(WebError::Header)?,
+    );
+    Ok(response)
 }
 
 async fn authorize_mapping(
@@ -440,6 +599,46 @@ fn cookie(headers: &HeaderMap, name: &str) -> Option<String> {
         .find_map(|(key, value)| (key == name).then(|| value.to_owned()))
 }
 
+fn csrf_token(headers: &HeaderMap) -> WebResult<CsrfToken> {
+    cookie(headers, CSRF_COOKIE)
+        .and_then(|encoded| CsrfToken::parse(encoded).ok())
+        .map_or_else(|| CsrfToken::generate().map_err(WebError::Token), Ok)
+}
+
+fn html_with_csrf(page: String, csrf: &CsrfToken) -> WebResult<Response> {
+    let cookie = format!(
+        "{CSRF_COOKIE}={}; Path=/; Max-Age={REMOTE_SESSION_SECONDS}; Secure; HttpOnly; SameSite=Strict",
+        csrf.expose()
+    );
+    let mut response = Html(page).into_response();
+    response.headers_mut().append(
+        SET_COOKIE,
+        HeaderValue::from_str(&cookie).map_err(WebError::Header)?,
+    );
+    Ok(response)
+}
+
+fn validate_mutation(
+    state: &SiteState,
+    headers: &HeaderMap,
+    csrf_candidate: &str,
+) -> WebResult<()> {
+    let expected_origin = ExpectedOrigin::parse(&format!("https://{}", state.onion_hostname))?;
+    expected_origin.validate(
+        headers
+            .get(ORIGIN)
+            .and_then(|value| value.to_str().ok())
+            .ok_or(WebError::Forbidden)?,
+    )?;
+    let encoded_csrf = cookie(headers, CSRF_COOKIE).ok_or(WebError::Forbidden)?;
+    let csrf = CsrfToken::parse(encoded_csrf).map_err(|_| WebError::Forbidden)?;
+    if csrf.constant_time_eq(csrf_candidate) {
+        Ok(())
+    } else {
+        Err(WebError::Forbidden)
+    }
+}
+
 fn required_header<'a>(headers: &'a HeaderMap, name: &str) -> WebResult<&'a str> {
     headers
         .get(name)
@@ -499,6 +698,7 @@ struct PortalTemplate {
     onion_hostname: String,
     guest_display_name: Option<String>,
     mappings: Vec<PortalMapping>,
+    csrf: String,
 }
 
 #[derive(Template)]
@@ -507,6 +707,15 @@ struct EnrollmentTemplate {
     guest_display_name: String,
     device_display_name: String,
     expires_unix: i64,
+    totp_secret: Option<String>,
+    totp_uri: Option<String>,
+    csrf: String,
+}
+
+#[derive(Template)]
+#[template(path = "recovery.html")]
+struct RecoveryTemplate {
+    recovery_codes: Vec<String>,
 }
 
 type WebResult<T> = Result<T, WebError>;
@@ -515,6 +724,8 @@ type WebResult<T> = Result<T, WebError>;
 enum WebError {
     #[error("authorization failed")]
     Unauthorized,
+    #[error("request origin or CSRF verification failed")]
+    Forbidden,
     #[error("resource not found")]
     NotFound,
     #[error("daemon unavailable: {0}")]
@@ -529,6 +740,12 @@ enum WebError {
     Header(axum::http::header::InvalidHeaderValue),
     #[error("public certificate is malformed")]
     Certificate(base64::DecodeError),
+    #[error("invalid authentication token")]
+    Token(#[from] torkitten_auth::TokenError),
+    #[error("invalid session cookie")]
+    Cookie(#[from] torkitten_auth::CookieError),
+    #[error("invalid request origin")]
+    Origin(#[from] torkitten_auth::OriginError),
 }
 
 impl WebError {
@@ -542,6 +759,7 @@ impl WebError {
     fn status(&self) -> StatusCode {
         match self {
             Self::Unauthorized => StatusCode::UNAUTHORIZED,
+            Self::Forbidden | Self::Origin(_) => StatusCode::FORBIDDEN,
             Self::NotFound => StatusCode::NOT_FOUND,
             Self::DaemonResponse { code, .. } if code == "not_found" => StatusCode::NOT_FOUND,
             Self::DaemonResponse { code, .. } if code == "unauthorized" => StatusCode::UNAUTHORIZED,
@@ -550,7 +768,9 @@ impl WebError {
             | Self::DaemonResponse { .. }
             | Self::Template(_)
             | Self::Header(_)
-            | Self::Certificate(_) => StatusCode::SERVICE_UNAVAILABLE,
+            | Self::Certificate(_)
+            | Self::Token(_)
+            | Self::Cookie(_) => StatusCode::SERVICE_UNAVAILABLE,
         }
     }
 }
@@ -798,5 +1018,77 @@ mod tests {
             daemon.await.unwrap(),
             RemoteCommand::PortalContext { site_id, .. } if site_id.as_str() == "alpha"
         ));
+    }
+
+    #[tokio::test]
+    async fn login_requires_origin_and_csrf_then_sets_secure_host_cookie() {
+        let temporary = tempfile::tempdir().unwrap();
+        let socket = temporary.path().join("daemon.sock");
+        let session = SessionToken::generate().unwrap();
+        let daemon = mock_daemon(
+            &socket,
+            &RemoteResponse::GuestAuthenticated {
+                session: SensitiveString::new(session.expose()),
+                expires_unix: 2_000_000_000,
+            },
+        );
+        let csrf = CsrfToken::generate().unwrap();
+        let body = format!(
+            "guest_id=family&password=correct%20horse%20battery%20staple&factor_kind=totp&factor=123456&csrf={}",
+            csrf.expose()
+        );
+        let response = portal_router(site_state(socket))
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/login")
+                    .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .header(ORIGIN, format!("https://{ONION}"))
+                    .header(COOKIE, format!("{CSRF_COOKIE}={}", csrf.expose()))
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let set_cookie = response
+            .headers()
+            .get(SET_COOKIE)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(set_cookie.starts_with("__Host-torkitten_session="));
+        assert!(set_cookie.contains("; Secure; HttpOnly; SameSite=Strict"));
+        assert!(matches!(
+            daemon.await.unwrap(),
+            RemoteCommand::AuthenticateGuest {
+                guest_id,
+                second_factor: GuestSecondFactor::Totp(_),
+                ..
+            } if guest_id.as_str() == "family"
+        ));
+    }
+
+    #[tokio::test]
+    async fn login_rejects_wrong_origin_before_contacting_daemon() {
+        let csrf = CsrfToken::generate().unwrap();
+        let body = format!(
+            "guest_id=family&password=password&factor_kind=totp&factor=123456&csrf={}",
+            csrf.expose()
+        );
+        let response = portal_router(site_state(PathBuf::from("/unused/daemon.sock")))
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/login")
+                    .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .header(ORIGIN, "https://different.onion")
+                    .header(COOKIE, format!("{CSRF_COOKIE}={}", csrf.expose()))
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
     }
 }

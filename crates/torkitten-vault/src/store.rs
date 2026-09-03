@@ -23,7 +23,7 @@ use crate::{EncryptedSecret, VaultCipher, cipher::CipherError, key::KeyError};
 
 const DATABASE_FILENAME: &str = "state.sqlite3";
 const KEY_FILENAME: &str = "secrets/vault.key";
-const DATABASE_SCHEMA_VERSION: i64 = 5;
+const DATABASE_SCHEMA_VERSION: i64 = 6;
 const LEGACY_SITE_ID: &str = "default";
 const LEGACY_SITE_DISPLAY_NAME: &str = "Default site";
 
@@ -104,6 +104,12 @@ pub struct DeviceEnrollmentRecord {
     pub created_unix: i64,
     pub expires_unix: i64,
     pub used_unix: Option<i64>,
+}
+
+#[derive(Debug)]
+pub struct DeviceEnrollmentFactorRecord {
+    pub enrollment: DeviceEnrollmentRecord,
+    pub totp_secret: TotpSecret,
 }
 
 impl std::fmt::Debug for DeviceRecord {
@@ -714,7 +720,7 @@ impl Store {
             .optional()?;
         if record.is_some() {
             transaction.execute(
-                "UPDATE device_enrollments SET used_unix = ?2
+                "UPDATE device_enrollments SET used_unix = ?2, encrypted_totp = NULL
                  WHERE token_hash = ?1 AND used_unix IS NULL",
                 params![token_hash.as_slice(), now_unix],
             )?;
@@ -723,6 +729,56 @@ impl Store {
         Ok(record.map(|mut record| {
             record.used_unix = Some(now_unix);
             record
+        }))
+    }
+
+    /// Creates or reloads the encrypted TOTP factor associated with an active
+    /// one-time enrollment. The seed is never stored as plaintext.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the enrollment is unavailable, encryption fails,
+    /// or SQLite cannot persist the generated factor.
+    pub fn begin_device_enrollment(
+        &self,
+        token: &EnrollmentToken,
+        now_unix: i64,
+    ) -> Result<Option<DeviceEnrollmentFactorRecord>, StoreError> {
+        let Some(enrollment) = self.device_enrollment(token, now_unix)? else {
+            return Ok(None);
+        };
+        let token_hash = token.digest();
+        let encrypted = self.connection.query_row(
+            "SELECT encrypted_totp FROM device_enrollments WHERE token_hash = ?1",
+            [token_hash.as_slice()],
+            |row| row.get::<_, Option<Vec<u8>>>(0),
+        )?;
+        let aad = enrollment_factor_secret_name(
+            &enrollment.site_id,
+            &enrollment.guest_id,
+            &enrollment.device_id,
+        );
+        let totp_secret = if let Some(encrypted) = encrypted {
+            let plaintext = self
+                .cipher
+                .decrypt(&aad, &EncryptedSecret::from_bytes(encrypted))?;
+            TotpSecret::from_bytes(plaintext.to_vec())?
+        } else {
+            let secret = TotpSecret::generate()?;
+            let encrypted = self.cipher.encrypt(&aad, secret.as_bytes())?;
+            let changed = self.connection.execute(
+                "UPDATE device_enrollments SET encrypted_totp = ?2
+                 WHERE token_hash = ?1 AND used_unix IS NULL AND expires_unix > ?3",
+                params![token_hash.as_slice(), encrypted.as_bytes(), now_unix],
+            )?;
+            if changed == 0 {
+                return Ok(None);
+            }
+            secret
+        };
+        Ok(Some(DeviceEnrollmentFactorRecord {
+            enrollment,
+            totp_secret,
         }))
     }
 
@@ -1494,17 +1550,24 @@ impl Store {
                 migrate_v2_to_v3(&transaction)?;
                 migrate_v3_to_v4(&transaction)?;
                 migrate_v4_to_v5(&transaction)?;
+                migrate_v5_to_v6(&transaction)?;
             }
             Some(2) => {
                 migrate_v2_to_v3(&transaction)?;
                 migrate_v3_to_v4(&transaction)?;
                 migrate_v4_to_v5(&transaction)?;
+                migrate_v5_to_v6(&transaction)?;
             }
             Some(3) => {
                 migrate_v3_to_v4(&transaction)?;
                 migrate_v4_to_v5(&transaction)?;
+                migrate_v5_to_v6(&transaction)?;
             }
-            Some(4) => migrate_v4_to_v5(&transaction)?,
+            Some(4) => {
+                migrate_v4_to_v5(&transaction)?;
+                migrate_v5_to_v6(&transaction)?;
+            }
+            Some(5) => migrate_v5_to_v6(&transaction)?,
             Some(DATABASE_SCHEMA_VERSION) => create_current_schema(&transaction)?,
             Some(other) => return Err(StoreError::UnsupportedSchema(other)),
         }
@@ -1537,6 +1600,14 @@ fn insert_mapping(
 
 fn device_secret_name(site_id: &SiteId, guest_id: &GuestId, device_id: &DeviceId) -> String {
     format!("device:{site_id}:{guest_id}:{device_id}:tor-client")
+}
+
+fn enrollment_factor_secret_name(
+    site_id: &SiteId,
+    guest_id: &GuestId,
+    device_id: &DeviceId,
+) -> String {
+    format!("enrollment:{site_id}:{guest_id}:{device_id}:totp")
 }
 
 fn account_secret_name(account_id: Uuid, purpose: &str) -> String {
@@ -1760,6 +1831,26 @@ fn create_enrollment_schema(transaction: &Transaction<'_>) -> Result<(), rusqlit
              created_unix INTEGER NOT NULL,
              expires_unix INTEGER NOT NULL CHECK (expires_unix > created_unix),
              used_unix INTEGER,
+             encrypted_totp BLOB,
+             UNIQUE (site_id, guest_id, device_id),
+             FOREIGN KEY (site_id, guest_id, device_id)
+                 REFERENCES devices(site_id, guest_id, id) ON DELETE CASCADE
+         ) STRICT;
+         CREATE INDEX IF NOT EXISTS device_enrollments_expiry
+             ON device_enrollments(expires_unix, used_unix);",
+    )
+}
+
+fn create_enrollment_schema_v5(transaction: &Transaction<'_>) -> Result<(), rusqlite::Error> {
+    transaction.execute_batch(
+        "CREATE TABLE IF NOT EXISTS device_enrollments (
+             token_hash BLOB PRIMARY KEY NOT NULL CHECK (length(token_hash) = 32),
+             site_id TEXT NOT NULL,
+             guest_id TEXT NOT NULL,
+             device_id TEXT NOT NULL,
+             created_unix INTEGER NOT NULL,
+             expires_unix INTEGER NOT NULL CHECK (expires_unix > created_unix),
+             used_unix INTEGER,
              UNIQUE (site_id, guest_id, device_id),
              FOREIGN KEY (site_id, guest_id, device_id)
                  REFERENCES devices(site_id, guest_id, id) ON DELETE CASCADE
@@ -1826,10 +1917,18 @@ fn migrate_v3_to_v4(transaction: &Transaction<'_>) -> Result<(), StoreError> {
 }
 
 fn migrate_v4_to_v5(transaction: &Transaction<'_>) -> Result<(), StoreError> {
-    create_enrollment_schema(transaction)?;
+    create_enrollment_schema_v5(transaction)?;
     transaction.execute(
         "UPDATE schema_version SET version = ?1 WHERE singleton = 1",
-        [DATABASE_SCHEMA_VERSION],
+        [5],
+    )?;
+    Ok(())
+}
+
+fn migrate_v5_to_v6(transaction: &Transaction<'_>) -> Result<(), StoreError> {
+    transaction.execute_batch(
+        "ALTER TABLE device_enrollments ADD COLUMN encrypted_totp BLOB;
+         UPDATE schema_version SET version = 6 WHERE singleton = 1;",
     )?;
     Ok(())
 }
@@ -2197,6 +2296,13 @@ mod tests {
         assert_eq!(record.site_id, site_id);
         assert_eq!(record.guest_id, guest_id);
         assert_eq!(record.device_id, device_id);
+        let factor = store.begin_device_enrollment(&token, 150).unwrap().unwrap();
+        let totp = factor.totp_secret.base32();
+        let reloaded = store.begin_device_enrollment(&token, 151).unwrap().unwrap();
+        assert_eq!(
+            factor.totp_secret.as_bytes(),
+            reloaded.totp_secret.as_bytes()
+        );
         assert!(store.device_enrollment(&token, 200).unwrap().is_none());
 
         let consumed = store
@@ -2210,6 +2316,12 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+        assert!(
+            store
+                .begin_device_enrollment(&token, 152)
+                .unwrap()
+                .is_none()
+        );
         for filename in [DATABASE_FILENAME, "state.sqlite3-wal"] {
             let path = temporary.path().join(filename);
             if let Ok(database) = fs::read(path) {
@@ -2217,6 +2329,11 @@ mod tests {
                     !database
                         .windows(token.expose().len())
                         .any(|window| window == token.expose().as_bytes())
+                );
+                assert!(
+                    !database
+                        .windows(totp.len())
+                        .any(|window| window == totp.as_bytes())
                 );
             }
         }
@@ -2505,5 +2622,40 @@ mod tests {
             )
             .unwrap();
         assert_eq!(version, DATABASE_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn migrates_v5_enrollments_to_encrypted_pending_factors() {
+        let temporary = tempfile::tempdir().unwrap();
+        let database_path = temporary.path().join(DATABASE_FILENAME);
+        let mut connection = Connection::open(&database_path).unwrap();
+        let transaction = connection.transaction().unwrap();
+        transaction
+            .execute_batch(
+                "CREATE TABLE schema_version (
+                     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                     version INTEGER NOT NULL
+                 );
+                 INSERT INTO schema_version (singleton, version) VALUES (1, 5);",
+            )
+            .unwrap();
+        create_v2_schema(&transaction).unwrap();
+        create_access_schema(&transaction).unwrap();
+        create_auth_schema(&transaction).unwrap();
+        create_enrollment_schema_v5(&transaction).unwrap();
+        transaction.commit().unwrap();
+        drop(connection);
+
+        let migrated = Store::open(temporary.path()).unwrap();
+        let columns: i64 = migrated
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('device_enrollments')
+                 WHERE name = 'encrypted_totp'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(columns, 1);
     }
 }

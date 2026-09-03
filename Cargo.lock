@@ -3047,10 +3047,12 @@ dependencies = [
  "axum",
  "base64 0.22.1",
  "http-body-util",
+ "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
+ "torkitten-auth",
  "torkitten-core",
  "tower",
 ]
@@ -3082,6 +3084,7 @@ dependencies = [
  "torkitten-tor",
  "torkitten-vault",
  "torkitten-web",
+ "url",
  "uuid",
 ]
 

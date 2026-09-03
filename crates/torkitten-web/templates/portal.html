@@ -25,11 +25,25 @@
             {% endfor %}
             </ul>
           {% endif %}
+          <form method="post" action="/logout">
+            <input type="hidden" name="csrf" value="{{ csrf }}">
+            <button type="submit">Sign out</button>
+          </form>
         </section>
       {% when None %}
         <section class="card">
           <h2>Guest sign-in required</h2>
           <p>This site requires its Tor client key, private certificate authority, and a Torkitten guest session.</p>
+          <form method="post" action="/login">
+            <input type="hidden" name="csrf" value="{{ csrf }}">
+            <label>Guest ID <input name="guest_id" required maxlength="64" autocomplete="username"></label>
+            <label>Password <input type="password" name="password" required autocomplete="current-password"></label>
+            <label>Second factor
+              <select name="factor_kind"><option value="totp">Authenticator code</option><option value="recovery">Recovery code</option></select>
+            </label>
+            <label>Code <input name="factor" required autocomplete="one-time-code"></label>
+            <button type="submit">Sign in</button>
+          </form>
         </section>
     {% endmatch %}
   </main>

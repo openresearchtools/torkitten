@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Save recovery codes · Torkitten</title>
+  <link rel="stylesheet" href="/assets/app.css">
+</head>
+<body>
+  <main>
+    <div class="eyebrow">Enrollment complete</div>
+    <h1>Save your recovery codes</h1>
+    <section class="card">
+      <p>Each code works once. Store them somewhere private; Torkitten will not show them again.</p>
+      <ul>{% for code in recovery_codes %}<li><code>{{ code }}</code></li>{% endfor %}</ul>
+      <p><a href="/">Continue to applications</a></p>
+    </section>
+  </main>
+</body>
+</html>

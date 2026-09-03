@@ -19,3 +19,7 @@ p { color: #b8c0cf; line-height: 1.6; }
 .muted { color: #8f9aaf; }
 code { overflow-wrap: anywhere; color: #dce4f2; }
 a { color: #8fc8ff; }
+form { display: grid; gap: 14px; margin-top: 20px; }
+label { display: grid; gap: 6px; color: #cbd3df; }
+input, select, button { width: 100%; padding: 12px 14px; border: 1px solid #465064; border-radius: 9px; background: #10141b; color: #f4f6fb; font: inherit; }
+button { cursor: pointer; background: #2f7d64; border-color: #459c7f; font-weight: 700; }

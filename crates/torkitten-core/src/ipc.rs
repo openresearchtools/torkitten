@@ -253,10 +253,33 @@ pub enum RemoteCommand {
         site_id: SiteId,
         token: SensitiveString,
     },
+    CompletePasswordEnrollment {
+        site_id: SiteId,
+        token: SensitiveString,
+        password: SensitiveString,
+        totp_code: SensitiveString,
+    },
+    AuthenticateGuest {
+        site_id: SiteId,
+        guest_id: GuestId,
+        password: SensitiveString,
+        second_factor: GuestSecondFactor,
+    },
+    LogoutGuest {
+        site_id: SiteId,
+        session: SensitiveString,
+    },
     BootstrapCertificate {
         site_id: SiteId,
         path: String,
     },
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
+pub enum GuestSecondFactor {
+    Totp(SensitiveString),
+    RecoveryCode(SensitiveString),
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -301,7 +324,19 @@ pub enum RemoteResponse {
         device_id: DeviceId,
         device_display_name: String,
         expires_unix: i64,
+        totp_secret: Option<SensitiveString>,
+        totp_uri: Option<SensitiveString>,
     },
+    GuestAuthenticated {
+        session: SensitiveString,
+        expires_unix: i64,
+    },
+    EnrollmentCompleted {
+        session: SensitiveString,
+        expires_unix: i64,
+        recovery_codes: Vec<SensitiveString>,
+    },
+    LoggedOut,
     BootstrapCertificate {
         certificate_pem: String,
         expires_unix: i64,
@@ -348,5 +383,18 @@ mod tests {
         assert_eq!(encoded["command"], "authorize_mapping");
         assert!(encoded.get("component").is_none());
         assert!(encoded.get("action").is_none());
+    }
+
+    #[test]
+    fn remote_authentication_factors_are_redacted() {
+        let command = RemoteCommand::AuthenticateGuest {
+            site_id: SiteId::new("personal").unwrap(),
+            guest_id: GuestId::new("family").unwrap(),
+            password: SensitiveString::new("password secret"),
+            second_factor: GuestSecondFactor::Totp(SensitiveString::new("123456")),
+        };
+        let debug = format!("{command:?}");
+        assert!(!debug.contains("password secret"));
+        assert!(!debug.contains("123456"));
     }
 }

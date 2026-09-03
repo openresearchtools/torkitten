@@ -11,8 +11,8 @@ pub use config::{
 };
 pub use ipc::{
     AdminCommand, AdminResponse, ComponentAction, ComponentState, GatewayMode, GatewayStatus,
-    GuestAccessStatus, ManagedComponent, PortalContext, PortalMapping, PublishedSite,
-    RemoteCommand, RemoteResponse, SensitiveString, SiteStatus,
+    GuestAccessStatus, GuestSecondFactor, ManagedComponent, PortalContext, PortalMapping,
+    PublishedSite, RemoteCommand, RemoteResponse, SensitiveString, SiteStatus,
 };
 
 pub const CONFIG_SCHEMA_VERSION: u32 = 2;
