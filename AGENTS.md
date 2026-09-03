@@ -2,7 +2,7 @@
 
 Read this entire file before changing the repository. This is the authoritative
 product contract and supersedes the removed Rust, native-desktop, multi-site,
-guest, group, and per-mapping-permission designs.
+guest, user-managed-group, and per-mapping-permission designs.
 
 ## Product
 
@@ -23,10 +23,16 @@ panel is opened in the host browser through a port published only on
   sessions, a cookie firewall, or a custom Caddy authentication module unless
   the user explicitly changes the threat model.
 - Authelia is the sole store and verifier for the owner's username, password,
-  and TOTP. Torkitten never stores a second password hash or TOTP seed.
-- Authelia owns onion sessions and onion authorization decisions. Caddy asks
-  Authelia to authorize every protected onion request and contacts a mapped
-  application only after an explicit successful authorization response.
+  TOTP, and membership in one fixed internal group named `torkitten-owner`.
+  Torkitten never stores a second password hash, TOTP seed, or authorization
+  list.
+- Authelia owns onion sessions and onion authorization decisions. Its generated
+  access-control policy defaults to deny and requires `two_factor` plus the
+  `group:torkitten-owner` subject for the base onion domain and all of its
+  subdomains. Torkitten does not evaluate group membership or implement an
+  onion access-control engine.
+- Caddy asks Authelia to authorize every protected onion request and contacts a
+  mapped application only after an explicit successful authorization response.
 - Stock Authelia does not protect the HTTP `localhost` administration origin.
   For local login, Torkitten delegates factor verification to Authelia over a
   private internal HTTPS connection and, only after success, creates its own
@@ -59,10 +65,16 @@ responses, redirects, WebSockets, SSE, and application cookies pass through
 without application-specific rewriting.
 
 One Authelia cookie scoped to the base onion domain provides one login across
-all prefixes. Adding a prefix does not create an Authelia Application, user,
-group, role, provider, or separate login.
+all prefixes. The owner is the sole member of the fixed `torkitten-owner`
+group. Authelia's domain rule covers both the base hostname and its wildcard
+subdomains, so adding a prefix does not create or modify an Authelia
+Application, user, group, role, provider, policy, or login. Applications are
+not group members; users are group members and domain rules select the
+protected applications.
 
-The hostname relationship does not itself enforce authentication. Generated
+The hostname relationship and wildcard policy do not themselves intercept
+traffic or enforce HTTPS. Caddy terminates HTTPS and must invoke Authelia's
+stock forward-authorization endpoint for every protected route. Generated
 Caddy configuration must place an internal Authelia authorization subrequest in
 front of the base launcher and every configured application host. Only an
 explicit successful authorization response can continue to the protected
@@ -140,8 +152,9 @@ service. It is the only place users manage Torkitten mappings, identity,
 publication, onboarding, and API credentials. Authelia's own administration
 concepts are not exposed as product objects.
 
-First-run setup creates one owner in Authelia. The user enters one username, one
-password, and enrolls one TOTP secret. Local administration and onion access
+First-run setup creates one owner in Authelia as the sole member of the fixed
+`torkitten-owner` group. The user enters one username, one password, and enrolls
+one TOTP secret. Local administration and onion access
 both validate against that exact Authelia record; no credentials are mirrored
 into Torkitten. The two browser contexts have separate sessions because
 `http://localhost:12755` and `.onion` are different origins.
@@ -162,8 +175,10 @@ login rate limits, and the loopback-only listener are mandatory. Host-local
 malware and other principals able to defeat the host's loopback boundary are
 outside the container's security boundary.
 
-No guests, user groups, roles, or per-application grants are part of this
-product.
+No guests, additional users, user-managed groups, roles, or per-application
+grants are part of this product. The one fixed internal Authelia owner group
+exists only to express the uniform built-in Authelia policy for every mapped
+application; it is not a product object or a configurable permission system.
 
 Onboarding can be reopened for every new device. It provides the public onion
 address, a Tor client-authorization credential, the public CA certificate, and
@@ -307,7 +322,8 @@ First run is a persisted state machine:
    password confirmation. It does not ask for TOTP on the same screen.
 2. Torkitten strictly validates the username and password, creates the
    Authelia-compatible Argon2id PHC hash, and atomically creates Authelia's
-   one-user file database. Plaintext exists only in bounded process memory for
+   one-user file database with that user as the sole member of the fixed
+   `torkitten-owner` group. Plaintext exists only in bounded process memory for
    the active setup exchange; it is never persisted or logged.
 3. Torkitten starts or reloads the pinned Authelia configuration and waits for
    its private HTTPS readiness endpoint.
@@ -516,15 +532,16 @@ schema versions:
 /var/lib/torkitten/state.json             model and local-session/API-token hashes
 /var/lib/torkitten/tor/hidden-service/    persistent onion identity and public auth entries
 /var/lib/torkitten/pki/                   private root and TLS keys/certificates
-/var/lib/torkitten/authelia/users.yml     one username and password hash
+/var/lib/torkitten/authelia/users.yml     one username, password hash, and fixed owner-group membership
 /var/lib/torkitten/authelia/db.sqlite3    Authelia TOTP/WebAuthn/authentication state
 /var/lib/torkitten/authelia/secrets/      Authelia session and storage-encryption keys
 /var/lib/torkitten/caddy/last-good.json   derived non-authoritative routes
 /run/torkitten/                           private sockets and temporary enrollment files
 ```
 
-Authelia alone owns the password hash, encrypted TOTP secret, future WebAuthn
-credentials, onion login regulation, and onion sessions. Torkitten owns local
+Authelia alone owns the password hash, fixed owner-group membership, encrypted
+TOTP secret, future WebAuthn credentials, onion login regulation, and onion
+sessions. Torkitten owns local
 session hashes, the Tor identity, private CA, component bootstrap keys,
 device-public-key records, and agent-token hashes. Plaintext login factors live
 only for the bounded request/exchange that uses them.
@@ -542,10 +559,11 @@ the pinned component versions must prove:
 
 1. Current C Tor and Tor Browser route approved prefixes of one v3 onion
    identity to one service while preserving the complete Host value.
-2. Pinned Authelia and every advertised client combination accept one cookie
-   scoped to the base onion hostname and send it to all approved prefixes. The
-   required matrix includes desktop Tor Browser, iOS Safari/WebKit routed
-   through Orbot, and each supported Android browser routed through Orbot.
+2. Pinned Authelia authorizes the sole owner through its fixed internal group
+   and every advertised client combination accepts one cookie scoped to the
+   base onion hostname and sends it to all approved prefixes. The required
+   matrix includes desktop Tor Browser, iOS Safari/WebKit routed through Orbot,
+   and each supported Android browser routed through Orbot.
 3. Supported Windows, macOS, Linux, iOS, and Android combinations can manually
    import the public CA and Tor client credential, resolve prefixed onion hosts,
    complete redirects, and reopen an authenticated session. Unsupported or
@@ -574,12 +592,14 @@ behavior or a weakened browser policy.
    persistence, and retain existing validation/Caddy/control tests.
 2. **Runtime:** build one entrypoint supervising pinned Caddy, Authelia, and C
    Tor with private control endpoints.
-3. **Owner bootstrap:** implement the one-account state machine, Authelia user,
-   direct TOTP generation, delegated factor proof, and local session creation.
+3. **Owner bootstrap:** implement the one-account state machine, Authelia user
+   and fixed owner-group membership, direct TOTP generation, delegated factor
+   proof, and local session creation.
 4. **Onion and PKI:** persist one identity, require a Tor client key before
    publication, issue certificates, and prove prefixed hosts in Tor Browser.
-5. **Protected mappings:** implement deterministic Caddy configuration, generic
-   Authelia 2FA, hot loads, rollback, and live host-loopback upstream tests.
+5. **Protected mappings:** implement deterministic Caddy configuration, the
+   fixed-group Authelia 2FA policy, hot loads, rollback, and live host-loopback
+   upstream tests.
 6. **Onboarding:** implement repeated device creation/revocation, public CA
    delivery, bounded port-80 bootstrap, and credential exports.
 7. **Sensitive controls:** add publication control, onion rotation, owner
