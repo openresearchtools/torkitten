@@ -56,11 +56,29 @@ Scope:
 
 Current verified partial evidence:
 
-- Ubuntu 24.04 accepted an administrator reset through `torkittenctl` and the
-  protected daemon socket; the native Wry dashboard was then opened visibly and
-  authenticated using guest key events.
-- The package used for that partial test does not include every uncommitted M1
-  change and therefore is not final M1 evidence.
+- Exact M1 package `torkitten_0.1.0_amd64.deb`, SHA-256
+  `6610767d849f3ce90dd9e0425eed2251d4757738a5a24f1eb598158002504eea`,
+  was built from pushed commit `622eee0` and installed successfully in all three
+  running guests without restarting or reconfiguring a VM or display.
+- The installed Tor and Caddy bytes in all three guests exactly match the
+  downloaded Actions artifacts: Tor SHA-256
+  `40e0faa9ab28b56b692758c53cf05b63b018457d55a268fdb042fb450b1a3e85`
+  and Caddy SHA-256
+  `8b3a71c29f07d3b7e4cee1bee3d778dbf5150525304051e42ea4d78aea1c8551`.
+- Ubuntu 24.04 accepted an administrator username/password reset through
+  `torkittenctl` and the protected daemon socket. The current Wry dashboard was
+  opened visibly and authenticated. Closing Wry left the daemon, Tor, and Caddy
+  active; reopening without credentials restored the authenticated dashboard.
+  Its persistent profile was mode `0700`. Accessibility exposed `Generate
+  site` and `Sign out`, and did not expose the removed recovery-code policy.
+- Debian 13 accepted the protected administrator reset and displayed the
+  authenticated current dashboard with exactly one Wry process.
+- Ubuntu 26.04 installed and opened exactly one current Wry window at the
+  username/password login. Its daemon is active with zero restarts; Tor and
+  Caddy are intentionally stopped because this guest has no persisted site.
+  QEMU keyboard injection did not reach the inactive Wayland window and GNOME
+  denied remote focus activation, so authenticated dashboard/reopen evidence is
+  still pending for this guest. No persistent input workaround was installed.
 - The complete workspace test run passes 144 tests; its seven ignored
   real-binary tests were then run separately and all seven passed against the
   downloaded GitHub Actions Tor and Caddy artifacts.
@@ -69,10 +87,10 @@ Current verified partial evidence:
 
 Required before M1 completion:
 
-- Build the exact package from the completed tree using the downloaded Actions
-  Tor and Caddy artifacts.
-- Install and exercise that exact package in all three existing visible VMs.
-- Commit and push; record the SHA and evidence below.
+- Complete authenticated dashboard and reopen evidence on Ubuntu 26.04 without
+  changing the user's VM/display configuration.
+- Exercise live guest reset/fresh enrollment, staged password then TOTP, and
+  the separate platform-passkey/hardware-key choices.
 
 ## Defect and requirement register
 
@@ -124,8 +142,9 @@ identity/username. Existing installations need a deterministic migration.
 
 Source and automated evidence: a validated administrator username now crosses
 setup, login, protected reset, CLI, daemon, and vault migration. Existing state
-migrates to username `admin`; unit and HTTP boundary tests pass. Live upgrade
-and login evidence is pending.
+migrates to username `admin`; unit and HTTP boundary tests pass. Exact-package
+upgrade/reset/login passed live on Ubuntu 24.04 and Debian 13; Ubuntu 26.04
+authenticated-login evidence remains pending.
 
 ### AUTH-005 — Forgotten administrator password can strand an installation
 
@@ -145,8 +164,9 @@ Source and automated evidence: native/container reset accepts the replacement
 username on the command line and password only on stdin, atomically changes both
 credentials, and revokes all administrator sessions. A fresh authenticated
 administrator can also change credentials in the local UI; a stale session is
-rejected. Partial live evidence exists on Ubuntu 24.04 for the earlier
-password-only reset. All-VM final-package evidence is pending.
+rejected. Exact M1 package reset/login evidence passed on Ubuntu 24.04 and Debian
+13. Ubuntu 26.04 authenticated-login and container recovery evidence remain
+pending.
 
 ### AUTH-006 — Native Wry window forgets its session after closing
 
@@ -159,8 +179,9 @@ unrevoked session.
 
 Source and automated evidence: Wry uses a persistent WebContext rooted under the
 XDG data directory; unsafe paths are rejected and both directories are enforced
-as mode `0700`. Four desktop tests and strict Clippy pass. Final-package live
-reopen evidence is pending.
+as mode `0700`. Four desktop tests and strict Clippy pass. Exact M1 package live
+close/service-survival/reopen/session-restoration evidence passed on Ubuntu
+24.04. The other environments remain pending.
 
 ### AUTH-007 — Setup page remains stale after administrator creation
 
@@ -285,12 +306,17 @@ Evidence: pending.
 
 ### DESKTOP-001 — More than one administration window can be launched
 
-Status: OPEN
+Status: OPEN; CONFIRMED LIVE
 
 Required behavior: make the native desktop application single-instance or focus
 the existing administration window when launched again.
 
-Evidence: pending.
+Evidence: Ubuntu 24.04 allowed an existing pre-upgrade Wry process and a newly
+launched current process to coexist. Accessibility exposed both applications;
+the stale process still held the old recovery-code control in memory while the
+current process did not. The exact stale PID was closed and one authenticated
+current window was left open. Implementation and regression evidence are
+pending.
 
 ### VM-001 — Testing must preserve the user's live graphical VM workflow
 
@@ -354,3 +380,13 @@ Append entries here; never rewrite history to make a partial test appear final.
   package on Ubuntu 24.04, reset the local administrator through the protected
   socket, and visibly opened the authenticated dashboard. This is explicitly
   not final M1 or final-package evidence.
+- 2026-09-03 — `622eee0`: exact M1 package SHA-256
+  `6610767d849f3ce90dd9e0425eed2251d4757738a5a24f1eb598158002504eea`
+  installed in Ubuntu 24.04, Ubuntu 26.04, and Debian 13. Installed Tor/Caddy
+  hashes matched the downloaded Actions artifacts in every guest. Ubuntu 24.04
+  passed protected reset, authenticated native dashboard, window-close service
+  survival, and credential-free session reopen. Debian 13 passed protected reset
+  and authenticated native dashboard. Ubuntu 26.04 opened the current native
+  login UI but authenticated GUI/reopen evidence remains pending because its VM
+  keyboard injection did not reach the inactive Wayland window and GNOME denied
+  remote focus activation.
