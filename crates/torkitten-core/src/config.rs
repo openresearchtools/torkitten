@@ -57,6 +57,8 @@ macro_rules! validated_id {
 
 validated_id!(SiteId, validate_site_id, InvalidSiteId);
 validated_id!(MappingId, validate_mapping_id, InvalidMappingId);
+validated_id!(GuestId, validate_guest_id, InvalidGuestId);
+validated_id!(DeviceId, validate_device_id, InvalidDeviceId);
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -252,6 +254,22 @@ fn validate_mapping_id(value: &str) -> Result<(), ValidationError> {
     }
 }
 
+fn validate_guest_id(value: &str) -> Result<(), ValidationError> {
+    if valid_identifier(value) {
+        Ok(())
+    } else {
+        Err(ValidationError::InvalidGuestId(value.to_owned()))
+    }
+}
+
+fn validate_device_id(value: &str) -> Result<(), ValidationError> {
+    if valid_identifier(value) {
+        Ok(())
+    } else {
+        Err(ValidationError::InvalidDeviceId(value.to_owned()))
+    }
+}
+
 fn valid_identifier(value: &str) -> bool {
     let valid_length = (1..=64).contains(&value.len());
     let valid_edges = !value.starts_with('-') && !value.ends_with('-');
@@ -286,10 +304,20 @@ pub enum ValidationError {
     InvalidSiteId(String),
     #[error("mapping id must be 1-64 lowercase ASCII letters, digits, or interior hyphens: {0}")]
     InvalidMappingId(String),
+    #[error("guest id must be 1-64 lowercase ASCII letters, digits, or interior hyphens: {0}")]
+    InvalidGuestId(String),
+    #[error("device id must be 1-64 lowercase ASCII letters, digits, or interior hyphens: {0}")]
+    InvalidDeviceId(String),
     #[error("site display name must be 1-128 characters without control characters")]
     InvalidSiteDisplayName,
     #[error("mapping display name must be 1-128 characters without control characters")]
     InvalidMappingDisplayName,
+    #[error("guest display name must be 1-128 characters without control characters")]
+    InvalidGuestDisplayName,
+    #[error("device display name must be 1-128 characters without control characters")]
+    InvalidDeviceDisplayName,
+    #[error("invalid Tor client name: {0}")]
+    InvalidTorClientName(String),
     #[error("virtual port cannot be zero")]
     ZeroVirtualPort,
     #[error("virtual port {0} is reserved by Torkitten")]

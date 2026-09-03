@@ -1,10 +1,13 @@
 #![forbid(unsafe_code)]
 
+mod access;
 mod config;
 mod ipc;
 
+pub use access::{Device, Guest};
 pub use config::{
-    GatewayConfig, Mapping, MappingId, MappingTarget, Site, SiteId, Transport, ValidationError,
+    DeviceId, GatewayConfig, GuestId, Mapping, MappingId, MappingTarget, Site, SiteId, Transport,
+    ValidationError,
 };
 pub use ipc::{
     AdminCommand, AdminResponse, ComponentAction, ComponentState, GatewayMode, GatewayStatus,

@@ -1,4 +1,5 @@
 use std::{
+    collections::HashSet,
     fs::{self, OpenOptions},
     os::unix::fs::{OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
@@ -8,14 +9,17 @@ use std::{
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
-use torkitten_core::{GatewayConfig, Mapping, MappingId, Site, SiteId, ValidationError};
+use torkitten_core::{
+    Device, DeviceId, GatewayConfig, Guest, GuestId, Mapping, MappingId, Site, SiteId,
+    ValidationError,
+};
 use zeroize::Zeroizing;
 
 use crate::{EncryptedSecret, VaultCipher, cipher::CipherError, key::KeyError};
 
 const DATABASE_FILENAME: &str = "state.sqlite3";
 const KEY_FILENAME: &str = "secrets/vault.key";
-const DATABASE_SCHEMA_VERSION: i64 = 2;
+const DATABASE_SCHEMA_VERSION: i64 = 3;
 const LEGACY_SITE_ID: &str = "default";
 const LEGACY_SITE_DISPLAY_NAME: &str = "Default site";
 
@@ -28,6 +32,27 @@ pub struct Store {
 pub struct SessionRecord {
     pub expires_unix: i64,
     pub last_seen_unix: i64,
+}
+
+pub struct DeviceRecord {
+    pub device: Device,
+    pub secret_material: Zeroizing<Vec<u8>>,
+}
+
+impl std::fmt::Debug for DeviceRecord {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("DeviceRecord")
+            .field("device", &self.device)
+            .field("secret_material", &"[REDACTED]")
+            .finish()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PublicationSettings {
+    pub resume_after_boot: bool,
+    pub emergency_disabled: bool,
 }
 
 impl Store {
@@ -147,6 +172,25 @@ impl Store {
         candidate.sites.push(site.clone());
         candidate.validate()?;
 
+        let retained_mapping_ids = site
+            .mappings
+            .iter()
+            .map(|mapping| mapping.id.as_str())
+            .collect::<HashSet<_>>();
+        let retained_permissions = {
+            let mut statement = self.connection.prepare(
+                "SELECT guest_id, mapping_id FROM guest_mapping_permissions
+                 WHERE site_id = ?1 ORDER BY guest_id, mapping_id",
+            )?;
+            let rows = statement.query_map([site.id.as_str()], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?;
+            rows.collect::<Result<Vec<_>, _>>()?
+                .into_iter()
+                .filter(|(_, mapping_id)| retained_mapping_ids.contains(mapping_id.as_str()))
+                .collect::<Vec<_>>()
+        };
+
         let transaction = self.connection.transaction()?;
         transaction.execute(
             "INSERT INTO sites (id, display_name, enabled) VALUES (?1, ?2, ?3)
@@ -160,6 +204,13 @@ impl Store {
         )?;
         for mapping in &site.mappings {
             insert_mapping(&transaction, &site.id, mapping)?;
+        }
+        for (guest_id, mapping_id) in retained_permissions {
+            transaction.execute(
+                "INSERT INTO guest_mapping_permissions (site_id, guest_id, mapping_id)
+                 VALUES (?1, ?2, ?3)",
+                params![site.id.as_str(), guest_id, mapping_id],
+            )?;
         }
         transaction.commit()?;
         Ok(())
@@ -253,6 +304,372 @@ impl Store {
             })?;
         mapping.enabled = enabled;
         self.put_site(&site)
+    }
+
+    /// Adds or replaces one guest within an existing site.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the guest is invalid, its site is missing, or the
+    /// update cannot be committed.
+    pub fn put_guest(&self, guest: &Guest) -> Result<(), StoreError> {
+        guest.validate()?;
+        if self.site(&guest.site_id)?.is_none() {
+            return Err(StoreError::SiteNotFound(guest.site_id.clone()));
+        }
+        self.connection.execute(
+            "INSERT INTO guests (site_id, id, display_name, enabled)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(site_id, id) DO UPDATE SET
+                 display_name = excluded.display_name,
+                 enabled = excluded.enabled",
+            params![
+                guest.site_id.as_str(),
+                guest.id.as_str(),
+                guest.display_name,
+                guest.enabled
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Returns one site-scoped guest.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when SQLite access or persisted validation fails.
+    pub fn guest(&self, site_id: &SiteId, guest_id: &GuestId) -> Result<Option<Guest>, StoreError> {
+        let row = self
+            .connection
+            .query_row(
+                "SELECT display_name, enabled FROM guests
+                 WHERE site_id = ?1 AND id = ?2",
+                params![site_id.as_str(), guest_id.as_str()],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, bool>(1)?)),
+            )
+            .optional()?;
+        let Some((display_name, enabled)) = row else {
+            return Ok(None);
+        };
+        let guest = Guest {
+            site_id: site_id.clone(),
+            id: guest_id.clone(),
+            display_name,
+            enabled,
+        };
+        guest.validate()?;
+        Ok(Some(guest))
+    }
+
+    /// Returns every guest for one site in stable identifier order.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when SQLite access or persisted validation fails.
+    pub fn guests(&self, site_id: &SiteId) -> Result<Vec<Guest>, StoreError> {
+        let mut statement = self.connection.prepare(
+            "SELECT id, display_name, enabled FROM guests
+             WHERE site_id = ?1 ORDER BY id",
+        )?;
+        let rows = statement.query_map([site_id.as_str()], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, bool>(2)?,
+            ))
+        })?;
+        let mut guests = Vec::new();
+        for row in rows {
+            let (id, display_name, enabled) = row?;
+            let guest = Guest {
+                site_id: site_id.clone(),
+                id: GuestId::new(id)?,
+                display_name,
+                enabled,
+            };
+            guest.validate()?;
+            guests.push(guest);
+        }
+        Ok(guests)
+    }
+
+    /// Removes a guest and cascades only that guest's devices and grants.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when SQLite cannot apply the deletion.
+    pub fn remove_guest(&self, site_id: &SiteId, guest_id: &GuestId) -> Result<bool, StoreError> {
+        Ok(self.connection.execute(
+            "DELETE FROM guests WHERE site_id = ?1 AND id = ?2",
+            params![site_id.as_str(), guest_id.as_str()],
+        )? != 0)
+    }
+
+    /// Adds or replaces one device and encrypts its Tor client material.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the device is invalid, its guest is missing, or
+    /// encryption and persistence fail.
+    pub fn put_device(&self, device: &Device, secret_material: &[u8]) -> Result<(), StoreError> {
+        device.validate()?;
+        if self.guest(&device.site_id, &device.guest_id)?.is_none() {
+            return Err(StoreError::GuestNotFound {
+                site_id: device.site_id.clone(),
+                guest_id: device.guest_id.clone(),
+            });
+        }
+        let aad = device_secret_name(&device.site_id, &device.guest_id, &device.id);
+        let encrypted = self.cipher.encrypt(&aad, secret_material)?;
+        self.connection.execute(
+            "INSERT INTO devices
+                 (site_id, guest_id, id, display_name, tor_client_name, enabled, encrypted_secret)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT(site_id, guest_id, id) DO UPDATE SET
+                 display_name = excluded.display_name,
+                 tor_client_name = excluded.tor_client_name,
+                 enabled = excluded.enabled,
+                 encrypted_secret = excluded.encrypted_secret",
+            params![
+                device.site_id.as_str(),
+                device.guest_id.as_str(),
+                device.id.as_str(),
+                device.display_name,
+                device.tor_client_name,
+                device.enabled,
+                encrypted.as_bytes()
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Returns one device and decrypts its Tor client material.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when SQLite access, persisted validation, or
+    /// authenticated decryption fails.
+    pub fn device(
+        &self,
+        site_id: &SiteId,
+        guest_id: &GuestId,
+        device_id: &DeviceId,
+    ) -> Result<Option<DeviceRecord>, StoreError> {
+        let row = self
+            .connection
+            .query_row(
+                "SELECT display_name, tor_client_name, enabled, encrypted_secret
+                 FROM devices WHERE site_id = ?1 AND guest_id = ?2 AND id = ?3",
+                params![site_id.as_str(), guest_id.as_str(), device_id.as_str()],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, bool>(2)?,
+                        row.get::<_, Vec<u8>>(3)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((display_name, tor_client_name, enabled, encrypted)) = row else {
+            return Ok(None);
+        };
+        let device = Device {
+            site_id: site_id.clone(),
+            guest_id: guest_id.clone(),
+            id: device_id.clone(),
+            display_name,
+            tor_client_name,
+            enabled,
+        };
+        device.validate()?;
+        let aad = device_secret_name(site_id, guest_id, device_id);
+        let secret_material = self
+            .cipher
+            .decrypt(&aad, &EncryptedSecret::from_bytes(encrypted))?;
+        Ok(Some(DeviceRecord {
+            device,
+            secret_material,
+        }))
+    }
+
+    /// Returns device metadata for one guest without decrypting credentials.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when SQLite access or persisted validation fails.
+    pub fn devices(&self, site_id: &SiteId, guest_id: &GuestId) -> Result<Vec<Device>, StoreError> {
+        let mut statement = self.connection.prepare(
+            "SELECT id, display_name, tor_client_name, enabled FROM devices
+             WHERE site_id = ?1 AND guest_id = ?2 ORDER BY id",
+        )?;
+        let rows = statement.query_map(params![site_id.as_str(), guest_id.as_str()], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, bool>(3)?,
+            ))
+        })?;
+        let mut devices = Vec::new();
+        for row in rows {
+            let (id, display_name, tor_client_name, enabled) = row?;
+            let device = Device {
+                site_id: site_id.clone(),
+                guest_id: guest_id.clone(),
+                id: DeviceId::new(id)?,
+                display_name,
+                tor_client_name,
+                enabled,
+            };
+            device.validate()?;
+            devices.push(device);
+        }
+        Ok(devices)
+    }
+
+    /// Removes one device and its encrypted client material.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when SQLite cannot apply the deletion.
+    pub fn remove_device(
+        &self,
+        site_id: &SiteId,
+        guest_id: &GuestId,
+        device_id: &DeviceId,
+    ) -> Result<bool, StoreError> {
+        Ok(self.connection.execute(
+            "DELETE FROM devices WHERE site_id = ?1 AND guest_id = ?2 AND id = ?3",
+            params![site_id.as_str(), guest_id.as_str(), device_id.as_str()],
+        )? != 0)
+    }
+
+    /// Replaces the complete mapping grant set for one guest atomically.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the guest or a mapping is missing, identifiers
+    /// are duplicated, or SQLite cannot commit the replacement.
+    pub fn set_guest_permissions(
+        &mut self,
+        site_id: &SiteId,
+        guest_id: &GuestId,
+        mapping_ids: &[MappingId],
+    ) -> Result<(), StoreError> {
+        if self.guest(site_id, guest_id)?.is_none() {
+            return Err(StoreError::GuestNotFound {
+                site_id: site_id.clone(),
+                guest_id: guest_id.clone(),
+            });
+        }
+        let mut unique = HashSet::with_capacity(mapping_ids.len());
+        for mapping_id in mapping_ids {
+            if !unique.insert(mapping_id.clone()) {
+                return Err(StoreError::DuplicatePermission(mapping_id.clone()));
+            }
+            let exists = self.connection.query_row(
+                "SELECT EXISTS(
+                     SELECT 1 FROM mappings WHERE site_id = ?1 AND id = ?2
+                 )",
+                params![site_id.as_str(), mapping_id.as_str()],
+                |row| row.get::<_, bool>(0),
+            )?;
+            if !exists {
+                return Err(StoreError::MappingNotFound {
+                    site_id: site_id.clone(),
+                    mapping_id: mapping_id.clone(),
+                });
+            }
+        }
+
+        let transaction = self.connection.transaction()?;
+        transaction.execute(
+            "DELETE FROM guest_mapping_permissions WHERE site_id = ?1 AND guest_id = ?2",
+            params![site_id.as_str(), guest_id.as_str()],
+        )?;
+        for mapping_id in mapping_ids {
+            transaction.execute(
+                "INSERT INTO guest_mapping_permissions (site_id, guest_id, mapping_id)
+                 VALUES (?1, ?2, ?3)",
+                params![site_id.as_str(), guest_id.as_str(), mapping_id.as_str()],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Returns one guest's granted mappings in stable identifier order.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when SQLite access or persisted validation fails.
+    pub fn guest_permissions(
+        &self,
+        site_id: &SiteId,
+        guest_id: &GuestId,
+    ) -> Result<Vec<MappingId>, StoreError> {
+        let mut statement = self.connection.prepare(
+            "SELECT mapping_id FROM guest_mapping_permissions
+             WHERE site_id = ?1 AND guest_id = ?2 ORDER BY mapping_id",
+        )?;
+        let rows = statement.query_map(params![site_id.as_str(), guest_id.as_str()], |row| {
+            row.get::<_, String>(0)
+        })?;
+        let mut mappings = Vec::new();
+        for row in rows {
+            mappings.push(MappingId::new(row?)?);
+        }
+        Ok(mappings)
+    }
+
+    /// Returns the persistent publication policy and emergency latch.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when SQLite cannot read the singleton settings row.
+    pub fn publication_settings(&self) -> Result<PublicationSettings, StoreError> {
+        self.connection
+            .query_row(
+                "SELECT resume_after_boot, emergency_disabled
+                 FROM publication_settings WHERE singleton = 1",
+                [],
+                |row| {
+                    Ok(PublicationSettings {
+                        resume_after_boot: row.get(0)?,
+                        emergency_disabled: row.get(1)?,
+                    })
+                },
+            )
+            .map_err(Into::into)
+    }
+
+    /// Updates whether enabled sites resume automatically after boot.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when SQLite cannot commit the setting.
+    pub fn set_resume_after_boot(&self, enabled: bool) -> Result<(), StoreError> {
+        self.connection.execute(
+            "UPDATE publication_settings SET resume_after_boot = ?1 WHERE singleton = 1",
+            [enabled],
+        )?;
+        Ok(())
+    }
+
+    /// Sets or clears the persistent publication emergency latch.
+    ///
+    /// Clearing this value is intended only for local administration.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when SQLite cannot commit the latch.
+    pub fn set_emergency_disabled(&self, disabled: bool) -> Result<(), StoreError> {
+        self.connection.execute(
+            "UPDATE publication_settings SET emergency_disabled = ?1 WHERE singleton = 1",
+            [disabled],
+        )?;
+        Ok(())
     }
 
     /// Stores an encrypted product-wide secret bound to its logical name.
@@ -397,7 +814,11 @@ impl Store {
                     [DATABASE_SCHEMA_VERSION],
                 )?;
             }
-            Some(1) => migrate_v1_to_v2(&transaction)?,
+            Some(1) => {
+                migrate_v1_to_v2(&transaction)?;
+                migrate_v2_to_v3(&transaction)?;
+            }
+            Some(2) => migrate_v2_to_v3(&transaction)?,
             Some(DATABASE_SCHEMA_VERSION) => create_current_schema(&transaction)?,
             Some(other) => return Err(StoreError::UnsupportedSchema(other)),
         }
@@ -428,7 +849,16 @@ fn insert_mapping(
     Ok(())
 }
 
+fn device_secret_name(site_id: &SiteId, guest_id: &GuestId, device_id: &DeviceId) -> String {
+    format!("device:{site_id}:{guest_id}:{device_id}:tor-client")
+}
+
 fn create_current_schema(transaction: &Transaction<'_>) -> Result<(), rusqlite::Error> {
+    create_v2_schema(transaction)?;
+    create_access_schema(transaction)
+}
+
+fn create_v2_schema(transaction: &Transaction<'_>) -> Result<(), rusqlite::Error> {
     transaction.execute_batch(
         "CREATE TABLE IF NOT EXISTS sites (
              id TEXT PRIMARY KEY NOT NULL,
@@ -456,6 +886,48 @@ fn create_current_schema(transaction: &Transaction<'_>) -> Result<(), rusqlite::
              revoked INTEGER NOT NULL CHECK (revoked IN (0, 1))
          ) STRICT;
          CREATE INDEX IF NOT EXISTS sessions_expiry ON sessions(expires_unix);",
+    )
+}
+
+fn create_access_schema(transaction: &Transaction<'_>) -> Result<(), rusqlite::Error> {
+    transaction.execute_batch(
+        "CREATE TABLE IF NOT EXISTS guests (
+             site_id TEXT NOT NULL,
+             id TEXT NOT NULL,
+             display_name TEXT NOT NULL CHECK (length(display_name) BETWEEN 1 AND 128),
+             enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
+             PRIMARY KEY (site_id, id),
+             FOREIGN KEY (site_id) REFERENCES sites(id) ON DELETE CASCADE
+         ) STRICT;
+         CREATE INDEX IF NOT EXISTS guests_site ON guests(site_id);
+         CREATE TABLE IF NOT EXISTS devices (
+             site_id TEXT NOT NULL,
+             guest_id TEXT NOT NULL,
+             id TEXT NOT NULL,
+             display_name TEXT NOT NULL CHECK (length(display_name) BETWEEN 1 AND 128),
+             tor_client_name TEXT NOT NULL,
+             enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
+             encrypted_secret BLOB NOT NULL,
+             PRIMARY KEY (site_id, guest_id, id),
+             UNIQUE (site_id, tor_client_name),
+             FOREIGN KEY (site_id, guest_id) REFERENCES guests(site_id, id) ON DELETE CASCADE
+         ) STRICT;
+         CREATE INDEX IF NOT EXISTS devices_guest ON devices(site_id, guest_id);
+         CREATE TABLE IF NOT EXISTS guest_mapping_permissions (
+             site_id TEXT NOT NULL,
+             guest_id TEXT NOT NULL,
+             mapping_id TEXT NOT NULL,
+             PRIMARY KEY (site_id, guest_id, mapping_id),
+             FOREIGN KEY (site_id, guest_id) REFERENCES guests(site_id, id) ON DELETE CASCADE,
+             FOREIGN KEY (site_id, mapping_id) REFERENCES mappings(site_id, id) ON DELETE CASCADE
+         ) STRICT;
+         CREATE TABLE IF NOT EXISTS publication_settings (
+             singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+             resume_after_boot INTEGER NOT NULL CHECK (resume_after_boot IN (0, 1)),
+             emergency_disabled INTEGER NOT NULL CHECK (emergency_disabled IN (0, 1))
+         ) STRICT;
+         INSERT OR IGNORE INTO publication_settings
+             (singleton, resume_after_boot, emergency_disabled) VALUES (1, 1, 0);",
     )
 }
 
@@ -488,7 +960,16 @@ fn migrate_v1_to_v2(transaction: &Transaction<'_>) -> Result<(), StoreError> {
         [LEGACY_SITE_ID],
     )?;
     transaction.execute_batch("DROP TABLE routes_v1;")?;
-    create_current_schema(transaction)?;
+    create_v2_schema(transaction)?;
+    transaction.execute(
+        "UPDATE schema_version SET version = 2 WHERE singleton = 1",
+        [],
+    )?;
+    Ok(())
+}
+
+fn migrate_v2_to_v3(transaction: &Transaction<'_>) -> Result<(), StoreError> {
+    create_access_schema(transaction)?;
     transaction.execute(
         "UPDATE schema_version SET version = ?1 WHERE singleton = 1",
         [DATABASE_SCHEMA_VERSION],
@@ -534,6 +1015,10 @@ pub enum StoreError {
         site_id: SiteId,
         mapping_id: MappingId,
     },
+    #[error("guest {guest_id} not found in site {site_id}")]
+    GuestNotFound { site_id: SiteId, guest_id: GuestId },
+    #[error("duplicate mapping permission: {0}")]
+    DuplicatePermission(MappingId),
     #[error("state path is not a private directory: {path}", path = .0.display())]
     UnsafeStatePath(PathBuf),
     #[error("database path is not a regular file: {path}", path = .0.display())]
@@ -586,6 +1071,26 @@ mod tests {
             display_name: format!("Site {id}"),
             enabled: true,
             mappings,
+        }
+    }
+
+    fn guest(site_id: &SiteId, id: &str) -> Guest {
+        Guest {
+            site_id: site_id.clone(),
+            id: GuestId::new(id).unwrap(),
+            display_name: format!("Guest {id}"),
+            enabled: true,
+        }
+    }
+
+    fn device(site_id: &SiteId, guest_id: &GuestId, id: &str) -> Device {
+        Device {
+            site_id: site_id.clone(),
+            guest_id: guest_id.clone(),
+            id: DeviceId::new(id).unwrap(),
+            display_name: format!("Device {id}"),
+            tor_client_name: id.to_owned(),
+            enabled: true,
         }
     }
 
@@ -747,5 +1252,161 @@ mod tests {
         assert!(store.touch_session(token, 120).unwrap().is_none());
         let database = fs::read(temporary.path().join(DATABASE_FILENAME)).unwrap();
         assert!(!database.windows(token.len()).any(|window| window == token));
+    }
+
+    #[test]
+    fn scopes_guests_devices_and_permissions_by_site() {
+        let (temporary, mut store) = store();
+        let alpha = SiteId::new("alpha").unwrap();
+        let beta = SiteId::new("beta").unwrap();
+        let guest_id = GuestId::new("family").unwrap();
+        let device_id = DeviceId::new("phone").unwrap();
+        let mapping_id = MappingId::new("app").unwrap();
+        for site_id in [&alpha, &beta] {
+            store
+                .put_site(&site(site_id.as_str(), vec![mapping("app", 8443)]))
+                .unwrap();
+            store.put_guest(&guest(site_id, "family")).unwrap();
+            store
+                .put_device(
+                    &device(site_id, &guest_id, "phone"),
+                    format!("private credential for {site_id}").as_bytes(),
+                )
+                .unwrap();
+            store
+                .set_guest_permissions(site_id, &guest_id, std::slice::from_ref(&mapping_id))
+                .unwrap();
+        }
+
+        let alpha_device = store
+            .device(&alpha, &guest_id, &device_id)
+            .unwrap()
+            .unwrap();
+        let beta_device = store.device(&beta, &guest_id, &device_id).unwrap().unwrap();
+        assert_ne!(
+            alpha_device.secret_material, beta_device.secret_material,
+            "device credentials must not be reused between sites"
+        );
+        assert!(!format!("{alpha_device:?}").contains("private credential"));
+        assert_eq!(
+            store.guest_permissions(&alpha, &guest_id).unwrap(),
+            vec![mapping_id]
+        );
+        for filename in [DATABASE_FILENAME, "state.sqlite3-wal"] {
+            let path = temporary.path().join(filename);
+            if let Ok(database) = fs::read(path) {
+                assert!(
+                    !database
+                        .windows(b"private credential".len())
+                        .any(|window| window == b"private credential")
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn guest_and_mapping_removal_cascade_access_records() {
+        let (_temporary, mut store) = store();
+        let site_id = SiteId::new("alpha").unwrap();
+        let guest_id = GuestId::new("family").unwrap();
+        let device_id = DeviceId::new("phone").unwrap();
+        let mapping_id = MappingId::new("app").unwrap();
+        store
+            .put_site(&site("alpha", vec![mapping("app", 8443)]))
+            .unwrap();
+        store.put_guest(&guest(&site_id, "family")).unwrap();
+        store
+            .put_device(&device(&site_id, &guest_id, "phone"), b"credential")
+            .unwrap();
+        store
+            .set_guest_permissions(&site_id, &guest_id, std::slice::from_ref(&mapping_id))
+            .unwrap();
+
+        store.set_site_enabled(&site_id, false).unwrap();
+        store
+            .set_mapping_enabled(&site_id, &mapping_id, false)
+            .unwrap();
+        assert_eq!(
+            store.guest_permissions(&site_id, &guest_id).unwrap(),
+            vec![mapping_id.clone()],
+            "site and mapping toggles must retain guest grants"
+        );
+
+        assert!(store.remove_mapping(&site_id, &mapping_id).unwrap());
+        assert!(
+            store
+                .guest_permissions(&site_id, &guest_id)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(store.remove_guest(&site_id, &guest_id).unwrap());
+        assert!(
+            store
+                .device(&site_id, &guest_id, &device_id)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn emergency_latch_and_resume_policy_are_persistent() {
+        let (temporary, store) = store();
+        assert_eq!(
+            store.publication_settings().unwrap(),
+            PublicationSettings {
+                resume_after_boot: true,
+                emergency_disabled: false,
+            }
+        );
+        store.set_resume_after_boot(false).unwrap();
+        store.set_emergency_disabled(true).unwrap();
+        drop(store);
+
+        let reopened = Store::open(temporary.path()).unwrap();
+        assert_eq!(
+            reopened.publication_settings().unwrap(),
+            PublicationSettings {
+                resume_after_boot: false,
+                emergency_disabled: true,
+            }
+        );
+    }
+
+    #[test]
+    fn migrates_v2_state_without_changing_publication_defaults() {
+        let temporary = tempfile::tempdir().unwrap();
+        let database_path = temporary.path().join(DATABASE_FILENAME);
+        let mut connection = Connection::open(&database_path).unwrap();
+        let transaction = connection.transaction().unwrap();
+        transaction
+            .execute_batch(
+                "CREATE TABLE schema_version (
+                     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                     version INTEGER NOT NULL
+                 );
+                 INSERT INTO schema_version (singleton, version) VALUES (1, 2);",
+            )
+            .unwrap();
+        create_v2_schema(&transaction).unwrap();
+        transaction.commit().unwrap();
+        drop(connection);
+
+        let migrated = Store::open(temporary.path()).unwrap();
+        assert_eq!(
+            migrated.publication_settings().unwrap(),
+            PublicationSettings {
+                resume_after_boot: true,
+                emergency_disabled: false,
+            }
+        );
+        let version: i64 = migrated
+            .connection
+            .query_row(
+                "SELECT version FROM schema_version WHERE singleton = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, DATABASE_SCHEMA_VERSION);
     }
 }

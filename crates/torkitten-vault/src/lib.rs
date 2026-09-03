@@ -6,4 +6,4 @@ mod store;
 
 pub use cipher::{EncryptedSecret, VaultCipher};
 pub use key::VaultKey;
-pub use store::{SessionRecord, Store, StoreError};
+pub use store::{DeviceRecord, PublicationSettings, SessionRecord, Store, StoreError};
