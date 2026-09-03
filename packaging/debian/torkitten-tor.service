@@ -1,0 +1,33 @@
+[Unit]
+Description=Torkitten managed C Tor process
+After=network-online.target torkittend.service
+Wants=network-online.target
+ConditionPathExists=/var/lib/torkitten/tor/torrc
+StartLimitIntervalSec=60s
+StartLimitBurst=5
+
+[Service]
+Type=exec
+User=torkitten
+Group=torkitten
+ExecStart=/usr/lib/torkitten/tor -f /var/lib/torkitten/tor/torrc
+Restart=on-failure
+RestartSec=5s
+UMask=0077
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+PrivateDevices=yes
+PrivateTmp=yes
+ProtectControlGroups=yes
+ProtectHome=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/torkitten/tor /run/torkitten
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictRealtime=yes
+SystemCallArchitectures=native
+LockPersonality=yes

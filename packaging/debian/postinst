@@ -1,0 +1,29 @@
+#!/bin/sh
+set -e
+
+if ! getent group torkitten-admin >/dev/null; then
+    addgroup --system torkitten-admin
+fi
+if ! getent group torkitten >/dev/null; then
+    addgroup --system torkitten
+fi
+if ! getent passwd torkitten >/dev/null; then
+    adduser --system --ingroup torkitten --home /var/lib/torkitten \
+        --no-create-home --disabled-login --disabled-password torkitten
+fi
+adduser torkitten torkitten-admin >/dev/null 2>&1 || true
+
+install -d -m 0700 -o torkitten -g torkitten /var/lib/torkitten
+install -d -m 0770 -o torkitten -g torkitten-admin /run/torkitten
+
+if command -v apparmor_parser >/dev/null 2>&1; then
+    apparmor_parser -r -T /etc/apparmor.d/torkitten || true
+fi
+
+if command -v systemctl >/dev/null 2>&1; then
+    systemctl daemon-reload || true
+    systemctl enable torkittend.service >/dev/null || true
+    systemctl restart torkittend.service
+fi
+
+exit 0

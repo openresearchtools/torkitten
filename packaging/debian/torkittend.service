@@ -1,0 +1,42 @@
+[Unit]
+Description=Torkitten onion gateway administration daemon
+After=network.target polkit.service
+Wants=polkit.service
+StartLimitIntervalSec=60s
+StartLimitBurst=5
+
+[Service]
+Type=exec
+User=torkitten
+Group=torkitten-admin
+ExecStart=/usr/bin/torkittend
+Restart=on-failure
+RestartSec=5s
+RuntimeDirectory=torkitten
+RuntimeDirectoryMode=0770
+StateDirectory=torkitten
+StateDirectoryMode=0700
+UMask=0077
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+PrivateDevices=yes
+PrivateTmp=yes
+ProtectControlGroups=yes
+ProtectHome=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/torkitten /run/torkitten
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+IPAddressDeny=any
+IPAddressAllow=localhost
+RestrictNamespaces=yes
+RestrictRealtime=yes
+SystemCallArchitectures=native
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+
+[Install]
+WantedBy=multi-user.target
