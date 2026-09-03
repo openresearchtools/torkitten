@@ -61,6 +61,11 @@ macro_rules! secret_token {
             }
 
             #[must_use]
+            pub fn digest_matches(&self, expected: &[u8; 32]) -> bool {
+                bool::from(self.digest().ct_eq(expected))
+            }
+
+            #[must_use]
             pub fn constant_time_eq(&self, candidate: &str) -> bool {
                 if candidate.len() != self.0.len() {
                     return false;

@@ -2,6 +2,31 @@ use serde::{Deserialize, Serialize};
 
 use crate::{DeviceId, GuestId, SiteId, ValidationError};
 
+#[derive(Clone, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum AccountOwner {
+    Administrator,
+    Guest { site_id: SiteId, guest_id: GuestId },
+}
+
+impl AccountOwner {
+    /// Validates all scoped identifiers in an authentication owner.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an invalid site or guest identifier.
+    pub fn validate(&self) -> Result<(), ValidationError> {
+        match self {
+            Self::Administrator => Ok(()),
+            Self::Guest { site_id, guest_id } => {
+                SiteId::new(site_id.as_str())?;
+                GuestId::new(guest_id.as_str())?;
+                Ok(())
+            }
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct Guest {
     pub site_id: SiteId,
@@ -107,6 +132,14 @@ mod tests {
         };
         assert!(guest.validate().is_ok());
         assert!(device.validate().is_ok());
+        assert!(
+            AccountOwner::Guest {
+                site_id: guest.site_id,
+                guest_id: guest.id,
+            }
+            .validate()
+            .is_ok()
+        );
     }
 
     #[test]

@@ -1229,10 +1229,11 @@ dependencies = [
  "getrandom 0.4.3",
  "rusqlite",
  "serde_json",
- "sha2",
  "tempfile",
  "thiserror 2.0.20",
+ "torkitten-auth",
  "torkitten-core",
+ "uuid",
  "zeroize",
 ]
 

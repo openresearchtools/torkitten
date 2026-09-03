@@ -4,7 +4,7 @@ mod access;
 mod config;
 mod ipc;
 
-pub use access::{Device, Guest};
+pub use access::{AccountOwner, Device, Guest};
 pub use config::{
     DeviceId, GatewayConfig, GuestId, Mapping, MappingId, MappingTarget, Site, SiteId, Transport,
     ValidationError,
