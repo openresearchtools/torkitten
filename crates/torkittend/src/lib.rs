@@ -22,7 +22,7 @@ use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     net::{UnixListener, UnixStream},
 };
-use torkitten_auth::{CsrfToken, SessionToken, hash_password, verify_password};
+use torkitten_auth::{CsrfToken, EnrollmentToken, SessionToken, hash_password, verify_password};
 use torkitten_core::{
     AccountOwner, AdminCommand, AdminResponse, ComponentAction, ComponentState, Device, DeviceId,
     GatewayConfig, GatewayMode, GatewayStatus, Guest, GuestAccessStatus, GuestId, ManagedComponent,
@@ -40,6 +40,7 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 const MAXIMUM_IPC_REQUEST_BYTES: usize = 1024 * 1024;
 const IPC_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const CANDIDATE_LIFETIME_SECONDS: i64 = 300;
+const DEVICE_ENROLLMENT_SECONDS: i64 = 15 * 60;
 const ADMIN_SESSION_SECONDS: i64 = 30 * 86_400;
 const FRESH_AUTHENTICATION_SECONDS: i64 = 600;
 
@@ -539,7 +540,7 @@ impl<S: ServiceControl> Daemon<S> {
                 guest,
                 device,
                 mapping_ids,
-            } => self.enroll_device(&guest, device, &mapping_ids),
+            } => self.enroll_device(&guest, device, &mapping_ids, now_unix),
             AdminCommand::RevokeDevice {
                 site_id,
                 guest_id,
@@ -713,6 +714,7 @@ impl<S: ServiceControl> Daemon<S> {
         guest: &Guest,
         device: Device,
         mapping_ids: &[MappingId],
+        now_unix: i64,
     ) -> Result<AdminResponse, DaemonError> {
         guest.validate()?;
         device.validate()?;
@@ -752,7 +754,12 @@ impl<S: ServiceControl> Daemon<S> {
         let keys = ClientKeyPair::generate()?;
         let onion_hostname = self.tor.onion_hostname(&device.site_id)?;
         let credential = keys.client_credential(&onion_hostname)?;
+        let enrollment = EnrollmentToken::generate()?;
+        let enrollment_expires_unix = now_unix
+            .checked_add(DEVICE_ENROLLMENT_SECONDS)
+            .ok_or(DaemonError::InvalidTimestamp(now_unix))?;
         let mut authorized = false;
+        let mut persisted_device = false;
         let result = (|| -> Result<AdminResponse, DaemonError> {
             self.store.put_guest(guest)?;
             self.store
@@ -763,19 +770,32 @@ impl<S: ServiceControl> Daemon<S> {
             restart_or_start(&mut self.services, ManagedComponent::Tor)?;
             self.store
                 .put_device(&device, credential.expose().as_bytes())?;
-            Ok(AdminResponse::DeviceEnrolled {
-                site_id: device.site_id.clone(),
-                guest_id: device.guest_id.clone(),
-                device_id: device.id.clone(),
+            persisted_device = true;
+            self.store.put_device_enrollment(
+                &enrollment,
+                &device.site_id,
+                &device.guest_id,
+                &device.id,
+                now_unix,
+                enrollment_expires_unix,
+            )?;
+            Ok(device_enrolled_response(
+                &device,
                 onion_hostname,
-                credential: torkitten_core::SensitiveString::new(credential.expose()),
-            })
+                credential.expose(),
+                &enrollment,
+                enrollment_expires_unix,
+            ))
         })();
         match result {
             Ok(response) => Ok(response),
             Err(error) => {
                 let operation = error.to_string();
                 let rollback = (|| -> Result<(), DaemonError> {
+                    if persisted_device {
+                        self.store
+                            .remove_device(&device.site_id, &device.guest_id, &device.id)?;
+                    }
                     if authorized {
                         self.tor.revoke_client(&device.site_id, &client_name)?;
                         restart_or_start(&mut self.services, ManagedComponent::Tor)?;
@@ -1285,6 +1305,25 @@ impl<S: ServiceControl> Daemon<S> {
             }
         }
         Ok(())
+    }
+}
+
+fn device_enrolled_response(
+    device: &Device,
+    onion_hostname: String,
+    credential: &str,
+    enrollment: &EnrollmentToken,
+    enrollment_expires_unix: i64,
+) -> AdminResponse {
+    let enrollment_url = format!("https://{onion_hostname}/enroll/{}", enrollment.expose());
+    AdminResponse::DeviceEnrolled {
+        site_id: device.site_id.clone(),
+        guest_id: device.guest_id.clone(),
+        device_id: device.id.clone(),
+        onion_hostname,
+        credential: torkitten_core::SensitiveString::new(credential),
+        enrollment_url: torkitten_core::SensitiveString::new(enrollment_url),
+        enrollment_expires_unix,
     }
 }
 
@@ -2053,6 +2092,8 @@ mod tests {
         let AdminResponse::DeviceEnrolled {
             credential,
             onion_hostname,
+            enrollment_url,
+            enrollment_expires_unix,
             ..
         } = daemon.handle(
             AdminCommand::EnrollDevice {
@@ -2069,6 +2110,22 @@ mod tests {
             credential
                 .expose()
                 .starts_with(onion_hostname.trim_end_matches(".onion"))
+        );
+        let enrollment_prefix = format!("https://{onion_hostname}/enroll/");
+        let enrollment_token = EnrollmentToken::parse(
+            enrollment_url
+                .expose()
+                .strip_prefix(&enrollment_prefix)
+                .expect("site-scoped enrollment URL"),
+        )
+        .unwrap();
+        assert_eq!(enrollment_expires_unix, NOW + 2 + DEVICE_ENROLLMENT_SECONDS);
+        assert!(
+            daemon
+                .store
+                .device_enrollment(&enrollment_token, NOW + 3)
+                .unwrap()
+                .is_some()
         );
         assert!(
             daemon

@@ -84,6 +84,7 @@ macro_rules! secret_token {
 
 secret_token!(SessionToken, "SessionToken");
 secret_token!(CsrfToken, "CsrfToken");
+secret_token!(EnrollmentToken, "EnrollmentToken");
 
 #[derive(Debug, Error)]
 pub enum TokenError {
@@ -110,6 +111,10 @@ mod tests {
             SessionToken::parse(first.expose()).unwrap().digest(),
             first.digest()
         );
+
+        let enrollment = EnrollmentToken::generate().unwrap();
+        assert_eq!(enrollment.expose().len(), 43);
+        assert!(!format!("{enrollment:?}").contains(enrollment.expose()));
     }
 
     #[test]

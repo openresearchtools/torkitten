@@ -9,8 +9,8 @@ use std::{
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use thiserror::Error;
 use torkitten_auth::{
-    CsrfToken, Passkey, PasswordHashValue, SessionToken, TotpSecret, decode_passkey,
-    encode_passkey, passkey_credential_id,
+    CsrfToken, EnrollmentToken, Passkey, PasswordHashValue, SessionToken, TotpSecret,
+    decode_passkey, encode_passkey, passkey_credential_id,
 };
 use torkitten_core::{
     AccountOwner, Device, DeviceId, GatewayConfig, Guest, GuestId, Mapping, MappingId, Site,
@@ -23,7 +23,7 @@ use crate::{EncryptedSecret, VaultCipher, cipher::CipherError, key::KeyError};
 
 const DATABASE_FILENAME: &str = "state.sqlite3";
 const KEY_FILENAME: &str = "secrets/vault.key";
-const DATABASE_SCHEMA_VERSION: i64 = 4;
+const DATABASE_SCHEMA_VERSION: i64 = 5;
 const LEGACY_SITE_ID: &str = "default";
 const LEGACY_SITE_DISPLAY_NAME: &str = "Default site";
 
@@ -94,6 +94,16 @@ pub struct PasskeyRecord {
 pub struct DeviceRecord {
     pub device: Device,
     pub secret_material: Zeroizing<Vec<u8>>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DeviceEnrollmentRecord {
+    pub site_id: SiteId,
+    pub guest_id: GuestId,
+    pub device_id: DeviceId,
+    pub created_unix: i64,
+    pub expires_unix: i64,
+    pub used_unix: Option<i64>,
 }
 
 impl std::fmt::Debug for DeviceRecord {
@@ -604,6 +614,116 @@ impl Store {
             "DELETE FROM devices WHERE site_id = ?1 AND guest_id = ?2 AND id = ?3",
             params![site_id.as_str(), guest_id.as_str(), device_id.as_str()],
         )? != 0)
+    }
+
+    /// Creates a hashed, short-lived enrollment token for exactly one device.
+    /// Any older enrollment for that device is invalidated atomically.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the device is missing, timestamps are invalid, or
+    /// SQLite cannot commit the replacement.
+    pub fn put_device_enrollment(
+        &mut self,
+        token: &EnrollmentToken,
+        site_id: &SiteId,
+        guest_id: &GuestId,
+        device_id: &DeviceId,
+        created_unix: i64,
+        expires_unix: i64,
+    ) -> Result<(), StoreError> {
+        if expires_unix <= created_unix {
+            return Err(StoreError::InvalidEnrollmentTimes);
+        }
+        if self.device(site_id, guest_id, device_id)?.is_none() {
+            return Err(StoreError::DeviceNotFound {
+                site_id: site_id.clone(),
+                guest_id: guest_id.clone(),
+                device_id: device_id.clone(),
+            });
+        }
+        let token_hash = token.digest();
+        let transaction = self.connection.transaction()?;
+        transaction.execute(
+            "DELETE FROM device_enrollments
+             WHERE site_id = ?1 AND guest_id = ?2 AND device_id = ?3",
+            params![site_id.as_str(), guest_id.as_str(), device_id.as_str()],
+        )?;
+        transaction.execute(
+            "INSERT INTO device_enrollments
+                 (token_hash, site_id, guest_id, device_id, created_unix, expires_unix, used_unix)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL)",
+            params![
+                token_hash.as_slice(),
+                site_id.as_str(),
+                guest_id.as_str(),
+                device_id.as_str(),
+                created_unix,
+                expires_unix,
+            ],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Looks up an unused, unexpired enrollment without exposing its bearer
+    /// token from storage.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when SQLite access or persisted identifiers are invalid.
+    pub fn device_enrollment(
+        &self,
+        token: &EnrollmentToken,
+        now_unix: i64,
+    ) -> Result<Option<DeviceEnrollmentRecord>, StoreError> {
+        let token_hash = token.digest();
+        self.connection
+            .query_row(
+                "SELECT site_id, guest_id, device_id, created_unix, expires_unix, used_unix
+                 FROM device_enrollments
+                 WHERE token_hash = ?1 AND used_unix IS NULL AND expires_unix > ?2",
+                params![token_hash.as_slice(), now_unix],
+                decode_device_enrollment_row,
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    /// Atomically marks an unused, unexpired enrollment as consumed and
+    /// returns its device scope. A bearer token can succeed only once.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when SQLite cannot query or commit the update.
+    pub fn consume_device_enrollment(
+        &mut self,
+        token: &EnrollmentToken,
+        now_unix: i64,
+    ) -> Result<Option<DeviceEnrollmentRecord>, StoreError> {
+        let token_hash = token.digest();
+        let transaction = self.connection.transaction()?;
+        let record = transaction
+            .query_row(
+                "SELECT site_id, guest_id, device_id, created_unix, expires_unix, used_unix
+                 FROM device_enrollments
+                 WHERE token_hash = ?1 AND used_unix IS NULL AND expires_unix > ?2",
+                params![token_hash.as_slice(), now_unix],
+                decode_device_enrollment_row,
+            )
+            .optional()?;
+        if record.is_some() {
+            transaction.execute(
+                "UPDATE device_enrollments SET used_unix = ?2
+                 WHERE token_hash = ?1 AND used_unix IS NULL",
+                params![token_hash.as_slice(), now_unix],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(record.map(|mut record| {
+            record.used_unix = Some(now_unix);
+            record
+        }))
     }
 
     /// Replaces the complete mapping grant set for one guest atomically.
@@ -1373,12 +1493,18 @@ impl Store {
                 migrate_v1_to_v2(&transaction)?;
                 migrate_v2_to_v3(&transaction)?;
                 migrate_v3_to_v4(&transaction)?;
+                migrate_v4_to_v5(&transaction)?;
             }
             Some(2) => {
                 migrate_v2_to_v3(&transaction)?;
                 migrate_v3_to_v4(&transaction)?;
+                migrate_v4_to_v5(&transaction)?;
             }
-            Some(3) => migrate_v3_to_v4(&transaction)?,
+            Some(3) => {
+                migrate_v3_to_v4(&transaction)?;
+                migrate_v4_to_v5(&transaction)?;
+            }
+            Some(4) => migrate_v4_to_v5(&transaction)?,
             Some(DATABASE_SCHEMA_VERSION) => create_current_schema(&transaction)?,
             Some(other) => return Err(StoreError::UnsupportedSchema(other)),
         }
@@ -1473,10 +1599,31 @@ fn digest_from_bytes(bytes: &[u8]) -> Result<[u8; 32], StoreError> {
         .map_err(|_| StoreError::InvalidSecretLength)
 }
 
+fn decode_device_enrollment_row(
+    row: &rusqlite::Row<'_>,
+) -> Result<DeviceEnrollmentRecord, rusqlite::Error> {
+    let site_id = row.get::<_, String>(0)?;
+    let guest_id = row.get::<_, String>(1)?;
+    let device_id = row.get::<_, String>(2)?;
+    Ok(DeviceEnrollmentRecord {
+        site_id: SiteId::new(site_id).map_err(to_sql_conversion_error)?,
+        guest_id: GuestId::new(guest_id).map_err(to_sql_conversion_error)?,
+        device_id: DeviceId::new(device_id).map_err(to_sql_conversion_error)?,
+        created_unix: row.get(3)?,
+        expires_unix: row.get(4)?,
+        used_unix: row.get(5)?,
+    })
+}
+
+fn to_sql_conversion_error(error: ValidationError) -> rusqlite::Error {
+    rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(error))
+}
+
 fn create_current_schema(transaction: &Transaction<'_>) -> Result<(), rusqlite::Error> {
     create_v2_schema(transaction)?;
     create_access_schema(transaction)?;
-    create_auth_schema(transaction)
+    create_auth_schema(transaction)?;
+    create_enrollment_schema(transaction)
 }
 
 fn create_v2_schema(transaction: &Transaction<'_>) -> Result<(), rusqlite::Error> {
@@ -1603,6 +1750,25 @@ fn create_access_schema(transaction: &Transaction<'_>) -> Result<(), rusqlite::E
     )
 }
 
+fn create_enrollment_schema(transaction: &Transaction<'_>) -> Result<(), rusqlite::Error> {
+    transaction.execute_batch(
+        "CREATE TABLE IF NOT EXISTS device_enrollments (
+             token_hash BLOB PRIMARY KEY NOT NULL CHECK (length(token_hash) = 32),
+             site_id TEXT NOT NULL,
+             guest_id TEXT NOT NULL,
+             device_id TEXT NOT NULL,
+             created_unix INTEGER NOT NULL,
+             expires_unix INTEGER NOT NULL CHECK (expires_unix > created_unix),
+             used_unix INTEGER,
+             UNIQUE (site_id, guest_id, device_id),
+             FOREIGN KEY (site_id, guest_id, device_id)
+                 REFERENCES devices(site_id, guest_id, id) ON DELETE CASCADE
+         ) STRICT;
+         CREATE INDEX IF NOT EXISTS device_enrollments_expiry
+             ON device_enrollments(expires_unix, used_unix);",
+    )
+}
+
 fn migrate_v1_to_v2(transaction: &Transaction<'_>) -> Result<(), StoreError> {
     transaction.execute_batch(
         "ALTER TABLE routes RENAME TO routes_v1;
@@ -1654,6 +1820,15 @@ fn migrate_v3_to_v4(transaction: &Transaction<'_>) -> Result<(), StoreError> {
     create_auth_schema(transaction)?;
     transaction.execute(
         "UPDATE schema_version SET version = ?1 WHERE singleton = 1",
+        [4],
+    )?;
+    Ok(())
+}
+
+fn migrate_v4_to_v5(transaction: &Transaction<'_>) -> Result<(), StoreError> {
+    create_enrollment_schema(transaction)?;
+    transaction.execute(
+        "UPDATE schema_version SET version = ?1 WHERE singleton = 1",
         [DATABASE_SCHEMA_VERSION],
     )?;
     Ok(())
@@ -1695,6 +1870,12 @@ pub enum StoreError {
     },
     #[error("guest {guest_id} not found in site {site_id}")]
     GuestNotFound { site_id: SiteId, guest_id: GuestId },
+    #[error("device {device_id} not found for guest {guest_id} in site {site_id}")]
+    DeviceNotFound {
+        site_id: SiteId,
+        guest_id: GuestId,
+        device_id: DeviceId,
+    },
     #[error("duplicate mapping permission: {0}")]
     DuplicatePermission(MappingId),
     #[error("authentication account not found: {0}")]
@@ -1719,6 +1900,8 @@ pub enum StoreError {
     DuplicateRecoveryCode,
     #[error("session timestamps are inconsistent")]
     InvalidSessionTimes,
+    #[error("device enrollment timestamps are inconsistent")]
+    InvalidEnrollmentTimes,
     #[error("state path is not a private directory: {path}", path = .0.display())]
     UnsafeStatePath(PathBuf),
     #[error("database path is not a regular file: {path}", path = .0.display())]
@@ -1995,6 +2178,51 @@ mod tests {
     }
 
     #[test]
+    fn enrollment_tokens_are_hashed_scoped_expiring_and_one_time() {
+        let (temporary, mut store) = store();
+        let site_id = SiteId::new("alpha").unwrap();
+        let guest_id = GuestId::new("family").unwrap();
+        let device_id = DeviceId::new("phone").unwrap();
+        store.put_site(&site("alpha", Vec::new())).unwrap();
+        store.put_guest(&guest(&site_id, "family")).unwrap();
+        store
+            .put_device(&device(&site_id, &guest_id, "phone"), b"credential")
+            .unwrap();
+
+        let token = EnrollmentToken::generate().unwrap();
+        store
+            .put_device_enrollment(&token, &site_id, &guest_id, &device_id, 100, 200)
+            .unwrap();
+        let record = store.device_enrollment(&token, 150).unwrap().unwrap();
+        assert_eq!(record.site_id, site_id);
+        assert_eq!(record.guest_id, guest_id);
+        assert_eq!(record.device_id, device_id);
+        assert!(store.device_enrollment(&token, 200).unwrap().is_none());
+
+        let consumed = store
+            .consume_device_enrollment(&token, 151)
+            .unwrap()
+            .unwrap();
+        assert_eq!(consumed.used_unix, Some(151));
+        assert!(
+            store
+                .consume_device_enrollment(&token, 152)
+                .unwrap()
+                .is_none()
+        );
+        for filename in [DATABASE_FILENAME, "state.sqlite3-wal"] {
+            let path = temporary.path().join(filename);
+            if let Ok(database) = fs::read(path) {
+                assert!(
+                    !database
+                        .windows(token.expose().len())
+                        .any(|window| window == token.expose().as_bytes())
+                );
+            }
+        }
+    }
+
+    #[test]
     fn persists_encrypted_account_factors_and_one_time_recovery_codes() {
         let (temporary, mut store) = store();
         let site_id = SiteId::new("alpha").unwrap();
@@ -2217,6 +2445,57 @@ mod tests {
                 emergency_disabled: false,
             }
         );
+        let version: i64 = migrated
+            .connection
+            .query_row(
+                "SELECT version FROM schema_version WHERE singleton = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, DATABASE_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn migrates_v4_auth_state_and_adds_device_enrollments() {
+        let temporary = tempfile::tempdir().unwrap();
+        let database_path = temporary.path().join(DATABASE_FILENAME);
+        let mut connection = Connection::open(&database_path).unwrap();
+        let transaction = connection.transaction().unwrap();
+        transaction
+            .execute_batch(
+                "CREATE TABLE schema_version (
+                     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                     version INTEGER NOT NULL
+                 );
+                 INSERT INTO schema_version (singleton, version) VALUES (1, 4);",
+            )
+            .unwrap();
+        create_v2_schema(&transaction).unwrap();
+        create_access_schema(&transaction).unwrap();
+        create_auth_schema(&transaction).unwrap();
+        transaction.commit().unwrap();
+        drop(connection);
+
+        let mut migrated = Store::open(temporary.path()).unwrap();
+        let site_id = SiteId::new("alpha").unwrap();
+        let guest_id = GuestId::new("family").unwrap();
+        let device_id = DeviceId::new("phone").unwrap();
+        migrated.put_site(&site("alpha", Vec::new())).unwrap();
+        migrated.put_guest(&guest(&site_id, "family")).unwrap();
+        migrated
+            .put_device(&device(&site_id, &guest_id, "phone"), b"credential")
+            .unwrap();
+        migrated
+            .put_device_enrollment(
+                &EnrollmentToken::generate().unwrap(),
+                &site_id,
+                &guest_id,
+                &device_id,
+                100,
+                200,
+            )
+            .unwrap();
         let version: i64 = migrated
             .connection
             .query_row(

@@ -217,6 +217,8 @@ pub enum AdminResponse {
         device_id: DeviceId,
         onion_hostname: String,
         credential: SensitiveString,
+        enrollment_url: SensitiveString,
+        enrollment_expires_unix: i64,
     },
     BootstrapOpened {
         site_id: SiteId,

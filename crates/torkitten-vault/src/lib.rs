@@ -9,6 +9,6 @@ pub use cipher::{EncryptedSecret, VaultCipher};
 pub use key::VaultKey;
 pub use pki::{PkiError, SiteCertificate, TlsAuthority};
 pub use store::{
-    AuthAccountRecord, DeviceRecord, PasskeyRecord, PublicationSettings, SessionRecord, Store,
-    StoreError,
+    AuthAccountRecord, DeviceEnrollmentRecord, DeviceRecord, PasskeyRecord, PublicationSettings,
+    SessionRecord, Store, StoreError,
 };
