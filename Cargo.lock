@@ -1511,6 +1511,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "torkittenctl"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "tempfile",
+ "torkitten-core",
+]
+
+[[package]]
 name = "torkittend"
 version = "0.1.0"
 dependencies = [
