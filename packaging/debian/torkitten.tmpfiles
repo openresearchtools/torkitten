@@ -1,4 +1,0 @@
-d /run/torkitten       2711 torkitten torkitten-admin -
-d /run/torkitten/tor   0700 torkitten-tor torkitten-tor -
-d /run/torkitten/caddy 2770 torkitten torkitten-publish -
-d /run/torkitten/web   2750 torkitten torkitten-caddy -
