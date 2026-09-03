@@ -3,7 +3,7 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
-use crate::{Mapping, MappingId, Site, SiteId};
+use crate::{Device, DeviceId, Guest, GuestId, Mapping, MappingId, Site, SiteId};
 
 #[derive(Clone, Deserialize, Serialize, Zeroize, ZeroizeOnDrop)]
 #[serde(transparent)]
@@ -94,13 +94,27 @@ pub enum AdminCommand {
         mapping_id: MappingId,
         enabled: bool,
     },
-    EnrollClient {
-        site_id: SiteId,
-        name: String,
+    PutGuest {
+        guest: Guest,
     },
-    RevokeClient {
+    RemoveGuest {
         site_id: SiteId,
-        name: String,
+        guest_id: GuestId,
+    },
+    SetGuestPermissions {
+        site_id: SiteId,
+        guest_id: GuestId,
+        mapping_ids: Vec<MappingId>,
+    },
+    EnrollDevice {
+        guest: Guest,
+        device: Device,
+        mapping_ids: Vec<MappingId>,
+    },
+    RevokeDevice {
+        site_id: SiteId,
+        guest_id: GuestId,
+        device_id: DeviceId,
     },
     OpenCertificateBootstrap {
         site_id: SiteId,
@@ -158,6 +172,14 @@ pub struct SiteStatus {
     pub onion_hostname: Option<String>,
     pub bootstrap_expires_unix: Option<i64>,
     pub publication: ComponentState,
+    pub guests: Vec<GuestAccessStatus>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct GuestAccessStatus {
+    pub guest: Guest,
+    pub mapping_ids: Vec<MappingId>,
+    pub devices: Vec<Device>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -189,8 +211,10 @@ pub enum AdminResponse {
     Status {
         status: GatewayStatus,
     },
-    ClientEnrolled {
+    DeviceEnrolled {
         site_id: SiteId,
+        guest_id: GuestId,
+        device_id: DeviceId,
         onion_hostname: String,
         credential: SensitiveString,
     },

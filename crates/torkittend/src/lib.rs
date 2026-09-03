@@ -24,11 +24,14 @@ use tokio::{
 };
 use torkitten_auth::{CsrfToken, SessionToken, hash_password, verify_password};
 use torkitten_core::{
-    AccountOwner, AdminCommand, AdminResponse, ComponentAction, ComponentState, GatewayConfig,
-    GatewayMode, GatewayStatus, ManagedComponent, Mapping, MappingTarget, Site, SiteId, SiteStatus,
+    AccountOwner, AdminCommand, AdminResponse, ComponentAction, ComponentState, Device, DeviceId,
+    GatewayConfig, GatewayMode, GatewayStatus, Guest, GuestAccessStatus, GuestId, ManagedComponent,
+    Mapping, MappingId, MappingTarget, Site, SiteId, SiteStatus,
 };
 use torkitten_proxy::{CaddyError, CaddyInstance, CaddyPaths, ProxyConfig, ProxySite};
-use torkitten_tor::{OnionIdentity, TorError, TorInstance, TorPaths};
+use torkitten_tor::{
+    ClientAuthError, ClientKeyPair, ClientName, OnionIdentity, TorError, TorInstance, TorPaths,
+};
 use torkitten_vault::{PkiError, Store, StoreError, TlsAuthority};
 use uuid::Uuid;
 
@@ -508,6 +511,40 @@ impl<S: ServiceControl> Daemon<S> {
                     reachable,
                 })
             }
+            AdminCommand::PutGuest { guest } => {
+                self.required_site(&guest.site_id)?;
+                self.store.put_guest(&guest)?;
+                Ok(AdminResponse::Ok)
+            }
+            AdminCommand::RemoveGuest { site_id, guest_id } => {
+                self.required_guest(&site_id, &guest_id)?;
+                if !self.store.devices(&site_id, &guest_id)?.is_empty() {
+                    return Err(DaemonError::GuestHasDevices { site_id, guest_id });
+                }
+                if !self.store.remove_guest(&site_id, &guest_id)? {
+                    return Err(StoreError::GuestNotFound { site_id, guest_id }.into());
+                }
+                Ok(AdminResponse::Ok)
+            }
+            AdminCommand::SetGuestPermissions {
+                site_id,
+                guest_id,
+                mapping_ids,
+            } => {
+                self.store
+                    .set_guest_permissions(&site_id, &guest_id, &mapping_ids)?;
+                Ok(AdminResponse::Ok)
+            }
+            AdminCommand::EnrollDevice {
+                guest,
+                device,
+                mapping_ids,
+            } => self.enroll_device(&guest, device, &mapping_ids),
+            AdminCommand::RevokeDevice {
+                site_id,
+                guest_id,
+                device_id,
+            } => self.revoke_device(&site_id, &guest_id, &device_id),
             AdminCommand::OpenCertificateBootstrap { site_id, seconds } => {
                 if seconds == 0 || seconds > MAX_BOOTSTRAP_SECONDS {
                     return Err(DaemonError::InvalidBootstrapDuration(seconds));
@@ -592,9 +629,6 @@ impl<S: ServiceControl> Daemon<S> {
                 }
                 Ok(AdminResponse::Ok)
             }
-            AdminCommand::EnrollClient { .. } | AdminCommand::RevokeClient { .. } => {
-                Err(DaemonError::UnsupportedCommand)
-            }
         }
     }
 
@@ -617,7 +651,7 @@ impl<S: ServiceControl> Daemon<S> {
             .gateway_config()?
             .sites
             .into_iter()
-            .map(|site| {
+            .map(|site| -> Result<SiteStatus, DaemonError> {
                 let onion_hostname = match self.tor.onion_hostname(&site.id) {
                     Ok(hostname) => Some(hostname),
                     Err(TorError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -638,7 +672,8 @@ impl<S: ServiceControl> Daemon<S> {
                     } else {
                         ComponentState::Starting
                     };
-                SiteStatus {
+                let guests = self.guest_access_status(&site.id)?;
+                Ok(SiteStatus {
                     bootstrap_expires_unix: self
                         .bootstrap_windows
                         .get(&site.id)
@@ -646,9 +681,10 @@ impl<S: ServiceControl> Daemon<S> {
                     site,
                     onion_hostname,
                     publication,
-                }
+                    guests,
+                })
             })
-            .collect();
+            .collect::<Result<Vec<_>, _>>()?;
         Ok(GatewayStatus {
             mode,
             sites,
@@ -656,6 +692,176 @@ impl<S: ServiceControl> Daemon<S> {
             caddy,
             resume_after_boot: settings.resume_after_boot,
         })
+    }
+
+    fn guest_access_status(&self, site_id: &SiteId) -> Result<Vec<GuestAccessStatus>, DaemonError> {
+        self.store
+            .guests(site_id)?
+            .into_iter()
+            .map(|guest| {
+                Ok(GuestAccessStatus {
+                    mapping_ids: self.store.guest_permissions(site_id, &guest.id)?,
+                    devices: self.store.devices(site_id, &guest.id)?,
+                    guest,
+                })
+            })
+            .collect()
+    }
+
+    fn enroll_device(
+        &mut self,
+        guest: &Guest,
+        device: Device,
+        mapping_ids: &[MappingId],
+    ) -> Result<AdminResponse, DaemonError> {
+        guest.validate()?;
+        device.validate()?;
+        if device.site_id != guest.site_id || device.guest_id != guest.id {
+            return Err(DaemonError::AccessScopeMismatch);
+        }
+        let site = self.required_site(&guest.site_id)?;
+        if !site.enabled {
+            return Err(DaemonError::SiteDisabled(site.id));
+        }
+        if self.store.publication_settings()?.emergency_disabled {
+            return Err(DaemonError::EmergencyLatchSet);
+        }
+        if self
+            .store
+            .device(&device.site_id, &device.guest_id, &device.id)?
+            .is_some()
+        {
+            return Err(DaemonError::DeviceAlreadyExists(device.id));
+        }
+        if self
+            .guest_access_status(&device.site_id)?
+            .iter()
+            .flat_map(|access| &access.devices)
+            .any(|existing| existing.tor_client_name == device.tor_client_name)
+        {
+            return Err(DaemonError::ClientNameAlreadyExists(device.tor_client_name));
+        }
+
+        let old_guest = self.store.guest(&guest.site_id, &guest.id)?;
+        let old_permissions = old_guest
+            .as_ref()
+            .map(|_| self.store.guest_permissions(&guest.site_id, &guest.id))
+            .transpose()?
+            .unwrap_or_default();
+        let client_name = ClientName::new(&device.tor_client_name)?;
+        let keys = ClientKeyPair::generate()?;
+        let onion_hostname = self.tor.onion_hostname(&device.site_id)?;
+        let credential = keys.client_credential(&onion_hostname)?;
+        let mut authorized = false;
+        let result = (|| -> Result<AdminResponse, DaemonError> {
+            self.store.put_guest(guest)?;
+            self.store
+                .set_guest_permissions(&guest.site_id, &guest.id, mapping_ids)?;
+            self.tor
+                .authorize_client(&device.site_id, &client_name, &keys)?;
+            authorized = true;
+            restart_or_start(&mut self.services, ManagedComponent::Tor)?;
+            self.store
+                .put_device(&device, credential.expose().as_bytes())?;
+            Ok(AdminResponse::DeviceEnrolled {
+                site_id: device.site_id.clone(),
+                guest_id: device.guest_id.clone(),
+                device_id: device.id.clone(),
+                onion_hostname,
+                credential: torkitten_core::SensitiveString::new(credential.expose()),
+            })
+        })();
+        match result {
+            Ok(response) => Ok(response),
+            Err(error) => {
+                let operation = error.to_string();
+                let rollback = (|| -> Result<(), DaemonError> {
+                    if authorized {
+                        self.tor.revoke_client(&device.site_id, &client_name)?;
+                        restart_or_start(&mut self.services, ManagedComponent::Tor)?;
+                    }
+                    self.restore_guest_access(
+                        &guest.site_id,
+                        &guest.id,
+                        old_guest.as_ref(),
+                        &old_permissions,
+                    )
+                })();
+                if let Err(rollback) = rollback {
+                    return Err(DaemonError::Rollback {
+                        operation,
+                        rollback: rollback.to_string(),
+                    });
+                }
+                Err(error)
+            }
+        }
+    }
+
+    fn revoke_device(
+        &mut self,
+        site_id: &SiteId,
+        guest_id: &GuestId,
+        device_id: &DeviceId,
+    ) -> Result<AdminResponse, DaemonError> {
+        let record = self
+            .store
+            .device(site_id, guest_id, device_id)?
+            .ok_or_else(|| DaemonError::DeviceNotFound(device_id.clone()))?;
+        let credential = std::str::from_utf8(&record.secret_material)
+            .map_err(|_| DaemonError::InvalidDeviceSecret)?;
+        let keys = ClientKeyPair::from_client_credential(credential)?;
+        let client_name = ClientName::new(&record.device.tor_client_name)?;
+        let removed = self.tor.revoke_client(site_id, &client_name)?;
+        if let Err(error) = restart_or_start(&mut self.services, ManagedComponent::Tor) {
+            let operation = error.to_string();
+            if removed {
+                self.tor.authorize_client(site_id, &client_name, &keys)?;
+                restart_or_start(&mut self.services, ManagedComponent::Tor).map_err(
+                    |rollback| DaemonError::Rollback {
+                        operation,
+                        rollback: rollback.to_string(),
+                    },
+                )?;
+            }
+            return Err(error.into());
+        }
+        match self.store.remove_device(site_id, guest_id, device_id) {
+            Ok(true) => Ok(AdminResponse::Ok),
+            result => {
+                let operation = result.err().map_or_else(
+                    || DaemonError::DeviceNotFound(device_id.clone()),
+                    Into::into,
+                );
+                if removed {
+                    self.tor.authorize_client(site_id, &client_name, &keys)?;
+                    restart_or_start(&mut self.services, ManagedComponent::Tor).map_err(
+                        |rollback| DaemonError::Rollback {
+                            operation: operation.to_string(),
+                            rollback: rollback.to_string(),
+                        },
+                    )?;
+                }
+                Err(operation)
+            }
+        }
+    }
+
+    fn restore_guest_access(
+        &mut self,
+        site_id: &SiteId,
+        guest_id: &GuestId,
+        old_guest: Option<&Guest>,
+        old_permissions: &[MappingId],
+    ) -> Result<(), DaemonError> {
+        if let Some(old_guest) = old_guest {
+            self.store.put_guest(old_guest)?;
+            self.store
+                .set_guest_permissions(site_id, guest_id, old_permissions)?;
+        } else {
+            self.store.remove_guest(site_id, guest_id)?;
+        }
+        Ok(())
     }
 
     fn authenticate_administrator(
@@ -1050,6 +1256,16 @@ impl<S: ServiceControl> Daemon<S> {
             .ok_or_else(|| StoreError::SiteNotFound(site_id.clone()).into())
     }
 
+    fn required_guest(&self, site_id: &SiteId, guest_id: &GuestId) -> Result<Guest, DaemonError> {
+        self.store
+            .guest(site_id, guest_id)?
+            .ok_or_else(|| StoreError::GuestNotFound {
+                site_id: site_id.clone(),
+                guest_id: guest_id.clone(),
+            })
+            .map_err(Into::into)
+    }
+
     fn initialized(&self) -> Result<bool, DaemonError> {
         Ok(self
             .store
@@ -1326,12 +1542,22 @@ pub enum DaemonError {
     BootstrapSiteDisabled(SiteId),
     #[error("site must be enabled before it can be restarted or rotated: {0}")]
     SiteDisabled(SiteId),
+    #[error("guest {guest_id} still has devices in site {site_id}")]
+    GuestHasDevices { site_id: SiteId, guest_id: GuestId },
+    #[error("guest and device scopes do not match")]
+    AccessScopeMismatch,
+    #[error("device already exists: {0}")]
+    DeviceAlreadyExists(DeviceId),
+    #[error("Tor client name is already used in this site: {0}")]
+    ClientNameAlreadyExists(String),
+    #[error("device not found: {0}")]
+    DeviceNotFound(DeviceId),
+    #[error("stored device credential is invalid")]
+    InvalidDeviceSecret,
     #[error("bootstrap duration must be 1-{MAX_BOOTSTRAP_SECONDS} seconds, got {0}")]
     InvalidBootstrapDuration(u32),
     #[error("publication is blocked by the persistent emergency latch")]
     EmergencyLatchSet,
-    #[error("this command requires the enrollment implementation")]
-    UnsupportedCommand,
     #[error("generated onion candidate was not found")]
     CandidateNotFound,
     #[error("generated onion candidate expired")]
@@ -1371,6 +1597,8 @@ pub enum DaemonError {
     #[error(transparent)]
     Identity(#[from] torkitten_tor::OnionIdentityError),
     #[error(transparent)]
+    ClientAuth(#[from] ClientAuthError),
+    #[error(transparent)]
     Tor(#[from] TorError),
     #[error(transparent)]
     Caddy(#[from] CaddyError),
@@ -1394,11 +1622,16 @@ impl DaemonError {
                 "invalid_bootstrap"
             }
             Self::SiteDisabled(_) => "invalid_site_state",
+            Self::GuestHasDevices { .. }
+            | Self::AccessScopeMismatch
+            | Self::DeviceAlreadyExists(_)
+            | Self::ClientNameAlreadyExists(_)
+            | Self::DeviceNotFound(_)
+            | Self::ClientAuth(_) => "invalid_access",
             Self::EmergencyLatchSet => "emergency_disabled",
-            Self::UnsupportedCommand => "unsupported_command",
             Self::CandidateNotFound | Self::CandidateExpired => "invalid_candidate",
             Self::Validation(_) => "validation_failed",
-            Self::Store(_) => "state_failed",
+            Self::InvalidDeviceSecret | Self::Store(_) => "state_failed",
             Self::Pki(_) => "certificate_failed",
             Self::Identity(_) => "identity_failed",
             Self::Tor(_) => "tor_failed",
@@ -1793,6 +2026,153 @@ mod tests {
             status.sites[0].onion_hostname.as_deref(),
             Some(original_hostname.as_str())
         );
+    }
+
+    #[test]
+    fn enrolls_distinct_encrypted_device_authorization_and_revokes_it() {
+        let (_temporary, mut daemon, _services) = daemon();
+        initialize(&mut daemon);
+        create_generated_test_site(&mut daemon);
+        let site_id = SiteId::new("alpha").unwrap();
+        let guest_id = GuestId::new("family").unwrap();
+        let device_id = DeviceId::new("phone").unwrap();
+        let guest = Guest {
+            site_id: site_id.clone(),
+            id: guest_id.clone(),
+            display_name: "Family".to_owned(),
+            enabled: true,
+        };
+        let device = Device {
+            site_id: site_id.clone(),
+            guest_id: guest_id.clone(),
+            id: device_id.clone(),
+            display_name: "Alice's phone".to_owned(),
+            tor_client_name: "alice_phone".to_owned(),
+            enabled: true,
+        };
+        let AdminResponse::DeviceEnrolled {
+            credential,
+            onion_hostname,
+            ..
+        } = daemon.handle(
+            AdminCommand::EnrollDevice {
+                guest,
+                device,
+                mapping_ids: vec![MappingId::new("app").unwrap()],
+            },
+            NOW + 2,
+        )
+        else {
+            panic!("expected enrolled device");
+        };
+        assert!(
+            credential
+                .expose()
+                .starts_with(onion_hostname.trim_end_matches(".onion"))
+        );
+        assert!(
+            daemon
+                .tor
+                .onion_directory(&site_id)
+                .join("authorized_clients/alice_phone.auth")
+                .is_file()
+        );
+        let AdminResponse::Status { status } = daemon.handle(AdminCommand::Status, NOW + 2) else {
+            panic!("expected status");
+        };
+        assert_eq!(status.sites[0].guests[0].mapping_ids.len(), 1);
+        assert_eq!(
+            status.sites[0].guests[0].devices,
+            vec![Device {
+                site_id: site_id.clone(),
+                guest_id: guest_id.clone(),
+                id: device_id.clone(),
+                display_name: "Alice's phone".to_owned(),
+                tor_client_name: "alice_phone".to_owned(),
+                enabled: true,
+            }]
+        );
+        assert!(matches!(
+            daemon.handle(
+                AdminCommand::RevokeDevice {
+                    site_id: site_id.clone(),
+                    guest_id,
+                    device_id,
+                },
+                NOW + 3,
+            ),
+            AdminResponse::Ok
+        ));
+        assert!(
+            !daemon
+                .tor
+                .onion_directory(&site_id)
+                .join("authorized_clients/alice_phone.auth")
+                .exists()
+        );
+    }
+
+    #[test]
+    fn failed_device_enrollment_restores_guest_and_tor_state() {
+        let (_temporary, mut daemon, services) = daemon();
+        initialize(&mut daemon);
+        create_generated_test_site(&mut daemon);
+        let site_id = SiteId::new("alpha").unwrap();
+        let guest_id = GuestId::new("family").unwrap();
+        *services.fail_next.lock().unwrap() = Some(ManagedComponent::Tor);
+        let response = daemon.handle(
+            AdminCommand::EnrollDevice {
+                guest: Guest {
+                    site_id: site_id.clone(),
+                    id: guest_id.clone(),
+                    display_name: "Family".to_owned(),
+                    enabled: true,
+                },
+                device: Device {
+                    site_id: site_id.clone(),
+                    guest_id,
+                    id: DeviceId::new("phone").unwrap(),
+                    display_name: "Phone".to_owned(),
+                    tor_client_name: "phone".to_owned(),
+                    enabled: true,
+                },
+                mapping_ids: vec![MappingId::new("app").unwrap()],
+            },
+            NOW + 2,
+        );
+        assert!(
+            matches!(response, AdminResponse::Error { ref code, .. } if code == "service_failed"),
+            "{response:?}"
+        );
+        let AdminResponse::Status { status } = daemon.handle(AdminCommand::Status, NOW + 2) else {
+            panic!("expected status");
+        };
+        assert!(status.sites[0].guests.is_empty());
+        assert!(
+            !daemon
+                .tor
+                .onion_directory(&site_id)
+                .join("authorized_clients/phone.auth")
+                .exists()
+        );
+    }
+
+    fn create_generated_test_site(daemon: &mut Daemon<FakeServices>) {
+        let AdminResponse::SiteCandidate { candidate_id, .. } =
+            daemon.handle(AdminCommand::GenerateSiteCandidate, NOW)
+        else {
+            panic!("expected site candidate");
+        };
+        assert!(matches!(
+            daemon.handle(
+                AdminCommand::CreateGeneratedSite {
+                    site: site(),
+                    candidate_id,
+                },
+                NOW + 1,
+            ),
+            AdminResponse::Ok
+        ));
     }
 
     #[test]

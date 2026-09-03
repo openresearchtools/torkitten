@@ -408,7 +408,7 @@ fn print_response(response: AdminResponse, json: bool) -> Result<(), String> {
         AdminResponse::SiteCandidate { .. }
         | AdminResponse::AdministratorAuthenticated { .. }
         | AdminResponse::AdministratorAuthorized { .. }
-        | AdminResponse::ClientEnrolled { .. } => {
+        | AdminResponse::DeviceEnrolled { .. } => {
             Err("unexpected sensitive response for this command".to_owned())
         }
     }

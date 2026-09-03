@@ -76,6 +76,46 @@ impl ClientKeyPair {
         })
     }
 
+    /// Reconstructs a keypair from a previously issued Tor client credential.
+    /// This is used only to restore server authorization during a failed
+    /// revocation transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error unless the credential has the canonical v3 onion,
+    /// descriptor, X25519, and 32-byte private-key fields.
+    pub fn from_client_credential(credential: &str) -> Result<Self, ClientAuthError> {
+        let mut fields = credential.split(':');
+        let service_id = fields.next().ok_or(ClientAuthError::InvalidCredential)?;
+        let descriptor = fields.next().ok_or(ClientAuthError::InvalidCredential)?;
+        let key_type = fields.next().ok_or(ClientAuthError::InvalidCredential)?;
+        let private_base32 = fields.next().ok_or(ClientAuthError::InvalidCredential)?;
+        if fields.next().is_some()
+            || descriptor != "descriptor"
+            || key_type != "x25519"
+            || validate_onion_hostname(service_id).is_err()
+        {
+            return Err(ClientAuthError::InvalidCredential);
+        }
+        let mut decoded = BASE32_NOPAD
+            .decode(private_base32.as_bytes())
+            .map_err(|_| ClientAuthError::InvalidCredential)?;
+        if decoded.len() != 32 || BASE32_NOPAD.encode(&decoded) != private_base32 {
+            decoded.zeroize();
+            return Err(ClientAuthError::InvalidCredential);
+        }
+        let mut private_bytes = [0_u8; 32];
+        private_bytes.copy_from_slice(&decoded);
+        decoded.zeroize();
+        let private = StaticSecret::from(private_bytes);
+        private_bytes.zeroize();
+        let public = PublicKey::from(&private);
+        Ok(Self {
+            private_base32: private_base32.to_owned(),
+            public_base32: BASE32_NOPAD.encode(public.as_bytes()),
+        })
+    }
+
     #[must_use]
     pub fn server_authorization(&self) -> String {
         format!("descriptor:x25519:{}\n", self.public_base32)
@@ -134,6 +174,8 @@ pub enum ClientAuthError {
     InvalidName(String),
     #[error("invalid v3 onion hostname: {0}")]
     InvalidOnionHostname(String),
+    #[error("invalid Tor client credential")]
+    InvalidCredential,
     #[error("operating-system randomness failed: {0}")]
     Random(getrandom::Error),
 }
@@ -170,5 +212,17 @@ mod tests {
         assert!(ClientName::new("phone_1").is_ok());
         assert!(ClientName::new("has a space").is_err());
         assert!(ClientName::new("abcdefghijklmnopq").is_err());
+    }
+
+    #[test]
+    fn reconstructs_server_authorization_without_exposing_private_material() {
+        let original = ClientKeyPair::generate().unwrap();
+        let credential = original.client_credential(ONION).unwrap();
+        let reconstructed = ClientKeyPair::from_client_credential(credential.expose()).unwrap();
+        assert_eq!(
+            reconstructed.server_authorization(),
+            original.server_authorization()
+        );
+        assert!(ClientKeyPair::from_client_credential("not-a-credential").is_err());
     }
 }

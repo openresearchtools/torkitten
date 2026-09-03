@@ -47,7 +47,13 @@ async function pending(button, label, operation, reload = true) {
   try {
     await operation();
     showNotice("Change committed by the Torkitten daemon.");
-    if (reload) window.setTimeout(() => window.location.reload(), 350);
+    if (reload) {
+      window.setTimeout(() => window.location.reload(), 350);
+    } else {
+      button.disabled = false;
+      button.removeAttribute("aria-busy");
+      button.innerHTML = original;
+    }
   } catch (error) {
     showNotice(error.message, "error");
     button.disabled = false;
@@ -139,6 +145,10 @@ if (createSiteForm) createSiteForm.addEventListener("submit", async (event) => {
 
 const mappingDialog = document.querySelector("#mapping-dialog");
 const mappingForm = document.querySelector("#mapping-form");
+const deviceDialog = document.querySelector("#device-dialog");
+const deviceForm = document.querySelector("#device-form");
+const deviceResult = document.querySelector("#device-result");
+let wizardSiteId = null;
 
 function mappingPayload(form) {
   const data = new FormData(form);
@@ -180,12 +190,82 @@ document.querySelector("[data-action=test-mapping-form]")?.addEventListener("cli
   }, false);
 });
 
+function prepareDeviceWizard(siteCard) {
+  wizardSiteId = siteCard.dataset.siteId;
+  deviceForm.reset();
+  deviceForm.elements.site_id.value = wizardSiteId;
+  deviceResult.hidden = true;
+  document.querySelector("#device-onion").textContent = "";
+  document.querySelector("#device-credential").textContent = "";
+  const guests = document.querySelector("#existing-guests");
+  guests.replaceChildren();
+  for (const guest of siteCard.querySelectorAll("[data-guest-id]")) {
+    const option = document.createElement("option");
+    option.value = guest.dataset.guestId;
+    option.label = guest.dataset.guestName;
+    option.dataset.guestName = guest.dataset.guestName;
+    guests.append(option);
+  }
+  const grants = document.querySelector("#device-mapping-grants");
+  grants.replaceChildren();
+  for (const mapping of siteCard.querySelectorAll("[data-mapping-id]")) {
+    const label = document.createElement("label");
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.name = "mapping_ids";
+    checkbox.value = mapping.dataset.mappingId;
+    checkbox.checked = mapping.dataset.enabled === "true";
+    label.append(checkbox, document.createTextNode(mapping.querySelector(".mapping-main strong").textContent));
+    grants.append(label);
+  }
+}
+
+if (deviceForm) {
+  deviceForm.elements.guest_id.addEventListener("change", () => {
+    const selected = [...document.querySelector("#existing-guests").options]
+      .find((option) => option.value === deviceForm.elements.guest_id.value);
+    if (selected) deviceForm.elements.guest_name.value = selected.dataset.guestName;
+  });
+  deviceForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const data = new FormData(deviceForm);
+    const button = deviceForm.querySelector("button[type=submit]");
+    await pending(button, "Creating…", async () => {
+      const result = await api(`/api/sites/${encodeURIComponent(wizardSiteId)}/devices/enroll`, {
+        guest_id: data.get("guest_id"),
+        guest_name: data.get("guest_name"),
+        device_id: data.get("device_id"),
+        device_name: data.get("device_name"),
+        client_name: data.get("client_name"),
+        mapping_ids: data.getAll("mapping_ids"),
+      });
+      document.querySelector("#device-onion").textContent = result.onion_hostname;
+      document.querySelector("#device-credential").textContent = result.credential;
+      deviceResult.hidden = false;
+      showNotice("Device authorization created and publication restarted.");
+    }, false);
+  });
+  deviceDialog.addEventListener("close", () => {
+    wizardSiteId = null;
+    deviceForm.reset();
+    deviceResult.hidden = true;
+    document.querySelector("#device-onion").textContent = "";
+    document.querySelector("#device-credential").textContent = "";
+  });
+}
+
 document.addEventListener("click", async (event) => {
   const button = event.target.closest("button");
   if (!button) return;
   if (button.dataset.copy) {
     event.preventDefault();
     try { await navigator.clipboard.writeText(button.dataset.copy); showNotice("Copied to clipboard."); }
+    catch (_) { showNotice("Clipboard access was denied.", "error"); }
+    return;
+  }
+  if (button.dataset.copyResult) {
+    const selector = button.dataset.copyResult === "onion" ? "#device-onion" : "#device-credential";
+    try { await navigator.clipboard.writeText(document.querySelector(selector).textContent); showNotice("Copied to clipboard."); }
     catch (_) { showNotice("Clipboard access was denied.", "error"); }
     return;
   }
@@ -206,7 +286,7 @@ document.addEventListener("click", async (event) => {
     mappingDialog.showModal();
     return;
   }
-  if (action === "connect-device") { document.querySelector("#device-dialog").showModal(); return; }
+  if (action === "connect-device") { prepareDeviceWizard(siteCard); deviceDialog.showModal(); return; }
   if (action === "target-kind") { updateTargetFields(); return; }
   if (action === "logout") { await pending(button, "Signing out…", () => api("/api/logout")); return; }
   if (action === "toggle-site") {
@@ -246,6 +326,19 @@ document.addEventListener("click", async (event) => {
   if (action === "remove-mapping") {
     if (!window.confirm("Remove this application mapping?")) return;
     await pending(button, "Removing…", () => api(`/api/sites/${encodeURIComponent(siteId)}/mappings/${encodeURIComponent(mappingId)}/remove`));
+    return;
+  }
+  if (action === "revoke-device") {
+    const guestId = button.closest("[data-guest-id]").dataset.guestId;
+    const deviceId = button.closest("[data-device-id]").dataset.deviceId;
+    if (!window.confirm("Revoke this device’s Tor authorization?")) return;
+    await pending(button, "…", () => api(`/api/sites/${encodeURIComponent(siteId)}/guests/${encodeURIComponent(guestId)}/devices/${encodeURIComponent(deviceId)}/revoke`));
+    return;
+  }
+  if (action === "remove-guest") {
+    const guestId = button.closest("[data-guest-id]").dataset.guestId;
+    if (!window.confirm("Remove this guest?")) return;
+    await pending(button, "Removing…", () => api(`/api/sites/${encodeURIComponent(siteId)}/guests/${encodeURIComponent(guestId)}/remove`));
     return;
   }
   if (action === "edit-mapping") {
@@ -295,6 +388,13 @@ document.addEventListener("click", async (event) => {
   }
   if (action === "emergency-clear") {
     await pending(button, "Restoring…", () => api("/api/emergency/clear"));
+    return;
+  }
+  if (action === "wizard-bootstrap") {
+    await pending(button, "Opening…", async () => {
+      const result = await api(`/api/sites/${encodeURIComponent(wizardSiteId)}/bootstrap/open`, { seconds: 900 });
+      showNotice(`Certificate download opened: ${result.url}`);
+    }, false);
   }
 });
 

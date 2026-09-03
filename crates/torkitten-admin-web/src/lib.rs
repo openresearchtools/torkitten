@@ -27,8 +27,9 @@ use torkitten_auth::{
     local_admin_session_cookie,
 };
 use torkitten_core::{
-    AdminCommand, AdminResponse, ComponentAction, ComponentState, GatewayMode, GatewayStatus,
-    ManagedComponent, Mapping, MappingId, MappingTarget, SensitiveString, Site, SiteId, Transport,
+    AdminCommand, AdminResponse, ComponentAction, ComponentState, Device, DeviceId, GatewayMode,
+    GatewayStatus, Guest, GuestId, ManagedComponent, Mapping, MappingId, MappingTarget,
+    SensitiveString, Site, SiteId, Transport,
 };
 
 const SESSION_COOKIE: &str = "torkitten_admin_session";
@@ -145,6 +146,15 @@ fn router(daemon_socket: PathBuf, origin: ExpectedOrigin) -> Router {
         .route(
             "/api/sites/{site_id}/mappings/{mapping_id}/remove",
             post(remove_mapping),
+        )
+        .route("/api/sites/{site_id}/devices/enroll", post(enroll_device))
+        .route(
+            "/api/sites/{site_id}/guests/{guest_id}/devices/{device_id}/revoke",
+            post(revoke_device),
+        )
+        .route(
+            "/api/sites/{site_id}/guests/{guest_id}/remove",
+            post(remove_guest),
         )
         .route("/api/settings/resume", post(set_resume_after_boot))
         .route("/api/emergency/stop", post(emergency_stop))
@@ -627,6 +637,88 @@ async fn remove_mapping(
     .await
 }
 
+#[derive(Deserialize)]
+struct EnrollDeviceInput {
+    guest_id: String,
+    guest_name: String,
+    device_id: String,
+    device_name: String,
+    client_name: String,
+    mapping_ids: Vec<String>,
+}
+
+async fn enroll_device(
+    State(state): State<AppState>,
+    Path(site_id): Path<String>,
+    headers: HeaderMap,
+    Json(input): Json<EnrollDeviceInput>,
+) -> ApiResult<Json<AdminResponse>> {
+    let site_id = parse_site_id(site_id)?;
+    let guest_id = GuestId::new(input.guest_id).map_err(ApiError::Validation)?;
+    let mapping_ids = input
+        .mapping_ids
+        .into_iter()
+        .map(|id| MappingId::new(id).map_err(ApiError::Validation))
+        .collect::<Result<Vec<_>, _>>()?;
+    let guest = Guest {
+        site_id: site_id.clone(),
+        id: guest_id.clone(),
+        display_name: input.guest_name,
+        enabled: true,
+    };
+    let device = Device {
+        site_id,
+        guest_id,
+        id: DeviceId::new(input.device_id).map_err(ApiError::Validation)?,
+        display_name: input.device_name,
+        tor_client_name: input.client_name,
+        enabled: true,
+    };
+    authorized_command(
+        &state,
+        &headers,
+        AdminCommand::EnrollDevice {
+            guest,
+            device,
+            mapping_ids,
+        },
+    )
+    .await
+}
+
+async fn revoke_device(
+    State(state): State<AppState>,
+    Path((site_id, guest_id, device_id)): Path<(String, String, String)>,
+    headers: HeaderMap,
+) -> ApiResult<Json<AdminResponse>> {
+    authorized_command(
+        &state,
+        &headers,
+        AdminCommand::RevokeDevice {
+            site_id: parse_site_id(site_id)?,
+            guest_id: GuestId::new(guest_id).map_err(ApiError::Validation)?,
+            device_id: DeviceId::new(device_id).map_err(ApiError::Validation)?,
+        },
+    )
+    .await
+}
+
+async fn remove_guest(
+    State(state): State<AppState>,
+    Path((site_id, guest_id)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> ApiResult<Json<AdminResponse>> {
+    authorized_command(
+        &state,
+        &headers,
+        AdminCommand::RemoveGuest {
+            site_id: parse_site_id(site_id)?,
+            guest_id: GuestId::new(guest_id).map_err(ApiError::Validation)?,
+        },
+    )
+    .await
+}
+
 async fn set_resume_after_boot(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -955,6 +1047,7 @@ struct SiteView {
     state: &'static str,
     bootstrap_open: bool,
     mappings: Vec<MappingView>,
+    guests: Vec<GuestView>,
 }
 
 impl SiteView {
@@ -975,8 +1068,37 @@ impl SiteView {
                 .iter()
                 .map(MappingView::from_mapping)
                 .collect(),
+            guests: status
+                .guests
+                .iter()
+                .map(|access| GuestView {
+                    id: access.guest.id.as_str().to_owned(),
+                    display_name: access.guest.display_name.clone(),
+                    mapping_count: access.mapping_ids.len(),
+                    devices: access
+                        .devices
+                        .iter()
+                        .map(|device| DeviceView {
+                            id: device.id.as_str().to_owned(),
+                            display_name: device.display_name.clone(),
+                        })
+                        .collect(),
+                })
+                .collect(),
         }
     }
+}
+
+struct GuestView {
+    id: String,
+    display_name: String,
+    mapping_count: usize,
+    devices: Vec<DeviceView>,
+}
+
+struct DeviceView {
+    id: String,
+    display_name: String,
 }
 
 struct MappingView {
@@ -1103,6 +1225,7 @@ mod tests {
                 onion_hostname: Some("example.onion".to_owned()),
                 bootstrap_expires_unix: None,
                 publication: ComponentState::Running,
+                guests: Vec::new(),
             }],
             tor: ComponentState::Running,
             caddy: ComponentState::Running,

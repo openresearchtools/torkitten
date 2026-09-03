@@ -104,6 +104,16 @@ h3 { margin-bottom: 4px; font-size: 15px; }
 .mapping-rail { height: 25px; margin-left: 2px; border-left: 2px solid #46526a; border-bottom: 2px solid #46526a; border-radius: 0 0 0 6px; }
 .port-chip { padding: 4px 7px; border: 1px solid var(--line); border-radius: 6px; color: #becae0; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
 .mapping-empty { padding: 18px; border: 1px dashed var(--line); border-radius: 8px; color: var(--muted); text-align: center; font-size: 13px; }
+.access-heading { display: flex; justify-content: space-between; align-items: center; gap: 18px; margin-top: 18px; padding: 19px 0 11px; border-top: 1px solid var(--line); }
+.access-heading p { margin: 0; color: var(--muted); font-size: 12px; }
+.count-chip { padding: 4px 8px; border-radius: 999px; background: #293142; color: var(--muted); font-size: 11px; }
+.guest-list { display: grid; gap: 7px; }
+.guest-row { display: grid; grid-template-columns: minmax(120px, .7fr) 1fr auto; align-items: center; gap: 12px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: #121720; }
+.guest-main { display: grid; gap: 3px; }
+.guest-main span { color: var(--muted); font-size: 11px; }
+.device-list { display: flex; flex-wrap: wrap; gap: 6px; }
+.device-chip { display: inline-flex; align-items: center; gap: 5px; padding: 5px 7px; border-radius: 6px; background: #282f3e; color: #c9d2e1; font-size: 12px; }
+.device-chip button { padding: 0; border: 0; background: none; color: #ff9ca4; cursor: pointer; }
 .empty-state { padding: 62px 28px; border: 1px dashed #39465b; border-radius: 13px; background: rgba(21, 26, 36, .65); text-align: center; }
 .empty-state p { max-width: 560px; margin: 0 auto 22px; color: var(--muted); }
 .empty-icon { display: inline-grid; place-items: center; width: 76px; height: 76px; margin-bottom: 22px; border: 1px solid #4b426c; border-radius: 24px; background: #241f3c; color: var(--accent-2); font-family: ui-monospace, monospace; font-size: 13px; }
@@ -151,6 +161,15 @@ input::placeholder { color: #667187; }
 .wizard-steps li > span { display: grid; place-items: center; width: 28px; height: 28px; border-radius: 50%; background: #2a2451; color: #c9bdff; font-weight: 800; }
 .wizard-steps p { margin: 4px 0 0; color: var(--muted); font-size: 13px; }
 .callout { margin-top: 18px; padding: 13px; border: 1px solid #4c426d; border-radius: 8px; background: #24203a; color: #d9d1ff; font-size: 13px; }
+.grant-list { margin: 0; padding: 13px; border: 1px solid var(--line); border-radius: 8px; }
+.grant-list legend { padding: 0 6px; color: #c9d2e1; font-size: 13px; font-weight: 650; }
+.grant-list > div { display: grid; gap: 8px; }
+.grant-list label { display: flex; align-items: center; gap: 8px; }
+.grant-list input { width: 16px; min-height: 16px; }
+.credential-result { display: grid; gap: 13px; margin-top: 22px; padding: 17px; border: 1px solid #4c426d; border-radius: 10px; background: #17142a; }
+.credential-result p { margin-bottom: 0; }
+.copy-field { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 8px; padding: 9px; border: 1px solid var(--line); border-radius: 7px; background: #0e131c; }
+.copy-field code { overflow-wrap: anywhere; color: #d9d1ff; font-size: 11px; }
 
 @media (max-width: 900px) {
   .app-shell { grid-template-columns: 1fr; }
@@ -165,6 +184,8 @@ input::placeholder { color: #667187; }
   .settings-card { grid-template-columns: 1fr; }
   .mapping-row { grid-template-columns: 12px minmax(150px, 1fr) auto auto; }
   .mapping-row .text-button { grid-row: 2; }
+  .guest-row { grid-template-columns: 1fr auto; }
+  .device-list { grid-column: 1 / -1; }
 }
 
 @media (max-width: 620px) {
@@ -185,6 +206,8 @@ input::placeholder { color: #667187; }
   .mapping-row .text-button { grid-row: auto; }
   .mapping-row .switch { grid-column: 3; grid-row: 1; }
   .field-grid { grid-template-columns: 1fr; }
+  .guest-row { grid-template-columns: 1fr; }
+  .device-list { grid-column: auto; }
   .auth-card, .modal-content { padding: 26px 20px; }
   .sidebar-footer { display: none; }
 }

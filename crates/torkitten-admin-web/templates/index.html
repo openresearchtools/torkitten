@@ -168,6 +168,26 @@
               </div>
               {% endfor %}
             </div>
+            <div class="access-heading">
+              <div><h3>Guests and devices</h3><p>Every device receives a distinct revocable Tor key.</p></div>
+              <span class="count-chip">{{ site.guests.len() }} guest{% if site.guests.len() != 1 %}s{% endif %}</span>
+            </div>
+            <div class="guest-list">
+              {% if site.guests.is_empty() %}
+              <div class="mapping-empty">No guest devices are enrolled.</div>
+              {% endif %}
+              {% for guest in site.guests %}
+              <div class="guest-row" data-guest-id="{{ guest.id }}" data-guest-name="{{ guest.display_name }}">
+                <div class="guest-main"><strong>{{ guest.display_name }}</strong><span>{{ guest.mapping_count }} mapping grant{% if guest.mapping_count != 1 %}s{% endif %}</span></div>
+                <div class="device-list">
+                  {% for device in guest.devices %}
+                  <span class="device-chip" data-device-id="{{ device.id }}">{{ device.display_name }} <button type="button" aria-label="Revoke {{ device.display_name }}" data-action="revoke-device">×</button></span>
+                  {% endfor %}
+                </div>
+                {% if guest.devices.is_empty() %}<button class="text-button danger-text" type="button" data-action="remove-guest">Remove guest</button>{% endif %}
+              </div>
+              {% endfor %}
+            </div>
           </div>
         </details>
         {% endfor %}
@@ -253,7 +273,28 @@
         <li><span>4</span><div><strong>Enroll the guest login</strong><p>Create or select a guest, then enroll a passkey or password plus TOTP.</p></div></li>
         <li><span>5</span><div><strong>Open the protected site</strong><p>Future visits use the permanent safe login portal.</p></div></li>
       </ol>
-      <div class="callout">Device credential issuance will activate after a guest is selected.</div>
+      <form id="device-form" class="stack">
+        <input name="site_id" type="hidden">
+        <div class="field-grid">
+          <label>Guest ID<input name="guest_id" list="existing-guests" pattern="[a-z0-9][a-z0-9-]{0,62}" required placeholder="family"></label>
+          <label>Guest name<input name="guest_name" maxlength="128" required placeholder="Family"></label>
+        </div>
+        <datalist id="existing-guests"></datalist>
+        <div class="field-grid">
+          <label>Device ID<input name="device_id" pattern="[a-z0-9][a-z0-9-]{0,62}" required placeholder="phone"></label>
+          <label>Device name<input name="device_name" maxlength="128" required placeholder="Alice’s phone"></label>
+        </div>
+        <label>Tor client name<input name="client_name" pattern="[A-Za-z0-9+_-]{1,16}" maxlength="16" required placeholder="alice_phone"></label>
+        <fieldset class="grant-list"><legend>Allowed application mappings</legend><div id="device-mapping-grants"></div></fieldset>
+        <button class="button primary" type="submit">Create this device’s authorization</button>
+      </form>
+      <section id="device-result" class="credential-result" hidden>
+        <strong>Install this Tor client authorization</strong>
+        <p class="muted">This private credential is shown for the enrolled device. Do not share it with another device.</p>
+        <label>Onion address<div class="copy-field"><code id="device-onion"></code><button type="button" class="copy-button" data-copy-result="onion">Copy</button></div></label>
+        <label>Authorization credential<div class="copy-field"><code id="device-credential"></code><button type="button" class="copy-button" data-copy-result="credential">Copy</button></div></label>
+        <button class="button" type="button" data-action="wizard-bootstrap">Open 15-minute certificate download</button>
+      </section>
     </div>
   </dialog>
   {% endif %}
