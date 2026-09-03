@@ -89,8 +89,15 @@ fn arguments() -> Result<LaunchOptions, String> {
             _ => return Err(format!("unknown option: {}", display(&argument))),
         }
     }
+    let mut paths = DaemonPaths::new(state, runtime, tor, caddy);
+    if let Some(user) = env::var_os("TORKITTEN_TOR_SERVICE_USER") {
+        let user = user
+            .into_string()
+            .map_err(|_| "Tor service user must be valid UTF-8".to_owned())?;
+        paths = paths.with_tor_service_user(user);
+    }
     Ok(LaunchOptions {
-        paths: DaemonPaths::new(state, runtime, tor, caddy),
+        paths,
         admin_listen,
     })
 }

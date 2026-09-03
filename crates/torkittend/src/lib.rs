@@ -54,6 +54,7 @@ pub struct DaemonPaths {
     pub runtime_directory: PathBuf,
     pub tor_binary: PathBuf,
     pub caddy_binary: PathBuf,
+    pub tor_service_user: Option<String>,
 }
 
 impl DaemonPaths {
@@ -69,7 +70,16 @@ impl DaemonPaths {
             runtime_directory: runtime_directory.into(),
             tor_binary: tor_binary.into(),
             caddy_binary: caddy_binary.into(),
+            tor_service_user: None,
         }
+    }
+
+    /// Selects the dedicated native Tor service account. Container and test
+    /// operation omit this and use the single-user identity tree directly.
+    #[must_use]
+    pub fn with_tor_service_user(mut self, user: impl Into<String>) -> Self {
+        self.tor_service_user = Some(user.into());
+        self
     }
 
     #[must_use]
@@ -239,15 +249,20 @@ impl<S: ServiceControl> Daemon<S> {
     /// Returns an error for unsafe state paths or invalid stored database and
     /// certificate material.
     pub fn open(paths: DaemonPaths, services: S, now_unix: i64) -> Result<Self, DaemonError> {
-        ensure_directory(&paths.state_directory, 0o700)?;
-        ensure_directory(&paths.runtime_directory, 0o770)?;
+        ensure_directory(&paths.state_directory, 0o711)?;
+        ensure_directory(&paths.runtime_directory, 0o2711)?;
         let mut store = Store::open(&paths.database_directory())?;
         let authority = TlsAuthority::load_or_create(&mut store, now_unix)?;
-        let tor = TorInstance::new(TorPaths::new(
+        let mut tor_paths = TorPaths::new(
             &paths.tor_binary,
             paths.state_directory.join("tor"),
             paths.runtime_directory.join("tor"),
-        ));
+        )
+        .with_proxy_runtime_directory(paths.runtime_directory.join("caddy"));
+        if let Some(user) = &paths.tor_service_user {
+            tor_paths = tor_paths.with_service_user(user);
+        }
+        let tor = TorInstance::new(tor_paths);
         for site in store.gateway_config()?.sites {
             tor.recover_identity_rotation(&site.id)?;
         }
@@ -1937,7 +1952,7 @@ async fn prepare_socket_path(path: &Path) -> Result<(), DaemonError> {
     let parent = path
         .parent()
         .ok_or_else(|| DaemonError::InvalidPath(path.to_path_buf()))?;
-    ensure_directory(parent, 0o770)?;
+    ensure_directory(parent, 0o2711)?;
     match fs::symlink_metadata(path) {
         Ok(metadata) => {
             if !metadata.file_type().is_socket() || metadata.file_type().is_symlink() {
@@ -2034,7 +2049,7 @@ fn atomic_write(path: &Path, contents: &[u8], mode: u32) -> Result<(), DaemonErr
     let parent = path
         .parent()
         .ok_or_else(|| DaemonError::InvalidPath(path.to_path_buf()))?;
-    ensure_directory(parent, 0o750)?;
+    ensure_directory(parent, 0o2770)?;
     let filename = path.file_name().and_then(OsStr::to_str).unwrap_or("file");
     for _ in 0..32 {
         let mut random = [0_u8; 8];

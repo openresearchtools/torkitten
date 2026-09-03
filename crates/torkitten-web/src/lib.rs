@@ -82,7 +82,7 @@ struct SiteServer {
 ///
 /// Returns when IPC or a site listener fails after startup.
 pub async fn serve(config: RemoteWebConfig) -> Result<(), RemoteWebError> {
-    ensure_directory(&config.runtime_directory.join("web"), 0o770)?;
+    ensure_directory(&config.runtime_directory.join("web"), 0o2750)?;
     let mut servers = HashMap::<SiteId, SiteServer>::new();
     let mut interval = tokio::time::interval(RECONCILE_INTERVAL);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -155,7 +155,7 @@ async fn published_sites(daemon_socket: &Path) -> Result<Vec<PublishedSite>, Rem
 }
 
 async fn serve_site(site_directory: PathBuf, state: SiteState) -> Result<(), RemoteWebError> {
-    ensure_directory(&site_directory, 0o770)?;
+    ensure_directory(&site_directory, 0o2750)?;
     let portal = bind_site_socket(&site_directory.join("portal.sock"))?;
     let auth = bind_site_socket(&site_directory.join("auth.sock"))?;
     let bootstrap = bind_site_socket(&site_directory.join("bootstrap.sock"))?;

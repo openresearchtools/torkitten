@@ -19,12 +19,16 @@ use crate::{
 };
 
 const LEGACY_SITE_ID: &str = "default";
+const SHARED_DIRECTORY_MODE: u32 = 0o2750;
+const SHARED_FILE_MODE: u32 = 0o640;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TorPaths {
     pub binary: PathBuf,
     pub state_directory: PathBuf,
     pub runtime_directory: PathBuf,
+    pub proxy_runtime_directory: PathBuf,
+    pub service_user: Option<String>,
 }
 
 impl TorPaths {
@@ -34,11 +38,30 @@ impl TorPaths {
         state_directory: impl Into<PathBuf>,
         runtime_directory: impl Into<PathBuf>,
     ) -> Self {
+        let runtime_directory = runtime_directory.into();
         Self {
             binary: binary.into(),
             state_directory: state_directory.into(),
-            runtime_directory: runtime_directory.into(),
+            proxy_runtime_directory: runtime_directory.clone(),
+            runtime_directory,
+            service_user: None,
         }
+    }
+
+    /// Selects the separate runtime directory where Caddy creates the Unix
+    /// listeners consumed by Tor hidden-service virtual ports.
+    #[must_use]
+    pub fn with_proxy_runtime_directory(mut self, directory: impl Into<PathBuf>) -> Self {
+        self.proxy_runtime_directory = directory.into();
+        self
+    }
+
+    /// Selects the native service account and therefore the owner-private
+    /// hidden-service tree populated immediately before Tor starts.
+    #[must_use]
+    pub fn with_service_user(mut self, user: impl Into<String>) -> Self {
+        self.service_user = Some(user.into());
+        self
     }
 }
 
@@ -132,6 +155,21 @@ impl TorInstance {
         self.site_state_directory(site_id).join("onion")
     }
 
+    /// Returns the directory Tor reads at runtime. Container/single-user
+    /// operation uses the canonical identity directly; native service-user
+    /// operation uses an owner-private synchronized copy.
+    #[must_use]
+    pub fn published_onion_directory(&self, site_id: &SiteId) -> PathBuf {
+        if self.paths.service_user.is_some() {
+            self.paths
+                .state_directory
+                .join("hidden-services")
+                .join(site_id.as_str())
+        } else {
+            self.onion_directory(site_id)
+        }
+    }
+
     #[must_use]
     pub fn site_runtime_directory(&self, site_id: &SiteId) -> PathBuf {
         self.paths
@@ -147,12 +185,19 @@ impl TorInstance {
 
     #[must_use]
     pub fn bootstrap_socket(&self, site_id: &SiteId) -> PathBuf {
-        self.site_runtime_directory(site_id).join("bootstrap.sock")
+        self.paths
+            .proxy_runtime_directory
+            .join("sites")
+            .join(site_id.as_str())
+            .join("caddy-80.sock")
     }
 
     #[must_use]
     pub fn caddy_socket(&self, site_id: &SiteId, virtual_port: u16) -> PathBuf {
-        self.site_runtime_directory(site_id)
+        self.paths
+            .proxy_runtime_directory
+            .join("sites")
+            .join(site_id.as_str())
             .join(format!("caddy-{virtual_port}.sock"))
     }
 
@@ -184,8 +229,8 @@ impl TorInstance {
         bootstrap_sites: &HashSet<SiteId>,
     ) -> Result<(), TorError> {
         self.prepare_directories(config, bootstrap_sites)?;
-        let rendered = self.render_torrc(config, bootstrap_sites)?;
-        atomic_write(&self.torrc_path(), rendered.as_bytes(), 0o600)
+        let rendered = self.render_torrc(config, bootstrap_sites, false)?;
+        atomic_write(&self.torrc_path(), rendered.as_bytes(), SHARED_FILE_MODE)
     }
 
     /// Validates a staged configuration with the bundled Tor binary before
@@ -201,13 +246,18 @@ impl TorInstance {
         bootstrap_sites: &HashSet<SiteId>,
     ) -> Result<(), TorError> {
         self.prepare_directories(config, bootstrap_sites)?;
-        let rendered = self.render_torrc(config, bootstrap_sites)?;
+        let validation = self.render_torrc(config, bootstrap_sites, true)?;
         let (temporary_path, mut temporary) =
             create_temporary(&self.paths.state_directory, Some(OsStr::new("torrc")))?;
         if let Err(error) = temporary
-            .write_all(rendered.as_bytes())
+            .write_all(validation.as_bytes())
             .and_then(|()| temporary.sync_all())
-            .and_then(|()| fs::set_permissions(&temporary_path, fs::Permissions::from_mode(0o600)))
+            .and_then(|()| {
+                fs::set_permissions(
+                    &temporary_path,
+                    fs::Permissions::from_mode(SHARED_FILE_MODE),
+                )
+            })
         {
             let _ = fs::remove_file(&temporary_path);
             return Err(error.into());
@@ -217,9 +267,9 @@ impl TorInstance {
             let _ = fs::remove_file(&temporary_path);
             return Err(command_failure(output.status.code(), &output.stderr));
         }
-        fs::rename(&temporary_path, self.torrc_path())?;
-        File::open(&self.paths.state_directory)?.sync_all()?;
-        Ok(())
+        fs::remove_file(&temporary_path)?;
+        let active = self.render_torrc(config, bootstrap_sites, false)?;
+        atomic_write(&self.torrc_path(), active.as_bytes(), SHARED_FILE_MODE)
     }
 
     /// Validates a staged candidate with the bundled Tor binary without
@@ -235,13 +285,16 @@ impl TorInstance {
         bootstrap_sites: &HashSet<SiteId>,
     ) -> Result<(), TorError> {
         self.prepare_directories(config, bootstrap_sites)?;
-        let rendered = self.render_torrc(config, bootstrap_sites)?;
+        let rendered = self.render_torrc(config, bootstrap_sites, true)?;
         let (temporary_path, mut temporary) =
             create_temporary(&self.paths.state_directory, Some(OsStr::new("torrc")))?;
         let result = (|| {
             temporary.write_all(rendered.as_bytes())?;
             temporary.sync_all()?;
-            fs::set_permissions(&temporary_path, fs::Permissions::from_mode(0o600))?;
+            fs::set_permissions(
+                &temporary_path,
+                fs::Permissions::from_mode(SHARED_FILE_MODE),
+            )?;
             let output = self.verify_command_for(&temporary_path).output()?;
             if output.status.success() {
                 Ok(())
@@ -260,16 +313,29 @@ impl TorInstance {
     ) -> Result<(), TorError> {
         config.validate()?;
         validate_bootstrap_sites(config, bootstrap_sites)?;
-        ensure_private_directory(&self.paths.state_directory)?;
-        ensure_private_directory(&self.paths.runtime_directory)?;
-        ensure_private_directory(&self.paths.state_directory.join("data"))?;
+        ensure_directory(&self.paths.state_directory, SHARED_DIRECTORY_MODE)?;
+        ensure_external_directory(&self.paths.runtime_directory, 0o700)?;
+        ensure_external_directory(
+            &self.paths.state_directory.join("data"),
+            SHARED_DIRECTORY_MODE,
+        )?;
+        ensure_directory(
+            &self.paths.state_directory.join("validation-data"),
+            SHARED_DIRECTORY_MODE,
+        )?;
+        ensure_directory(
+            &self.paths.state_directory.join("sites"),
+            SHARED_DIRECTORY_MODE,
+        )?;
         self.migrate_legacy_identity(config)?;
 
         for site in &config.sites {
-            ensure_private_directory(&self.site_state_directory(&site.id))?;
-            ensure_private_directory(&self.site_runtime_directory(&site.id))?;
-            ensure_private_directory(&self.onion_directory(&site.id))?;
-            ensure_private_directory(&self.onion_directory(&site.id).join("authorized_clients"))?;
+            ensure_directory(&self.site_state_directory(&site.id), SHARED_DIRECTORY_MODE)?;
+            ensure_directory(&self.onion_directory(&site.id), SHARED_DIRECTORY_MODE)?;
+            ensure_directory(
+                &self.onion_directory(&site.id).join("authorized_clients"),
+                SHARED_DIRECTORY_MODE,
+            )?;
         }
 
         Ok(())
@@ -288,11 +354,11 @@ impl TorInstance {
         keys: &ClientKeyPair,
     ) -> Result<(), TorError> {
         let directory = self.onion_directory(site_id).join("authorized_clients");
-        ensure_private_directory(&directory)?;
+        ensure_directory(&directory, SHARED_DIRECTORY_MODE)?;
         atomic_write(
             &directory.join(format!("{}.auth", name.as_str())),
             keys.server_authorization().as_bytes(),
-            0o600,
+            SHARED_FILE_MODE,
         )
     }
 
@@ -308,9 +374,15 @@ impl TorInstance {
         site_id: &SiteId,
         identity: &OnionIdentity,
     ) -> Result<(), TorError> {
+        ensure_directory(&self.paths.state_directory, SHARED_DIRECTORY_MODE)?;
+        ensure_directory(
+            &self.paths.state_directory.join("sites"),
+            SHARED_DIRECTORY_MODE,
+        )?;
+        ensure_directory(&self.site_state_directory(site_id), SHARED_DIRECTORY_MODE)?;
         let directory = self.onion_directory(site_id);
-        ensure_private_directory(&directory)?;
-        ensure_private_directory(&directory.join("authorized_clients"))?;
+        ensure_directory(&directory, SHARED_DIRECTORY_MODE)?;
+        ensure_directory(&directory.join("authorized_clients"), SHARED_DIRECTORY_MODE)?;
         let secret = directory.join("hs_ed25519_secret_key");
         let public = directory.join("hs_ed25519_public_key");
         let hostname = directory.join("hostname");
@@ -320,12 +392,12 @@ impl TorInstance {
         {
             return Err(TorError::IdentityAlreadyExists(site_id.clone()));
         }
-        atomic_write(&secret, identity.secret_key_file(), 0o600)?;
-        atomic_write(&public, identity.public_key_file(), 0o600)?;
+        atomic_write(&secret, identity.secret_key_file(), SHARED_FILE_MODE)?;
+        atomic_write(&public, identity.public_key_file(), SHARED_FILE_MODE)?;
         atomic_write(
             &hostname,
             format!("{}\n", identity.hostname()).as_bytes(),
-            0o600,
+            SHARED_FILE_MODE,
         )
     }
 
@@ -353,22 +425,22 @@ impl TorInstance {
         ensure_absent(&staged)?;
         ensure_absent(&previous)?;
         ensure_absent(&committed)?;
-        ensure_private_directory(&staged)?;
+        ensure_directory(&staged, SHARED_DIRECTORY_MODE)?;
         let result = (|| {
             atomic_write(
                 &staged.join("hs_ed25519_secret_key"),
                 identity.secret_key_file(),
-                0o600,
+                SHARED_FILE_MODE,
             )?;
             atomic_write(
                 &staged.join("hs_ed25519_public_key"),
                 identity.public_key_file(),
-                0o600,
+                SHARED_FILE_MODE,
             )?;
             atomic_write(
                 &staged.join("hostname"),
                 format!("{}\n", identity.hostname()).as_bytes(),
-                0o600,
+                SHARED_FILE_MODE,
             )?;
             copy_authorized_clients(
                 &onion.join("authorized_clients"),
@@ -497,7 +569,10 @@ impl TorInstance {
 
     fn verify_command_for(&self, torrc_path: &Path) -> Command {
         let mut command = self.command_for(torrc_path);
-        command.arg("--verify-config");
+        command
+            .arg("--DataDirectory")
+            .arg(self.paths.state_directory.join("validation-data"))
+            .arg("--verify-config");
         command
     }
 
@@ -505,6 +580,7 @@ impl TorInstance {
         &self,
         config: &GatewayConfig,
         bootstrap_sites: &HashSet<SiteId>,
+        validation: bool,
     ) -> Result<String, TorError> {
         let mut output = String::new();
         setting(
@@ -515,7 +591,7 @@ impl TorInstance {
         setting(
             &mut output,
             "CookieAuthFile",
-            &self.paths.state_directory.join("control.authcookie"),
+            &self.paths.state_directory.join("data/control.authcookie"),
         )?;
         setting(&mut output, "ControlSocket", &self.control_socket())?;
         setting(
@@ -526,6 +602,7 @@ impl TorInstance {
         output.push_str(
             "CookieAuthentication 1\n\
              CookieAuthFileGroupReadable 0\n\
+             DataDirectoryGroupReadable 1\n\
              ControlPort 0\n\
              SocksPort 0\n\
              HTTPTunnelPort 0\n\
@@ -553,11 +630,15 @@ impl TorInstance {
             .collect::<Vec<_>>();
         sites.sort_by(|left, right| left.id.cmp(&right.id));
         for site in sites {
-            setting(
-                &mut output,
-                "HiddenServiceDir",
-                &self.onion_directory(&site.id),
-            )?;
+            let onion_directory = if validation {
+                self.onion_directory(&site.id)
+            } else {
+                self.published_onion_directory(&site.id)
+            };
+            setting(&mut output, "HiddenServiceDir", &onion_directory)?;
+            if validation || self.paths.service_user.is_none() {
+                output.push_str("HiddenServiceDirGroupReadable 1\n");
+            }
             output.push_str(
                 "HiddenServiceVersion 3\n\
                  HiddenServiceAllowUnknownPorts 0\n\
@@ -606,7 +687,7 @@ impl TorInstance {
             .find(|site| site.id.as_str() == LEGACY_SITE_ID)
             .ok_or(TorError::LegacyIdentityUnassigned)?;
         let parent = self.site_state_directory(&site.id);
-        ensure_private_directory(&parent)?;
+        ensure_directory(&parent, SHARED_DIRECTORY_MODE)?;
         let destination = self.onion_directory(&site.id);
         if destination.exists() {
             return Err(TorError::LegacyIdentityConflict(destination));
@@ -685,16 +766,34 @@ fn quote(value: &str) -> Result<String, TorError> {
     ))
 }
 
-fn ensure_private_directory(path: &Path) -> Result<(), TorError> {
+fn ensure_directory(path: &Path, mode: u32) -> Result<(), TorError> {
     fs::create_dir_all(path)?;
     let metadata = fs::symlink_metadata(path)?;
     if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
         return Err(TorError::UnsafeDirectory(path.to_path_buf()));
     }
     let mut permissions = metadata.permissions();
-    permissions.set_mode(0o700);
+    permissions.set_mode(mode);
     fs::set_permissions(path, permissions)?;
     Ok(())
+}
+
+// The native package owns Tor's mutable data directory with the dedicated
+// Tor account. The daemon validates an existing directory without trying to
+// chmod storage it deliberately does not own.
+fn ensure_external_directory(path: &Path, mode_when_created: u32) -> Result<(), TorError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
+                return Err(TorError::UnsafeDirectory(path.to_path_buf()));
+            }
+            Ok(())
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            ensure_directory(path, mode_when_created)
+        }
+        Err(error) => Err(error.into()),
+    }
 }
 
 fn ensure_existing_private_directory(path: &Path) -> Result<(), TorError> {
@@ -729,7 +828,7 @@ fn remove_private_tree(path: &Path) -> Result<(), TorError> {
 
 fn copy_authorized_clients(source: &Path, destination: &Path) -> Result<(), TorError> {
     ensure_existing_private_directory(source)?;
-    ensure_private_directory(destination)?;
+    ensure_directory(destination, SHARED_DIRECTORY_MODE)?;
     for entry in fs::read_dir(source)? {
         let entry = entry?;
         let path = entry.path();
@@ -742,7 +841,11 @@ fn copy_authorized_clients(source: &Path, destination: &Path) -> Result<(), TorE
         if !metadata.file_type().is_file() || metadata.file_type().is_symlink() || !safe_name {
             return Err(TorError::UnsafeAuthorizedClient(path));
         }
-        atomic_write(&destination.join(filename), &fs::read(path)?, 0o600)?;
+        atomic_write(
+            &destination.join(filename),
+            &fs::read(path)?,
+            SHARED_FILE_MODE,
+        )?;
     }
     Ok(())
 }
@@ -759,7 +862,7 @@ fn atomic_write(path: &Path, contents: &[u8], mode: u32) -> Result<(), TorError>
     let parent = path
         .parent()
         .ok_or_else(|| TorError::InvalidPath(path.to_path_buf()))?;
-    ensure_private_directory(parent)?;
+    ensure_directory(parent, SHARED_DIRECTORY_MODE)?;
     let (temporary_path, mut temporary) = create_temporary(parent, path.file_name())?;
     temporary.write_all(contents)?;
     temporary.sync_all()?;
@@ -900,7 +1003,9 @@ mod tests {
         }
         assert!(torrc.contains("ClientOnly 1"));
         assert!(torrc.contains("ShutdownWaitLength 5 seconds"));
+        assert!(torrc.contains("DataDirectoryGroupReadable 1"));
         assert_eq!(torrc.matches("HiddenServiceDir ").count(), 2);
+        assert_eq!(torrc.matches("HiddenServiceDirGroupReadable 1").count(), 2);
         assert_eq!(torrc.matches("HiddenServicePort 80 ").count(), 0);
         assert_eq!(torrc.matches("HiddenServicePort 443 ").count(), 2);
         assert_eq!(torrc.matches("HiddenServicePort 8443 ").count(), 2);
@@ -935,6 +1040,64 @@ mod tests {
                 .onion_directory(&SiteId::new("disabled").unwrap())
                 .is_dir()
         );
+    }
+
+    #[test]
+    fn hidden_service_ports_target_the_separate_caddy_runtime() {
+        let temporary = tempfile::tempdir().unwrap();
+        let caddy_runtime = temporary.path().join("run/caddy");
+        let instance = TorInstance::new(
+            TorPaths::new(
+                "/opt/torkitten/libexec/tor",
+                temporary.path().join("state/tor"),
+                temporary.path().join("run/tor"),
+            )
+            .with_proxy_runtime_directory(&caddy_runtime),
+        );
+        instance.prepare(&config()).unwrap();
+        let torrc = fs::read_to_string(instance.torrc_path()).unwrap();
+        assert!(
+            torrc.contains(
+                caddy_runtime
+                    .join("sites/alpha/caddy-443.sock")
+                    .to_str()
+                    .unwrap()
+            )
+        );
+        assert!(
+            !torrc.contains(
+                temporary
+                    .path()
+                    .join("run/tor/sites/alpha/caddy-443.sock")
+                    .to_str()
+                    .unwrap()
+            )
+        );
+    }
+
+    #[test]
+    fn service_user_configuration_targets_owner_private_identity_copies() {
+        let temporary = tempfile::tempdir().unwrap();
+        let instance = TorInstance::new(
+            TorPaths::new(
+                "/opt/torkitten/libexec/tor",
+                temporary.path().join("state/tor"),
+                temporary.path().join("run/tor"),
+            )
+            .with_service_user("torkitten-tor"),
+        );
+        instance.prepare(&config()).unwrap();
+        let torrc = fs::read_to_string(instance.torrc_path()).unwrap();
+        assert!(!torrc.contains("User "));
+        assert!(
+            torrc.contains(
+                instance
+                    .published_onion_directory(&SiteId::new("alpha").unwrap())
+                    .to_str()
+                    .unwrap()
+            )
+        );
+        assert!(!torrc.contains("HiddenServiceDirGroupReadable"));
     }
 
     #[test]
@@ -1000,6 +1163,22 @@ mod tests {
             .unwrap(),
             identity.secret_key_file()
         );
+        let directory_mode = fs::metadata(instance.onion_directory(&site_id))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o7777;
+        let key_mode = fs::metadata(
+            instance
+                .onion_directory(&site_id)
+                .join("hs_ed25519_secret_key"),
+        )
+        .unwrap()
+        .permissions()
+        .mode()
+            & 0o7777;
+        assert_eq!(directory_mode, SHARED_DIRECTORY_MODE);
+        assert_eq!(key_mode, SHARED_FILE_MODE);
         assert!(matches!(
             instance.install_identity(&site_id, &OnionIdentity::generate().unwrap()),
             Err(TorError::IdentityAlreadyExists(id)) if id == site_id
@@ -1166,10 +1345,14 @@ mod tests {
         command.args(["--DisableNetwork", "1"]);
         let mut child = command.spawn().unwrap();
         thread::sleep(Duration::from_millis(500));
-        assert!(
-            child.try_wait().unwrap().is_none(),
-            "Tor rejected the installed selected identity"
-        );
+        if child.try_wait().unwrap().is_some() {
+            let output = child.wait_with_output().unwrap();
+            panic!(
+                "Tor rejected the installed selected identity:\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr),
+            );
+        }
         child.kill().unwrap();
         child.wait().unwrap();
         assert_eq!(

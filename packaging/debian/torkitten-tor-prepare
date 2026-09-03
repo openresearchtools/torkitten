@@ -1,0 +1,87 @@
+#!/bin/sh
+set -eu
+
+source_root=/var/lib/torkitten/tor/sites
+published_root=/var/lib/torkitten/tor/hidden-services
+umask 077
+
+install -d -m 0700 "$published_root"
+chmod 0700 "$published_root"
+
+for stale in "$published_root"/.sync-*; do
+    [ -e "$stale" ] || continue
+    rm -rf -- "$stale"
+done
+
+for source_site in "$source_root"/*; do
+    [ -d "$source_site/onion" ] || continue
+    if [ -L "$source_site" ] || [ -L "$source_site/onion" ]; then
+        echo "unsafe site identity directory" >&2
+        exit 1
+    fi
+    site_id=${source_site##*/}
+    case "$site_id" in
+        ''|*[!a-z0-9_-]*)
+            echo "unsafe site identity directory" >&2
+            exit 1
+            ;;
+    esac
+
+    source_onion=$source_site/onion
+    if [ ! -d "$source_onion/authorized_clients" ] \
+        || [ -L "$source_onion/authorized_clients" ]; then
+        echo "unsafe client authorization directory: $site_id" >&2
+        exit 1
+    fi
+    for required in hs_ed25519_secret_key hs_ed25519_public_key hostname; do
+        if [ ! -f "$source_onion/$required" ] || [ -L "$source_onion/$required" ]; then
+            echo "incomplete site identity: $site_id" >&2
+            exit 1
+        fi
+    done
+
+    staged=$published_root/.sync-$site_id-$$
+    if [ -e "$staged" ]; then
+        echo "stale identity staging directory: $site_id" >&2
+        exit 1
+    fi
+    install -d -m 0700 "$staged"
+    chmod 0700 "$staged"
+    install -d -m 0700 "$staged/authorized_clients"
+    chmod 0700 "$staged/authorized_clients"
+    install -m 0600 "$source_onion/hs_ed25519_secret_key" \
+        "$staged/hs_ed25519_secret_key"
+    install -m 0600 "$source_onion/hs_ed25519_public_key" \
+        "$staged/hs_ed25519_public_key"
+    install -m 0600 "$source_onion/hostname" "$staged/hostname"
+
+    for authorization in "$source_onion/authorized_clients"/*.auth; do
+        [ -e "$authorization" ] || continue
+        if [ ! -f "$authorization" ] || [ -L "$authorization" ]; then
+            echo "unsafe client authorization: $site_id" >&2
+            exit 1
+        fi
+        install -m 0600 "$authorization" \
+            "$staged/authorized_clients/${authorization##*/}"
+    done
+
+    destination=$published_root/$site_id
+    if [ -e "$destination" ]; then
+        rm -rf -- "$destination"
+    fi
+    mv "$staged" "$destination"
+done
+
+for destination in "$published_root"/*; do
+    [ -e "$destination" ] || continue
+    site_id=${destination##*/}
+    case "$site_id" in
+        ''|*[!a-z0-9_-]*)
+            echo "unsafe published identity directory" >&2
+            exit 1
+            ;;
+    esac
+    if [ ! -d "$source_root/$site_id/onion" ]; then
+        rm -rf -- "$destination"
+    fi
+done

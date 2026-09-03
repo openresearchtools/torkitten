@@ -7,8 +7,9 @@ StartLimitBurst=5
 
 [Service]
 Type=exec
-User=torkitten
-Group=torkitten
+User=torkitten-caddy
+Group=torkitten-caddy
+SupplementaryGroups=torkitten-publish
 Environment=HOME=/var/lib/torkitten/caddy/home
 Environment=XDG_DATA_HOME=/var/lib/torkitten/caddy/data
 Environment=XDG_CONFIG_HOME=/var/lib/torkitten/caddy/config
@@ -16,7 +17,7 @@ ExecStart=/usr/lib/torkitten/caddy run --config /var/lib/torkitten/caddy/caddy.j
 ExecReload=/usr/lib/torkitten/caddy reload --config /var/lib/torkitten/caddy/caddy.json --address unix//run/torkitten/caddy/admin.sock
 Restart=on-failure
 RestartSec=5s
-UMask=0077
+UMask=0027
 NoNewPrivileges=yes
 CapabilityBoundingSet=
 AmbientCapabilities=
@@ -28,7 +29,8 @@ ProtectKernelLogs=yes
 ProtectKernelModules=yes
 ProtectKernelTunables=yes
 ProtectSystem=strict
-ReadWritePaths=/var/lib/torkitten/caddy /run/torkitten
+ReadWritePaths=/var/lib/torkitten/caddy /run/torkitten/caddy
+ReadOnlyPaths=/run/torkitten/web
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 IPAddressDeny=any
 IPAddressAllow=localhost

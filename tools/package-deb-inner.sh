@@ -22,6 +22,7 @@ install -d \
     "$package_root/etc/polkit-1/rules.d" \
     "$package_root/lib/systemd/system" \
     "$package_root/usr/bin" \
+    "$package_root/usr/lib/tmpfiles.d" \
     "$package_root/usr/lib/torkitten" \
     "$package_root/usr/share/applications" \
     "$package_root/usr/share/doc/torkitten/third-party/tor" \
@@ -36,6 +37,8 @@ install -m 0755 /work/target/release/torkittenctl "$package_root/usr/bin/torkitt
 install -m 0755 /work/target/release/torkitten-desktop "$package_root/usr/bin/torkitten-desktop"
 install -m 0755 /inputs/tor "$package_root/usr/lib/torkitten/tor"
 install -m 0755 /inputs/caddy "$package_root/usr/lib/torkitten/caddy"
+install -m 0755 packaging/debian/torkitten-tor-prepare \
+    "$package_root/usr/lib/torkitten/torkitten-tor-prepare"
 install -m 0644 LICENSE "$package_root/usr/share/doc/torkitten/copyright"
 install -m 0644 /inputs/tor-root/BUILD-METADATA \
     "$package_root/usr/share/doc/torkitten/third-party/tor/BUILD-METADATA"
@@ -60,6 +63,8 @@ install -m 0644 packaging/debian/60-torkitten.rules \
     "$package_root/etc/polkit-1/rules.d/60-torkitten.rules"
 install -m 0644 packaging/debian/torkitten.apparmor \
     "$package_root/etc/apparmor.d/torkitten"
+install -m 0644 packaging/debian/torkitten.tmpfiles \
+    "$package_root/usr/lib/tmpfiles.d/torkitten.conf"
 install -m 0755 packaging/debian/postinst "$package_root/DEBIAN/postinst"
 install -m 0755 packaging/debian/prerm "$package_root/DEBIAN/prerm"
 install -m 0755 packaging/debian/postrm "$package_root/DEBIAN/postrm"

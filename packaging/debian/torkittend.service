@@ -8,14 +8,12 @@ StartLimitBurst=5
 [Service]
 Type=exec
 User=torkitten
-Group=torkitten-admin
+Group=torkitten-tor
+SupplementaryGroups=torkitten-admin torkitten-caddy torkitten-publish
+Environment=TORKITTEN_TOR_SERVICE_USER=torkitten-tor
 ExecStart=/usr/bin/torkittend
 Restart=on-failure
 RestartSec=5s
-RuntimeDirectory=torkitten
-RuntimeDirectoryMode=0770
-StateDirectory=torkitten
-StateDirectoryMode=0700
 UMask=0077
 NoNewPrivileges=yes
 CapabilityBoundingSet=

@@ -1,20 +1,97 @@
 #!/bin/sh
 set -e
 
+if command -v systemctl >/dev/null 2>&1; then
+    systemctl stop torkitten-caddy.service torkitten-tor.service torkittend.service \
+        >/dev/null 2>&1 || true
+fi
+
 if ! getent group torkitten-admin >/dev/null; then
     addgroup --system torkitten-admin
 fi
 if ! getent group torkitten >/dev/null; then
     addgroup --system torkitten
 fi
+if ! getent group torkitten-tor >/dev/null; then
+    addgroup --system torkitten-tor
+fi
+if ! getent group torkitten-caddy >/dev/null; then
+    addgroup --system torkitten-caddy
+fi
+if ! getent group torkitten-publish >/dev/null; then
+    addgroup --system torkitten-publish
+fi
 if ! getent passwd torkitten >/dev/null; then
     adduser --system --ingroup torkitten --home /var/lib/torkitten \
         --no-create-home --disabled-login --disabled-password torkitten
 fi
+if ! getent passwd torkitten-tor >/dev/null; then
+    adduser --system --ingroup torkitten-tor --home /var/lib/torkitten/tor \
+        --no-create-home --disabled-login --disabled-password torkitten-tor
+fi
+if ! getent passwd torkitten-caddy >/dev/null; then
+    adduser --system --ingroup torkitten-caddy --home /var/lib/torkitten/caddy \
+        --no-create-home --disabled-login --disabled-password torkitten-caddy
+fi
 adduser torkitten torkitten-admin >/dev/null 2>&1 || true
+adduser torkitten torkitten-tor >/dev/null 2>&1 || true
+adduser torkitten torkitten-caddy >/dev/null 2>&1 || true
+adduser torkitten torkitten-publish >/dev/null 2>&1 || true
+adduser torkitten-tor torkitten-publish >/dev/null 2>&1 || true
+adduser torkitten-caddy torkitten-publish >/dev/null 2>&1 || true
 
-install -d -m 0700 -o torkitten -g torkitten /var/lib/torkitten
-install -d -m 0770 -o torkitten -g torkitten-admin /run/torkitten
+install -d -m 0711 -o torkitten -g torkitten /var/lib/torkitten
+install -d -m 0700 -o torkitten -g torkitten /var/lib/torkitten/database
+
+install -d -m 2750 -o torkitten -g torkitten-tor /var/lib/torkitten/tor
+if [ -d /var/lib/torkitten/tor ]; then
+    chown -R torkitten:torkitten-tor /var/lib/torkitten/tor
+    find /var/lib/torkitten/tor -type d -exec chmod 2750 {} +
+    find /var/lib/torkitten/tor -type f -exec chmod 0640 {} +
+fi
+install -d -m 0750 -o torkitten-tor -g torkitten-tor /var/lib/torkitten/tor/data
+chown -R torkitten-tor:torkitten-tor /var/lib/torkitten/tor/data
+find /var/lib/torkitten/tor/data -type d -exec chmod 0750 {} +
+find /var/lib/torkitten/tor/data -type f -exec chmod 0640 {} +
+install -d -m 0700 -o torkitten-tor -g torkitten-tor \
+    /var/lib/torkitten/tor/hidden-services
+chown -R torkitten-tor:torkitten-tor /var/lib/torkitten/tor/hidden-services
+find /var/lib/torkitten/tor/hidden-services -type d -exec chmod 0700 {} +
+find /var/lib/torkitten/tor/hidden-services -type f -exec chmod 0600 {} +
+
+install -d -m 2750 -o torkitten -g torkitten-caddy /var/lib/torkitten/caddy
+chown -R torkitten:torkitten-caddy /var/lib/torkitten/caddy
+find /var/lib/torkitten/caddy -type d -exec chmod 2770 {} +
+find /var/lib/torkitten/caddy -type f -exec chmod 0660 {} +
+chmod 2750 /var/lib/torkitten/caddy
+for directory in home data config; do
+    install -d -m 2770 -o torkitten -g torkitten-caddy \
+        "/var/lib/torkitten/caddy/$directory"
+done
+if [ -f /var/lib/torkitten/caddy/caddy.json ]; then
+    chown torkitten:torkitten-caddy /var/lib/torkitten/caddy/caddy.json
+    chmod 0640 /var/lib/torkitten/caddy/caddy.json
+fi
+if [ -d /var/lib/torkitten/caddy/tls ]; then
+    chown -R torkitten:torkitten-caddy /var/lib/torkitten/caddy/tls
+    find /var/lib/torkitten/caddy/tls -type d -exec chmod 2750 {} +
+    find /var/lib/torkitten/caddy/tls -type f -exec chmod 0640 {} +
+fi
+
+install -d -m 2711 -o torkitten -g torkitten-admin /run/torkitten
+install -d -m 0700 -o torkitten-tor -g torkitten-tor /run/torkitten/tor
+install -d -m 2770 -o torkitten -g torkitten-publish /run/torkitten/caddy
+install -d -m 2750 -o torkitten -g torkitten-caddy /run/torkitten/web
+chown -R torkitten-tor:torkitten-tor /run/torkitten/tor
+find /run/torkitten/tor -type d -exec chmod 0700 {} +
+chown -R torkitten:torkitten-publish /run/torkitten/caddy
+find /run/torkitten/caddy -type d -exec chmod 2770 {} +
+chown -R torkitten:torkitten-caddy /run/torkitten/web
+find /run/torkitten/web -type d -exec chmod 2750 {} +
+
+if command -v systemd-tmpfiles >/dev/null 2>&1; then
+    systemd-tmpfiles --create /usr/lib/tmpfiles.d/torkitten.conf || true
+fi
 
 if command -v apparmor_parser >/dev/null 2>&1; then
     apparmor_parser -r -T /etc/apparmor.d/torkitten || true

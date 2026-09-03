@@ -13,6 +13,10 @@ use torkitten_core::SiteId;
 
 use crate::{CaddyPaths, ProxyConfig};
 
+const SHARED_DIRECTORY_MODE: u32 = 0o2750;
+const SHARED_WRITABLE_DIRECTORY_MODE: u32 = 0o2770;
+const SHARED_FILE_MODE: u32 = 0o640;
+
 /// Owns the one application-controlled Caddy process and its atomically
 /// validated configuration.
 #[derive(Clone, Debug)]
@@ -85,7 +89,7 @@ impl CaddyInstance {
             Err(error) => CaddyError::Io(error),
         };
         let restoration = match previous {
-            Some(contents) => atomic_write(&active, &contents, 0o600),
+            Some(contents) => atomic_write(&active, &contents, SHARED_FILE_MODE),
             None => remove_file_and_sync(&active),
         };
         match restoration {
@@ -150,16 +154,31 @@ impl CaddyInstance {
         validate_absolute_path(&self.paths.binary)?;
         validate_absolute_path(&self.paths.state_directory)?;
         validate_absolute_path(&self.paths.runtime_directory)?;
-        ensure_directory(&self.paths.state_directory, 0o700)?;
-        ensure_directory(&self.paths.state_directory.join("home"), 0o700)?;
-        ensure_directory(&self.paths.state_directory.join("data"), 0o700)?;
-        ensure_directory(&self.paths.state_directory.join("config"), 0o700)?;
-        ensure_directory(&self.paths.runtime_directory, 0o750)?;
-        ensure_directory(&self.paths.runtime_directory.join("sites"), 0o750)?;
+        ensure_directory(&self.paths.state_directory, SHARED_DIRECTORY_MODE)?;
+        ensure_directory(
+            &self.paths.state_directory.join("home"),
+            SHARED_WRITABLE_DIRECTORY_MODE,
+        )?;
+        ensure_directory(
+            &self.paths.state_directory.join("data"),
+            SHARED_WRITABLE_DIRECTORY_MODE,
+        )?;
+        ensure_directory(
+            &self.paths.state_directory.join("config"),
+            SHARED_WRITABLE_DIRECTORY_MODE,
+        )?;
+        ensure_directory(
+            &self.paths.runtime_directory,
+            SHARED_WRITABLE_DIRECTORY_MODE,
+        )?;
+        ensure_directory(
+            &self.paths.runtime_directory.join("sites"),
+            SHARED_WRITABLE_DIRECTORY_MODE,
+        )?;
         for proxy_site in &config.sites {
             ensure_directory(
                 &self.paths.site_runtime_directory(&proxy_site.site.id),
-                0o750,
+                SHARED_WRITABLE_DIRECTORY_MODE,
             )?;
         }
         Ok(())
@@ -190,7 +209,7 @@ impl StagedConfig {
         if let Err(error) = file
             .write_all(contents)
             .and_then(|()| file.sync_all())
-            .and_then(|()| fs::set_permissions(&path, fs::Permissions::from_mode(0o600)))
+            .and_then(|()| fs::set_permissions(&path, fs::Permissions::from_mode(SHARED_FILE_MODE)))
         {
             let _ = fs::remove_file(&path);
             return Err(error.into());
@@ -237,7 +256,7 @@ fn atomic_write(path: &Path, contents: &[u8], mode: u32) -> Result<(), CaddyErro
     let parent = path
         .parent()
         .ok_or_else(|| CaddyError::InvalidPath(path.to_path_buf()))?;
-    ensure_directory(parent, 0o700)?;
+    ensure_directory(parent, SHARED_DIRECTORY_MODE)?;
     let (temporary_path, mut temporary) = create_temporary(parent, path.file_name())?;
     let result = temporary
         .write_all(contents)
@@ -418,6 +437,29 @@ mod tests {
             .unwrap_err();
         assert!(matches!(error, CaddyError::InvalidOnionHostname(_)));
         assert!(!temporary.path().join("state/caddy.json").exists());
+    }
+
+    #[test]
+    fn provisions_group_shared_state_and_listener_directories() {
+        let temporary = tempfile::tempdir().unwrap();
+        let config = proxy_config(&temporary);
+        let instance = instance(&temporary, "/missing/caddy");
+        instance.ensure_directories(&config).unwrap();
+
+        let mode = |path: &Path| fs::metadata(path).unwrap().permissions().mode() & 0o7777;
+        assert_eq!(mode(&instance.paths.state_directory), SHARED_DIRECTORY_MODE);
+        assert_eq!(
+            mode(&instance.paths.state_directory.join("data")),
+            SHARED_WRITABLE_DIRECTORY_MODE
+        );
+        assert_eq!(
+            mode(
+                &instance
+                    .paths
+                    .site_runtime_directory(&config.sites[0].site.id)
+            ),
+            SHARED_WRITABLE_DIRECTORY_MODE
+        );
     }
 
     #[test]
