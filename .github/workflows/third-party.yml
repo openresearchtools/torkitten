@@ -1,10 +1,6 @@
 name: Third-party binaries
 
 on:
-  push:
-    branches:
-      - main
-  pull_request:
   workflow_dispatch:
     inputs:
       rebuild_third_party:
