@@ -371,7 +371,10 @@ fn print_response(response: AdminResponse, json: bool) -> Result<(), String> {
             }
         }
         AdminResponse::Error { message, .. } => Err(message),
-        AdminResponse::SiteCandidate { .. } | AdminResponse::ClientEnrolled { .. } => {
+        AdminResponse::SiteCandidate { .. }
+        | AdminResponse::AdministratorAuthenticated { .. }
+        | AdminResponse::AdministratorAuthorized { .. }
+        | AdminResponse::ClientEnrolled { .. } => {
             Err("unexpected sensitive response for this command".to_owned())
         }
     }

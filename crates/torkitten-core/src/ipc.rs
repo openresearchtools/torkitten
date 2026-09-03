@@ -35,6 +35,20 @@ pub enum AdminCommand {
     Initialize {
         password: SensitiveString,
     },
+    AuthenticateAdministrator {
+        password: SensitiveString,
+    },
+    ValidateAdministratorSession {
+        session: SensitiveString,
+    },
+    AuthorizeAdministratorMutation {
+        session: SensitiveString,
+        csrf: SensitiveString,
+    },
+    LogoutAdministrator {
+        session: SensitiveString,
+        csrf: SensitiveString,
+    },
     CreateGeneratedSite {
         site: Site,
         candidate_id: SensitiveString,
@@ -162,6 +176,14 @@ pub enum AdminResponse {
         candidate_id: SensitiveString,
         onion_hostname: String,
         expires_unix: i64,
+    },
+    AdministratorAuthenticated {
+        session: SensitiveString,
+        csrf: SensitiveString,
+        expires_unix: i64,
+    },
+    AdministratorAuthorized {
+        fresh: bool,
     },
     Status {
         status: GatewayStatus,

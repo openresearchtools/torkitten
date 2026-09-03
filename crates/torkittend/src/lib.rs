@@ -22,7 +22,7 @@ use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     net::{UnixListener, UnixStream},
 };
-use torkitten_auth::hash_password;
+use torkitten_auth::{CsrfToken, SessionToken, hash_password, verify_password};
 use torkitten_core::{
     AccountOwner, AdminCommand, AdminResponse, ComponentAction, ComponentState, GatewayConfig,
     GatewayMode, GatewayStatus, ManagedComponent, Mapping, MappingTarget, Site, SiteId, SiteStatus,
@@ -37,6 +37,8 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 const MAXIMUM_IPC_REQUEST_BYTES: usize = 1024 * 1024;
 const IPC_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const CANDIDATE_LIFETIME_SECONDS: i64 = 300;
+const ADMIN_SESSION_SECONDS: i64 = 30 * 86_400;
+const FRESH_AUTHENTICATION_SECONDS: i64 = 600;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DaemonPaths {
@@ -365,6 +367,24 @@ impl<S: ServiceControl> Daemon<S> {
                 )?;
                 Ok(AdminResponse::Ok)
             }
+            AdminCommand::AuthenticateAdministrator { password } => {
+                self.authenticate_administrator(password.expose(), now_unix)
+            }
+            AdminCommand::ValidateAdministratorSession { session } => {
+                let fresh = self.authorize_administrator(session.expose(), None, now_unix)?;
+                Ok(AdminResponse::AdministratorAuthorized { fresh })
+            }
+            AdminCommand::AuthorizeAdministratorMutation { session, csrf } => {
+                let fresh =
+                    self.authorize_administrator(session.expose(), Some(csrf.expose()), now_unix)?;
+                Ok(AdminResponse::AdministratorAuthorized { fresh })
+            }
+            AdminCommand::LogoutAdministrator { session, csrf } => {
+                self.authorize_administrator(session.expose(), Some(csrf.expose()), now_unix)?;
+                let session = SessionToken::parse(session.expose().to_owned())?;
+                self.store.revoke_session(&session)?;
+                Ok(AdminResponse::Ok)
+            }
             AdminCommand::CreateSite { site } => {
                 if self.store.site(&site.id)?.is_some() {
                     return Err(DaemonError::SiteAlreadyExists(site.id));
@@ -619,6 +639,74 @@ impl<S: ServiceControl> Daemon<S> {
             caddy,
             resume_after_boot: settings.resume_after_boot,
         })
+    }
+
+    fn authenticate_administrator(
+        &self,
+        password: &str,
+        now_unix: i64,
+    ) -> Result<AdminResponse, DaemonError> {
+        let account = self
+            .store
+            .auth_account_for_owner(&AccountOwner::Administrator)?
+            .ok_or(DaemonError::InvalidCredentials)?;
+        let password_hash = account
+            .password_hash
+            .as_ref()
+            .ok_or(DaemonError::InvalidCredentials)?;
+        if !verify_password(password, password_hash)? {
+            return Err(DaemonError::InvalidCredentials);
+        }
+        let session = SessionToken::generate()?;
+        let csrf = CsrfToken::generate()?;
+        let expires_unix = now_unix
+            .checked_add(ADMIN_SESSION_SECONDS)
+            .ok_or(DaemonError::InvalidTimestamp(now_unix))?;
+        let fresh_until_unix = now_unix
+            .checked_add(FRESH_AUTHENTICATION_SECONDS)
+            .ok_or(DaemonError::InvalidTimestamp(now_unix))?;
+        self.store.put_session(
+            account.id,
+            &session,
+            &csrf,
+            now_unix,
+            expires_unix,
+            fresh_until_unix,
+        )?;
+        Ok(AdminResponse::AdministratorAuthenticated {
+            session: torkitten_core::SensitiveString::new(session.expose()),
+            csrf: torkitten_core::SensitiveString::new(csrf.expose()),
+            expires_unix,
+        })
+    }
+
+    fn authorize_administrator(
+        &self,
+        encoded_session: &str,
+        encoded_csrf: Option<&str>,
+        now_unix: i64,
+    ) -> Result<bool, DaemonError> {
+        let session = SessionToken::parse(encoded_session.to_owned())
+            .map_err(|_| DaemonError::InvalidCredentials)?;
+        let record = self
+            .store
+            .touch_session(&session, now_unix)?
+            .ok_or(DaemonError::InvalidCredentials)?;
+        let account = self
+            .store
+            .auth_account(record.account_id)?
+            .ok_or(DaemonError::InvalidCredentials)?;
+        if account.owner != AccountOwner::Administrator {
+            return Err(DaemonError::InvalidCredentials);
+        }
+        if let Some(encoded_csrf) = encoded_csrf {
+            let csrf =
+                CsrfToken::parse(encoded_csrf.to_owned()).map_err(|_| DaemonError::InvalidCsrf)?;
+            if !record.csrf_matches(&csrf) {
+                return Err(DaemonError::InvalidCsrf);
+            }
+        }
+        Ok(record.is_fresh(now_unix))
     }
 
     fn put_existing_site(
@@ -1139,6 +1227,10 @@ pub enum DaemonError {
     NotInitialized,
     #[error("Torkitten already has an administrator account")]
     AlreadyInitialized,
+    #[error("invalid administrator credentials or session")]
+    InvalidCredentials,
+    #[error("missing or invalid CSRF token")]
+    InvalidCsrf,
     #[error("site already exists: {0}")]
     SiteAlreadyExists(SiteId),
     #[error("site must be enabled before opening certificate bootstrap: {0}")]
@@ -1194,6 +1286,8 @@ pub enum DaemonError {
     #[error(transparent)]
     Password(#[from] torkitten_auth::PasswordError),
     #[error(transparent)]
+    Token(#[from] torkitten_auth::TokenError),
+    #[error(transparent)]
     Service(#[from] ServiceError),
 }
 
@@ -1202,6 +1296,8 @@ impl DaemonError {
         match self {
             Self::NotInitialized => "not_initialized",
             Self::AlreadyInitialized => "already_initialized",
+            Self::InvalidCredentials => "unauthorized",
+            Self::InvalidCsrf => "invalid_csrf",
             Self::SiteAlreadyExists(_) => "site_exists",
             Self::BootstrapSiteDisabled(_) | Self::InvalidBootstrapDuration(_) => {
                 "invalid_bootstrap"
@@ -1217,6 +1313,7 @@ impl DaemonError {
             Self::Caddy(_) => "caddy_failed",
             Self::Service(_) => "service_failed",
             Self::Password(_) => "password_failed",
+            Self::Token(_) => "token_failed",
             Self::InvalidTimestamp(_)
             | Self::AlreadyRunning(_)
             | Self::UnsafeSocket(_)
@@ -1354,6 +1451,69 @@ mod tests {
         assert!(matches!(
             response,
             AdminResponse::Error { code, .. } if code == "already_initialized"
+        ));
+    }
+
+    #[test]
+    fn administrator_sessions_are_hashed_csrf_bound_and_revocable() {
+        let (_temporary, mut daemon, _services) = daemon();
+        initialize(&mut daemon);
+        assert!(matches!(
+            daemon.handle(
+                AdminCommand::AuthenticateAdministrator {
+                    password: SensitiveString::new("wrong password value"),
+                },
+                NOW,
+            ),
+            AdminResponse::Error { code, .. } if code == "unauthorized"
+        ));
+        let AdminResponse::AdministratorAuthenticated { session, csrf, .. } = daemon.handle(
+            AdminCommand::AuthenticateAdministrator {
+                password: SensitiveString::new("correct horse battery staple"),
+            },
+            NOW,
+        ) else {
+            panic!("expected authenticated session");
+        };
+        let session_value = session.expose().to_owned();
+        let csrf_value = csrf.expose().to_owned();
+        assert!(matches!(
+            daemon.handle(
+                AdminCommand::ValidateAdministratorSession {
+                    session: SensitiveString::new(&session_value),
+                },
+                NOW + 1,
+            ),
+            AdminResponse::AdministratorAuthorized { fresh: true }
+        ));
+        assert!(matches!(
+            daemon.handle(
+                AdminCommand::AuthorizeAdministratorMutation {
+                    session: SensitiveString::new(&session_value),
+                    csrf: SensitiveString::new("invalid"),
+                },
+                NOW + 1,
+            ),
+            AdminResponse::Error { code, .. } if code == "invalid_csrf"
+        ));
+        assert!(matches!(
+            daemon.handle(
+                AdminCommand::LogoutAdministrator {
+                    session: SensitiveString::new(&session_value),
+                    csrf: SensitiveString::new(&csrf_value),
+                },
+                NOW + 1,
+            ),
+            AdminResponse::Ok
+        ));
+        assert!(matches!(
+            daemon.handle(
+                AdminCommand::ValidateAdministratorSession {
+                    session: SensitiveString::new(session_value),
+                },
+                NOW + 2,
+            ),
+            AdminResponse::Error { code, .. } if code == "unauthorized"
         ));
     }
 
