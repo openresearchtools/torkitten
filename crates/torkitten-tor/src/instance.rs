@@ -10,12 +10,14 @@ use std::{
 
 use getrandom::fill;
 use thiserror::Error;
-use torkitten_core::GatewayConfig;
+use torkitten_core::{GatewayConfig, SiteId};
 
 use crate::{
     ClientKeyPair, ClientName,
     client_auth::{ClientAuthError, validate_onion_hostname},
 };
+
+const LEGACY_SITE_ID: &str = "default";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TorPaths {
@@ -39,6 +41,8 @@ impl TorPaths {
     }
 }
 
+/// Owns the one application-controlled Tor process and every site's isolated
+/// hidden-service directory.
 #[derive(Clone, Debug)]
 pub struct TorInstance {
     paths: TorPaths,
@@ -61,8 +65,24 @@ impl TorInstance {
     }
 
     #[must_use]
-    pub fn onion_directory(&self) -> PathBuf {
-        self.paths.state_directory.join("onion")
+    pub fn site_state_directory(&self, site_id: &SiteId) -> PathBuf {
+        self.paths
+            .state_directory
+            .join("sites")
+            .join(site_id.as_str())
+    }
+
+    #[must_use]
+    pub fn onion_directory(&self, site_id: &SiteId) -> PathBuf {
+        self.site_state_directory(site_id).join("onion")
+    }
+
+    #[must_use]
+    pub fn site_runtime_directory(&self, site_id: &SiteId) -> PathBuf {
+        self.paths
+            .runtime_directory
+            .join("sites")
+            .join(site_id.as_str())
     }
 
     #[must_use]
@@ -71,35 +91,46 @@ impl TorInstance {
     }
 
     #[must_use]
-    pub fn bootstrap_socket(&self) -> PathBuf {
-        self.paths.runtime_directory.join("bootstrap.sock")
+    pub fn bootstrap_socket(&self, site_id: &SiteId) -> PathBuf {
+        self.site_runtime_directory(site_id).join("bootstrap.sock")
     }
 
     #[must_use]
-    pub fn caddy_socket(&self, virtual_port: u16) -> PathBuf {
-        self.paths
-            .runtime_directory
+    pub fn caddy_socket(&self, site_id: &SiteId, virtual_port: u16) -> PathBuf {
+        self.site_runtime_directory(site_id)
             .join(format!("caddy-{virtual_port}.sock"))
     }
 
-    /// Creates private instance directories and atomically writes a complete
-    /// configuration for this dedicated Tor process.
+    /// Creates private per-site directories and atomically writes the complete
+    /// configuration for the one Torkitten Tor process.
+    ///
+    /// Disabled sites retain their identity directories but are omitted from
+    /// the active Tor configuration. Disabled mappings are omitted without
+    /// affecting their site or siblings.
     ///
     /// # Errors
     ///
-    /// Returns an error for invalid routes, non-UTF-8 or newline-containing
-    /// paths, randomness failures, or filesystem failures.
+    /// Returns an error for invalid configuration, unsafe paths, an ambiguous
+    /// legacy identity, randomness failure, or filesystem failure.
     pub fn prepare(&self, config: &GatewayConfig) -> Result<(), TorError> {
         config.validate()?;
         ensure_private_directory(&self.paths.state_directory)?;
         ensure_private_directory(&self.paths.runtime_directory)?;
-        ensure_private_directory(&self.onion_directory())?;
-        ensure_private_directory(&self.onion_directory().join("authorized_clients"))?;
+        ensure_private_directory(&self.paths.state_directory.join("data"))?;
+        self.migrate_legacy_identity(config)?;
+
+        for site in &config.sites {
+            ensure_private_directory(&self.site_state_directory(&site.id))?;
+            ensure_private_directory(&self.site_runtime_directory(&site.id))?;
+            ensure_private_directory(&self.onion_directory(&site.id))?;
+            ensure_private_directory(&self.onion_directory(&site.id).join("authorized_clients"))?;
+        }
+
         let rendered = self.render_torrc(config)?;
         atomic_write(&self.torrc_path(), rendered.as_bytes(), 0o600)
     }
 
-    /// Installs one authorized client's public X25519 key.
+    /// Installs one authorized client's public X25519 key for exactly one site.
     ///
     /// # Errors
     ///
@@ -107,10 +138,11 @@ impl TorInstance {
     /// authorization file cannot be atomically written.
     pub fn authorize_client(
         &self,
+        site_id: &SiteId,
         name: &ClientName,
         keys: &ClientKeyPair,
     ) -> Result<(), TorError> {
-        let directory = self.onion_directory().join("authorized_clients");
+        let directory = self.onion_directory(site_id).join("authorized_clients");
         ensure_private_directory(&directory)?;
         atomic_write(
             &directory.join(format!("{}.auth", name.as_str())),
@@ -119,15 +151,15 @@ impl TorInstance {
         )
     }
 
-    /// Removes an authorized client, returning whether its file existed.
+    /// Removes one site's authorized client, returning whether its file existed.
     ///
     /// # Errors
     ///
     /// Returns an error when the authorization file cannot be inspected or
     /// removed.
-    pub fn revoke_client(&self, name: &ClientName) -> Result<bool, TorError> {
+    pub fn revoke_client(&self, site_id: &SiteId, name: &ClientName) -> Result<bool, TorError> {
         let path = self
-            .onion_directory()
+            .onion_directory(site_id)
             .join("authorized_clients")
             .join(format!("{}.auth", name.as_str()));
         match fs::remove_file(path) {
@@ -137,13 +169,13 @@ impl TorInstance {
         }
     }
 
-    /// Reads and validates the persistent v3 onion hostname created by Tor.
+    /// Reads and validates one site's persistent v3 onion hostname.
     ///
     /// # Errors
     ///
     /// Returns an error when the hostname file is unavailable or malformed.
-    pub fn onion_hostname(&self) -> Result<String, TorError> {
-        let hostname = fs::read_to_string(self.onion_directory().join("hostname"))?;
+    pub fn onion_hostname(&self, site_id: &SiteId) -> Result<String, TorError> {
+        let hostname = fs::read_to_string(self.onion_directory(site_id).join("hostname"))?;
         let hostname = hostname.trim();
         validate_onion_hostname(hostname)?;
         Ok(format!("{}.onion", hostname.trim_end_matches(".onion")))
@@ -166,7 +198,7 @@ impl TorInstance {
     }
 
     /// Returns a command that asks the bundled Tor binary to validate the
-    /// dedicated configuration without joining the Tor network.
+    /// complete configuration without joining the Tor network.
     #[must_use]
     pub fn verify_command(&self) -> Command {
         let mut command = self.command();
@@ -175,10 +207,12 @@ impl TorInstance {
     }
 
     fn render_torrc(&self, config: &GatewayConfig) -> Result<String, TorError> {
-        let data_directory = self.paths.state_directory.join("data");
-        ensure_private_directory(&data_directory)?;
         let mut output = String::new();
-        setting(&mut output, "DataDirectory", &data_directory)?;
+        setting(
+            &mut output,
+            "DataDirectory",
+            &self.paths.state_directory.join("data"),
+        )?;
         setting(
             &mut output,
             "CookieAuthFile",
@@ -211,22 +245,74 @@ impl TorInstance {
              Sandbox 1\n\
              Log notice stdout\n",
         );
-        setting(&mut output, "HiddenServiceDir", &self.onion_directory())?;
-        output.push_str(
-            "HiddenServiceVersion 3\n\
-             HiddenServiceAllowUnknownPorts 0\n\
-             HiddenServiceNumIntroductionPoints 3\n",
-        );
-        hidden_service_port(&mut output, 80, &self.bootstrap_socket())?;
-        hidden_service_port(&mut output, 443, &self.caddy_socket(443))?;
-        for route in &config.routes {
-            hidden_service_port(
+
+        let mut sites = config
+            .sites
+            .iter()
+            .filter(|site| site.enabled)
+            .collect::<Vec<_>>();
+        sites.sort_by(|left, right| left.id.cmp(&right.id));
+        for site in sites {
+            setting(
                 &mut output,
-                route.virtual_port,
-                &self.caddy_socket(route.virtual_port),
+                "HiddenServiceDir",
+                &self.onion_directory(&site.id),
             )?;
+            output.push_str(
+                "HiddenServiceVersion 3\n\
+                 HiddenServiceAllowUnknownPorts 0\n\
+                 HiddenServiceNumIntroductionPoints 3\n",
+            );
+            hidden_service_port(&mut output, 80, &self.bootstrap_socket(&site.id))?;
+            hidden_service_port(&mut output, 443, &self.caddy_socket(&site.id, 443))?;
+
+            let mut mappings = site
+                .mappings
+                .iter()
+                .filter(|mapping| mapping.enabled)
+                .collect::<Vec<_>>();
+            mappings.sort_by(|left, right| {
+                left.virtual_port
+                    .cmp(&right.virtual_port)
+                    .then_with(|| left.id.cmp(&right.id))
+            });
+            for mapping in mappings {
+                hidden_service_port(
+                    &mut output,
+                    mapping.virtual_port,
+                    &self.caddy_socket(&site.id, mapping.virtual_port),
+                )?;
+            }
         }
         Ok(output)
+    }
+
+    fn migrate_legacy_identity(&self, config: &GatewayConfig) -> Result<(), TorError> {
+        let legacy = self.paths.state_directory.join("onion");
+        let metadata = match fs::symlink_metadata(&legacy) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error.into()),
+        };
+        if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
+            return Err(TorError::UnsafeDirectory(legacy));
+        }
+
+        let site = config
+            .sites
+            .iter()
+            .find(|site| site.id.as_str() == LEGACY_SITE_ID)
+            .ok_or(TorError::LegacyIdentityUnassigned)?;
+        let parent = self.site_state_directory(&site.id);
+        ensure_private_directory(&parent)?;
+        let destination = self.onion_directory(&site.id);
+        if destination.exists() {
+            return Err(TorError::LegacyIdentityConflict(destination));
+        }
+        fs::rename(&legacy, &destination)?;
+        File::open(&parent)?.sync_all()?;
+        File::open(&self.paths.state_directory)?.sync_all()?;
+        Ok(())
     }
 }
 
@@ -324,6 +410,10 @@ pub enum TorError {
     UnsafeDirectory(PathBuf),
     #[error("unsafe Tor configuration value")]
     UnsafeConfigValue(String),
+    #[error("legacy onion identity has no matching default site")]
+    LegacyIdentityUnassigned,
+    #[error("legacy and multi-site onion identities both exist at {path}", path = .0.display())]
+    LegacyIdentityConflict(PathBuf),
     #[error("could not allocate a temporary filename")]
     TemporaryNameExhausted,
     #[error("operating-system randomness failed: {0}")]
@@ -340,7 +430,7 @@ pub enum TorError {
 mod tests {
     use std::net::{IpAddr, Ipv4Addr};
 
-    use torkitten_core::{Route, RouteId, RouteTarget, Transport};
+    use torkitten_core::{Mapping, MappingId, MappingTarget, Site, Transport};
 
     use super::*;
 
@@ -352,24 +442,46 @@ mod tests {
         ))
     }
 
+    fn mapping(id: &str, virtual_port: u16, enabled: bool) -> Mapping {
+        Mapping {
+            id: MappingId::new(id).unwrap(),
+            display_name: "Example".to_owned(),
+            virtual_port,
+            target: MappingTarget::Tcp {
+                address: IpAddr::V4(Ipv4Addr::LOCALHOST),
+                port: 3000,
+                transport: Transport::Http,
+            },
+            enabled,
+        }
+    }
+
+    fn site(id: &str, enabled: bool, mappings: Vec<Mapping>) -> Site {
+        Site {
+            id: SiteId::new(id).unwrap(),
+            display_name: format!("Site {id}"),
+            enabled,
+            mappings,
+        }
+    }
+
     fn config() -> GatewayConfig {
         GatewayConfig {
-            routes: vec![Route {
-                id: RouteId::new("example").unwrap(),
-                display_name: "Example".to_owned(),
-                virtual_port: 8443,
-                target: RouteTarget::Tcp {
-                    address: IpAddr::V4(Ipv4Addr::LOCALHOST),
-                    port: 3000,
-                    transport: Transport::Http,
-                },
-            }],
+            sites: vec![
+                site(
+                    "alpha",
+                    true,
+                    vec![mapping("example", 8443, true), mapping("off", 8444, false)],
+                ),
+                site("beta", true, vec![mapping("example", 8443, true)]),
+                site("disabled", false, vec![mapping("example", 8443, true)]),
+            ],
             ..GatewayConfig::default()
         }
     }
 
     #[test]
-    fn dedicated_configuration_disables_client_and_relay_listeners() {
+    fn one_process_configuration_isolates_enabled_sites_and_ports() {
         let temporary = tempfile::tempdir().unwrap();
         let instance = instance(&temporary);
         instance.prepare(&config()).unwrap();
@@ -387,37 +499,115 @@ mod tests {
             assert!(torrc.contains(disabled), "missing {disabled}");
         }
         assert!(torrc.contains("ClientOnly 1"));
-        assert!(torrc.contains("HiddenServicePort 80"));
-        assert!(torrc.contains("HiddenServicePort 443"));
-        assert!(torrc.contains("HiddenServicePort 8443"));
+        assert_eq!(torrc.matches("HiddenServiceDir ").count(), 2);
+        assert_eq!(torrc.matches("HiddenServicePort 80 ").count(), 2);
+        assert_eq!(torrc.matches("HiddenServicePort 443 ").count(), 2);
+        assert_eq!(torrc.matches("HiddenServicePort 8443 ").count(), 2);
+        assert!(!torrc.contains("HiddenServicePort 8444 "));
+        assert!(
+            torrc.contains(
+                instance
+                    .onion_directory(&SiteId::new("alpha").unwrap())
+                    .to_str()
+                    .unwrap()
+            )
+        );
+        assert!(
+            torrc.contains(
+                instance
+                    .onion_directory(&SiteId::new("beta").unwrap())
+                    .to_str()
+                    .unwrap()
+            )
+        );
+        assert!(
+            !torrc.contains(
+                instance
+                    .onion_directory(&SiteId::new("disabled").unwrap())
+                    .to_str()
+                    .unwrap()
+            )
+        );
         assert!(!torrc.contains("0.0.0.0"));
+        assert!(
+            instance
+                .onion_directory(&SiteId::new("disabled").unwrap())
+                .is_dir()
+        );
     }
 
     #[test]
-    fn installs_and_revokes_client_public_key() {
+    fn installs_and_revokes_client_keys_per_site() {
         let temporary = tempfile::tempdir().unwrap();
         let instance = instance(&temporary);
+        let alpha = SiteId::new("alpha").unwrap();
+        let beta = SiteId::new("beta").unwrap();
         let name = ClientName::new("phone").unwrap();
         let keys = ClientKeyPair::generate().unwrap();
-        instance.authorize_client(&name, &keys).unwrap();
-        let path = instance
-            .onion_directory()
+        instance.authorize_client(&alpha, &name, &keys).unwrap();
+        let alpha_path = instance
+            .onion_directory(&alpha)
+            .join("authorized_clients/phone.auth");
+        let beta_path = instance
+            .onion_directory(&beta)
             .join("authorized_clients/phone.auth");
         assert_eq!(
-            fs::read_to_string(&path).unwrap(),
+            fs::read_to_string(&alpha_path).unwrap(),
             keys.server_authorization()
         );
+        assert!(!beta_path.exists());
+        assert!(instance.revoke_client(&alpha, &name).unwrap());
+        assert!(!instance.revoke_client(&alpha, &name).unwrap());
+    }
+
+    #[test]
+    fn migrates_the_single_site_identity_without_changing_it() {
+        let temporary = tempfile::tempdir().unwrap();
+        let instance = instance(&temporary);
+        let legacy = instance.paths.state_directory.join("onion");
+        fs::create_dir_all(legacy.join("authorized_clients")).unwrap();
+        fs::write(legacy.join("hs_ed25519_secret_key"), b"identity bytes").unwrap();
+        let config = GatewayConfig {
+            sites: vec![site(LEGACY_SITE_ID, true, Vec::new())],
+            ..GatewayConfig::default()
+        };
+
+        instance.prepare(&config).unwrap();
+        assert!(!legacy.exists());
         assert_eq!(
-            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
-            0o600
+            fs::read(
+                instance
+                    .onion_directory(&SiteId::new(LEGACY_SITE_ID).unwrap())
+                    .join("hs_ed25519_secret_key")
+            )
+            .unwrap(),
+            b"identity bytes"
         );
-        assert!(instance.revoke_client(&name).unwrap());
-        assert!(!instance.revoke_client(&name).unwrap());
+    }
+
+    #[test]
+    fn torrc_rendering_is_deterministic() {
+        let temporary = tempfile::tempdir().unwrap();
+        let instance = TorInstance::new(TorPaths::new(
+            "/opt/torkitten/libexec/tor",
+            temporary.path().join("state"),
+            temporary.path().join("run"),
+        ));
+        let mut reversed = config();
+        reversed.sites.reverse();
+        for site in &mut reversed.sites {
+            site.mappings.reverse();
+        }
+        instance.prepare(&config()).unwrap();
+        let first = fs::read_to_string(instance.torrc_path()).unwrap();
+        instance.prepare(&reversed).unwrap();
+        let second = fs::read_to_string(instance.torrc_path()).unwrap();
+        assert_eq!(first, second);
     }
 
     #[test]
     #[ignore = "requires the bundled Tor binary and its Ubuntu 24.04 runtime libraries"]
-    fn bundled_tor_accepts_generated_configuration() {
+    fn bundled_tor_accepts_generated_multi_site_configuration() {
         let binary = std::env::var_os("TORKITTEN_TOR_BINARY")
             .expect("TORKITTEN_TOR_BINARY must identify the bundled Tor binary");
         let temporary = tempfile::tempdir().unwrap();
