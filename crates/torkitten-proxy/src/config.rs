@@ -225,6 +225,7 @@ fn bootstrap_server(
             },
         ],
         "errors": generic_errors(),
+        "automatic_https": { "disable": true },
         "protocols": ["h1"],
     }))
 }
@@ -495,6 +496,10 @@ mod tests {
         let document: Value = serde_json::from_slice(&config.render(&paths()).unwrap()).unwrap();
         let servers = document["apps"]["http"]["servers"].as_object().unwrap();
         assert!(servers.contains_key("site-alpha-port-80"));
+        assert_eq!(
+            servers["site-alpha-port-80"]["automatic_https"]["disable"],
+            true
+        );
         assert!(servers.contains_key("site-alpha-port-443"));
         assert!(servers.contains_key("site-alpha-port-8443"));
         assert!(!servers.contains_key("site-alpha-port-8444"));
