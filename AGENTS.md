@@ -114,10 +114,12 @@ service. It is the only place users manage Torkitten mappings, identity,
 publication, onboarding, and API credentials. Authelia's own administration
 concepts are not exposed as product objects.
 
-The same single owner account and second factors are used for local
-administration and onion access, with separate browser sessions because they are
-different origins. No guests, user groups, roles, or per-application grants are
-part of this product.
+First-run setup creates one owner in Authelia. That same username, password,
+and TOTP protect both the local administration panel and onion access. The two
+browser contexts have separate sessions only because `localhost` and `.onion`
+are different origins; they are not separate accounts or separately managed
+credentials. No guests, user groups, roles, or per-application grants are part
+of this product.
 
 Onboarding can be reopened for every new device. It provides the public onion
 address, a Tor client-authorization credential, the public CA certificate, and
