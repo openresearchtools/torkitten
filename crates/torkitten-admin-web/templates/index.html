@@ -263,37 +263,134 @@
     <div class="modal-content">
       <p class="eyebrow">Connect from another device</p>
       <h2>Device onboarding</h2>
+      <p class="muted">Follow these five steps on the device you are connecting. Every device receives its own revocable Tor key.</p>
       <div class="platform-tabs" role="tablist" aria-label="Device platform">
-        <button class="active" type="button" data-platform="ios">iOS</button><button type="button" data-platform="android">Android</button><button type="button" data-platform="linux">Linux</button><button type="button" data-platform="macos">macOS</button><button type="button" data-platform="windows">Windows</button>
+        <button id="platform-tab-ios" class="active" role="tab" aria-selected="true" aria-controls="platform-ios" type="button" data-platform="ios">iOS</button>
+        <button id="platform-tab-android" role="tab" aria-selected="false" aria-controls="platform-android" tabindex="-1" type="button" data-platform="android">Android</button>
+        <button id="platform-tab-linux" role="tab" aria-selected="false" aria-controls="platform-linux" tabindex="-1" type="button" data-platform="linux">Linux</button>
+        <button id="platform-tab-macos" role="tab" aria-selected="false" aria-controls="platform-macos" tabindex="-1" type="button" data-platform="macos">macOS</button>
+        <button id="platform-tab-windows" role="tab" aria-selected="false" aria-controls="platform-windows" tabindex="-1" type="button" data-platform="windows">Windows</button>
       </div>
-      <ol class="wizard-steps">
-        <li><span>1</span><div><strong>Install Tor access software</strong><p>Use Orbot on mobile or Tor Browser on desktop.</p></div></li>
-        <li><span>2</span><div><strong>Install this device’s Tor authorization</strong><p>A distinct revocable client key will be created for this device.</p></div></li>
-        <li><span>3</span><div><strong>Install Torkitten’s public certificate</strong><p>A temporary 15-minute certificate download will be opened.</p></div></li>
-        <li><span>4</span><div><strong>Enroll the guest login</strong><p>Create or select a guest, then enroll a passkey or password plus TOTP.</p></div></li>
-        <li><span>5</span><div><strong>Open the protected site</strong><p>Future visits use the permanent safe login portal.</p></div></li>
-      </ol>
-      <form id="device-form" class="stack">
-        <input name="site_id" type="hidden">
-        <div class="field-grid">
-          <label>Guest ID<input name="guest_id" list="existing-guests" pattern="[a-z0-9][a-z0-9-]{0,62}" required placeholder="family"></label>
-          <label>Guest name<input name="guest_name" maxlength="128" required placeholder="Family"></label>
+
+      <svg class="wizard-symbols" aria-hidden="true">
+        <symbol id="wizard-download" viewBox="0 0 120 80"><rect x="18" y="8" width="84" height="64" rx="9"/><path d="M60 20v29m-13-13 13 13 13-13M42 61h36"/></symbol>
+        <symbol id="wizard-settings" viewBox="0 0 120 80"><rect x="18" y="8" width="84" height="64" rx="9"/><circle cx="60" cy="40" r="12"/><path d="M60 19v8m0 26v8M39 40h8m26 0h8M45 25l6 6m18 18 6 6m0-30-6 6M51 49l-6 6"/></symbol>
+        <symbol id="wizard-trust" viewBox="0 0 120 80"><path d="M60 8 91 20v20c0 18-12 28-31 34-19-6-31-16-31-34V20Z"/><path d="m43 40 11 11 23-24"/></symbol>
+        <symbol id="wizard-key" viewBox="0 0 120 80"><circle cx="43" cy="40" r="18"/><path d="M60 40h39m-11 0v11m-13-11v8"/></symbol>
+        <symbol id="wizard-browser" viewBox="0 0 120 80"><rect x="10" y="9" width="100" height="62" rx="8"/><path d="M10 25h100M22 17h1m10 0h1m10 0h1M34 47h52"/></symbol>
+      </svg>
+
+      <section class="wizard-step" data-step="1">
+        <header><span>1</span><div><h3>Install Tor access software</h3><p>Use the official store on mobile or the official Tor Project download on desktop.</p></div></header>
+        <div id="platform-ios" class="platform-panel" role="tabpanel" aria-labelledby="platform-tab-ios" data-platform-panel="ios">
+          <div><h4>iOS · Orbot</h4><p>Install Orbot from the official App Store page, open it, and finish its first-run connection.</p><a class="button link-button" href="https://apps.apple.com/us/app/orbot/id1609461599" target="_blank" rel="noreferrer noopener">Open official App Store page</a></div>
+          <figure class="qr-card"><img alt="QR code for the official Orbot App Store page" data-static-qr="https://apps.apple.com/us/app/orbot/id1609461599"><figcaption>Scan with the iOS Camera app.</figcaption></figure>
         </div>
-        <datalist id="existing-guests"></datalist>
-        <div class="field-grid">
-          <label>Device ID<input name="device_id" pattern="[a-z0-9][a-z0-9-]{0,62}" required placeholder="phone"></label>
-          <label>Device name<input name="device_name" maxlength="128" required placeholder="Alice’s phone"></label>
+        <div id="platform-android" class="platform-panel" role="tabpanel" aria-labelledby="platform-tab-android" data-platform-panel="android" hidden>
+          <div><h4>Android · Orbot</h4><p>Install Orbot from its official Google Play listing, open it, and finish its first-run connection.</p><a class="button link-button" href="https://play.google.com/store/apps/details?id=org.torproject.android" target="_blank" rel="noreferrer noopener">Open official Google Play page</a></div>
+          <figure class="qr-card"><img alt="QR code for the official Orbot Google Play page" data-static-qr="https://play.google.com/store/apps/details?id=org.torproject.android"><figcaption>Scan with the Android camera.</figcaption></figure>
         </div>
-        <label>Tor client name<input name="client_name" pattern="[A-Za-z0-9+_-]{1,16}" maxlength="16" required placeholder="alice_phone"></label>
-        <fieldset class="grant-list"><legend>Allowed application mappings</legend><div id="device-mapping-grants"></div></fieldset>
-        <button class="button primary" type="submit">Create this device’s authorization</button>
-      </form>
-      <section id="device-result" class="credential-result" hidden>
-        <strong>Install this Tor client authorization</strong>
-        <p class="muted">This private credential is shown for the enrolled device. Do not share it with another device.</p>
-        <label>Onion address<div class="copy-field"><code id="device-onion"></code><button type="button" class="copy-button" data-copy-result="onion">Copy</button></div></label>
-        <label>Authorization credential<div class="copy-field"><code id="device-credential"></code><button type="button" class="copy-button" data-copy-result="credential">Copy</button></div></label>
-        <button class="button" type="button" data-action="wizard-bootstrap">Open 15-minute certificate download</button>
+        <div id="platform-linux" class="platform-panel desktop-platform" role="tabpanel" aria-labelledby="platform-tab-linux" data-platform-panel="linux" hidden>
+          <svg class="platform-icon" role="img" aria-label="Tor Browser window"><use href="#wizard-browser"></use></svg><div><h4>Linux · Tor Browser</h4><p>Download the Linux archive, verify its signature if possible, extract it, then open <code>start-tor-browser.desktop</code>.</p><a class="button link-button" href="https://www.torproject.org/download/" target="_blank" rel="noreferrer noopener">Open official Tor Browser downloads</a></div>
+        </div>
+        <div id="platform-macos" class="platform-panel desktop-platform" role="tabpanel" aria-labelledby="platform-tab-macos" data-platform-panel="macos" hidden>
+          <svg class="platform-icon" role="img" aria-label="Tor Browser window"><use href="#wizard-browser"></use></svg><div><h4>macOS · Tor Browser</h4><p>Download the macOS package from Tor Project, verify it if possible, then drag Tor Browser into Applications.</p><a class="button link-button" href="https://www.torproject.org/download/" target="_blank" rel="noreferrer noopener">Open official Tor Browser downloads</a></div>
+        </div>
+        <div id="platform-windows" class="platform-panel desktop-platform" role="tabpanel" aria-labelledby="platform-tab-windows" data-platform-panel="windows" hidden>
+          <svg class="platform-icon" role="img" aria-label="Tor Browser window"><use href="#wizard-browser"></use></svg><div><h4>Windows · Tor Browser</h4><p>Download the Windows installer from Tor Project, verify it if possible, then complete the installer.</p><a class="button link-button" href="https://www.torproject.org/download/" target="_blank" rel="noreferrer noopener">Open official Tor Browser downloads</a></div>
+        </div>
+      </section>
+
+      <section class="wizard-step" data-step="2">
+        <header><span>2</span><div><h3>Install this device’s Tor client authorization</h3><p>Create a distinct key for this device and choose exactly which applications its guest may use.</p></div></header>
+        <form id="device-form" class="stack">
+          <input name="site_id" type="hidden">
+          <div class="field-grid">
+            <label>Guest ID<input name="guest_id" list="existing-guests" pattern="[a-z0-9][a-z0-9-]{0,62}" required placeholder="family"></label>
+            <label>Guest name<input name="guest_name" maxlength="128" required placeholder="Family"></label>
+          </div>
+          <datalist id="existing-guests"></datalist>
+          <div class="field-grid">
+            <label>Device ID<input name="device_id" pattern="[a-z0-9][a-z0-9-]{0,62}" required placeholder="phone"></label>
+            <label>Device name<input name="device_name" maxlength="128" required placeholder="Alice’s phone"></label>
+          </div>
+          <label>Tor client name<input name="client_name" pattern="[A-Za-z0-9+_-]{1,16}" maxlength="16" required placeholder="alice_phone"></label>
+          <fieldset class="grant-list"><legend>Allowed application mappings</legend><div id="device-mapping-grants"></div></fieldset>
+          <button class="button primary" type="submit">Create this device’s authorization</button>
+        </form>
+        <div id="device-result" class="credential-result" hidden>
+          <strong>Authorization created for this device</strong>
+          <p class="muted">Do not reuse this private credential on another device. Revoking this device invalidates it.</p>
+          <div class="wizard-code-grid">
+            <div>
+              <label>Onion address<div class="copy-field"><code id="device-onion"></code><button type="button" class="copy-button" data-copy-target="device-onion">Copy</button></div></label>
+              <label>Orbot / <code>.auth_private</code> credential<div class="copy-field"><code id="device-credential"></code><button type="button" class="copy-button" data-copy-target="device-credential">Copy</button></div></label>
+              <label class="desktop-auth-field">Tor Browser private-key field<div class="copy-field"><code id="device-private-key"></code><button type="button" class="copy-button" data-copy-target="device-private-key">Copy</button></div></label>
+            </div>
+            <div class="qr-pair">
+              <figure class="qr-card"><img id="device-onion-qr" alt="QR code for this onion site"><figcaption>Onion site</figcaption></figure>
+              <figure class="qr-card"><img id="device-credential-qr" alt="QR code for this device's Tor authorization key"><figcaption>Device key</figcaption></figure>
+            </div>
+          </div>
+          <div data-platform-auth="ios"><p>In Orbot, open <strong>Onion Services → Client authorization</strong>, scan the site and key QR codes, then save this device entry.</p></div>
+          <div data-platform-auth="android" hidden><p>In Orbot, open <strong>Onion Services → Client authorization</strong>, scan the site and key QR codes, then save this device entry.</p></div>
+          <div data-platform-auth="linux" hidden><p>Open the onion address in Tor Browser. At the “Onionsite Requires Authentication” screen, choose to provide a key and paste the <strong>Tor Browser private-key field</strong> shown above.</p></div>
+          <div data-platform-auth="macos" hidden><p>Open the onion address in Tor Browser. At the “Onionsite Requires Authentication” screen, choose to provide a key and paste the <strong>Tor Browser private-key field</strong> shown above.</p></div>
+          <div data-platform-auth="windows" hidden><p>Open the onion address in Tor Browser. At the “Onionsite Requires Authentication” screen, choose to provide a key and paste the <strong>Tor Browser private-key field</strong> shown above.</p></div>
+        </div>
+      </section>
+
+      <section class="wizard-step" data-step="3" data-enrollment-only hidden>
+        <header><span>3</span><div><h3>Install Torkitten’s public certificate</h3><p>Open the temporary, client-key-protected port-80 download for 15 minutes.</p></div></header>
+        <div class="bootstrap-controls">
+          <button class="button primary" type="button" data-action="wizard-bootstrap-open">Open 15-minute download</button>
+          <button class="button" type="button" data-action="wizard-bootstrap-extend" hidden>Extend 15 minutes</button>
+          <button class="button danger" type="button" data-action="wizard-bootstrap-close" hidden>Close early</button>
+          <output id="bootstrap-countdown" class="countdown" aria-live="polite">Not open</output>
+        </div>
+        <div id="bootstrap-result" hidden>
+          <div class="wizard-code-grid">
+            <div><label>Certificate download URL<div class="copy-field"><a id="bootstrap-link" target="_blank" rel="noreferrer noopener"><code id="bootstrap-url"></code></a><button type="button" class="copy-button" data-copy-target="bootstrap-url">Copy</button></div></label></div>
+            <figure class="qr-card"><img id="bootstrap-qr" alt="QR code for the temporary certificate download"><figcaption>Temporary certificate download</figcaption></figure>
+          </div>
+          <div class="certificate-guides">
+            <div data-platform-cert="ios">
+              <div class="instruction-gallery"><article><svg role="img" aria-label="Download the profile"><use href="#wizard-download"></use></svg><p>1. Open the QR URL in Safari and download <strong>Torkitten Root Profile</strong>.</p></article><article><svg role="img" aria-label="Open Profile Downloaded in Settings"><use href="#wizard-settings"></use></svg><p>2. Open <strong>Settings → Profile Downloaded</strong>, tap Install, and confirm.</p></article><article><svg role="img" aria-label="Enable full trust"><use href="#wizard-trust"></use></svg><p>3. Open <strong>Settings → General → About → Certificate Trust Settings</strong> and enable full trust for Torkitten.</p></article></div>
+            </div>
+            <div data-platform-cert="android" hidden>
+              <div class="instruction-gallery"><article><svg role="img" aria-label="Download the public certificate"><use href="#wizard-download"></use></svg><p>1. Open the QR URL and download <strong>root-ca.pem</strong>.</p></article><article><svg role="img" aria-label="Open certificate installation settings"><use href="#wizard-settings"></use></svg><p>2. Open <strong>Settings → Security → Encryption &amp; credentials → Install a certificate → CA certificate</strong>.</p></article><article><svg role="img" aria-label="Select and trust the certificate"><use href="#wizard-trust"></use></svg><p>3. Select the downloaded file, name it Torkitten, and confirm the system warning.</p></article></div>
+            </div>
+            <div data-platform-cert="linux" hidden>
+              <div class="instruction-gallery"><article><svg role="img" aria-label="Download the public certificate"><use href="#wizard-download"></use></svg><p>1. Open the temporary URL in Tor Browser and download <strong>root-ca.pem</strong>.</p></article><article><svg role="img" aria-label="Open Tor Browser certificate settings"><use href="#wizard-settings"></use></svg><p>2. In Tor Browser open <strong>Settings → Privacy &amp; Security → Certificates → View Certificates</strong>.</p></article><article><svg role="img" aria-label="Import and trust the certificate"><use href="#wizard-trust"></use></svg><p>3. Under Authorities choose Import, select <strong>root-ca.pem</strong>, and trust it to identify websites.</p></article></div>
+            </div>
+            <div data-platform-cert="macos" hidden>
+              <div class="instruction-gallery"><article><svg role="img" aria-label="Download the public certificate"><use href="#wizard-download"></use></svg><p>1. Open the temporary URL in Tor Browser and download <strong>root-ca.pem</strong>.</p></article><article><svg role="img" aria-label="Open Tor Browser certificate settings"><use href="#wizard-settings"></use></svg><p>2. In Tor Browser open <strong>Settings → Privacy &amp; Security → Certificates → View Certificates</strong>.</p></article><article><svg role="img" aria-label="Import and trust the certificate"><use href="#wizard-trust"></use></svg><p>3. Under Authorities choose Import, select <strong>root-ca.pem</strong>, and trust it to identify websites.</p></article></div>
+            </div>
+            <div data-platform-cert="windows" hidden>
+              <div class="instruction-gallery"><article><svg role="img" aria-label="Download the public certificate"><use href="#wizard-download"></use></svg><p>1. Open the temporary URL in Tor Browser and download <strong>root-ca.pem</strong>.</p></article><article><svg role="img" aria-label="Open Tor Browser certificate settings"><use href="#wizard-settings"></use></svg><p>2. In Tor Browser open <strong>Settings → Privacy &amp; Security → Certificates → View Certificates</strong>.</p></article><article><svg role="img" aria-label="Import and trust the certificate"><use href="#wizard-trust"></use></svg><p>3. Under Authorities choose Import, select <strong>root-ca.pem</strong>, and trust it to identify websites.</p></article></div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="wizard-step" data-step="4" data-enrollment-only hidden>
+        <header><span>4</span><div><h3>Enroll the guest login</h3><p>This short-lived link belongs only to the selected guest and device.</p></div></header>
+        <div class="wizard-code-grid">
+          <div><label>Enrollment link<div class="copy-field"><a id="device-enrollment-link" target="_blank" rel="noreferrer noopener"><code id="device-enrollment-url"></code></a><button type="button" class="copy-button" data-copy-target="device-enrollment-url">Copy</button></div></label><p>Open it on the new device. Create a passkey when supported, or use password plus TOTP in Tor Browser.</p></div>
+          <figure class="qr-card"><img id="device-enrollment-qr" alt="QR code for this device's short-lived guest enrollment"><figcaption>Short-lived enrollment</figcaption></figure>
+        </div>
+      </section>
+
+      <section class="wizard-step" data-step="5" data-enrollment-only hidden>
+        <header><span>5</span><div><h3>Open the protected site</h3><p>Use this permanent safe login portal after enrollment. Existing guests sign in normally.</p></div></header>
+        <div class="wizard-code-grid">
+          <div><label>Protected site<div class="copy-field"><a id="device-main-link" target="_blank" rel="noreferrer noopener"><code id="device-main-url"></code></a><button type="button" class="copy-button" data-copy-target="device-main-url">Copy</button></div></label></div>
+          <figure class="qr-card"><img id="device-main-qr" alt="QR code for the protected site"><figcaption>Permanent site address</figcaption></figure>
+        </div>
+        <div class="modal-actions wizard-final-actions">
+          <button class="button danger" type="button" data-action="wizard-revoke-device">Revoke this device</button>
+          <button class="button primary" type="button" data-action="wizard-another-device">Create another device</button>
+        </div>
       </section>
     </div>
   </dialog>

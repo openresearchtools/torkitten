@@ -138,6 +138,13 @@ pub trait ServiceControl {
         component: ManagedComponent,
         action: ComponentAction,
     ) -> Result<(), ServiceError>;
+
+    /// Reloads validated configuration without interrupting a running component.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the service manager rejects the reload.
+    fn reload(&mut self, component: ManagedComponent) -> Result<(), ServiceError>;
 }
 
 #[derive(Clone, Debug)]
@@ -215,6 +222,18 @@ impl ServiceControl for SystemdServiceControl {
             Ok(())
         } else {
             Err(service_command_error(verb, component, &output))
+        }
+    }
+
+    fn reload(&mut self, component: ManagedComponent) -> Result<(), ServiceError> {
+        let output = Command::new(&self.systemctl)
+            .arg("reload")
+            .arg(self.unit(component))
+            .output()?;
+        if output.status.success() {
+            Ok(())
+        } else {
+            Err(service_command_error("reload", component, &output))
         }
     }
 }
@@ -1407,7 +1426,7 @@ impl<S: ServiceControl> Daemon<S> {
                 }
                 let config = self.store.gateway_config()?;
                 self.validate_runtime(&config, now_unix)?;
-                self.install_runtime(&config, now_unix)?;
+                self.restart_runtime(&config, now_unix)?;
                 self.maintenance_enabled = true;
                 Ok(AdminResponse::Ok)
             }
@@ -1715,7 +1734,7 @@ impl<S: ServiceControl> Daemon<S> {
             self.tor
                 .authorize_client(&device.site_id, &client_name, &keys)?;
             authorized = true;
-            restart_or_start(&mut self.services, ManagedComponent::Tor)?;
+            reload_or_start(&mut self.services, ManagedComponent::Tor)?;
             self.store
                 .put_device(&device, credential.expose().as_bytes())?;
             persisted_device = true;
@@ -1746,7 +1765,7 @@ impl<S: ServiceControl> Daemon<S> {
                     }
                     if authorized {
                         self.tor.revoke_client(&device.site_id, &client_name)?;
-                        restart_or_start(&mut self.services, ManagedComponent::Tor)?;
+                        reload_or_start(&mut self.services, ManagedComponent::Tor)?;
                     }
                     self.restore_guest_access(
                         &guest.site_id,
@@ -1781,16 +1800,16 @@ impl<S: ServiceControl> Daemon<S> {
         let keys = ClientKeyPair::from_client_credential(credential)?;
         let client_name = ClientName::new(&record.device.tor_client_name)?;
         let removed = self.tor.revoke_client(site_id, &client_name)?;
-        if let Err(error) = restart_or_start(&mut self.services, ManagedComponent::Tor) {
+        if let Err(error) = reload_or_start(&mut self.services, ManagedComponent::Tor) {
             let operation = error.to_string();
             if removed {
                 self.tor.authorize_client(site_id, &client_name, &keys)?;
-                restart_or_start(&mut self.services, ManagedComponent::Tor).map_err(
-                    |rollback| DaemonError::Rollback {
+                reload_or_start(&mut self.services, ManagedComponent::Tor).map_err(|rollback| {
+                    DaemonError::Rollback {
                         operation,
                         rollback: rollback.to_string(),
-                    },
-                )?;
+                    }
+                })?;
             }
             return Err(error.into());
         }
@@ -1803,7 +1822,7 @@ impl<S: ServiceControl> Daemon<S> {
                 );
                 if removed {
                     self.tor.authorize_client(site_id, &client_name, &keys)?;
-                    restart_or_start(&mut self.services, ManagedComponent::Tor).map_err(
+                    reload_or_start(&mut self.services, ManagedComponent::Tor).map_err(
                         |rollback| DaemonError::Rollback {
                             operation: operation.to_string(),
                             rollback: rollback.to_string(),
@@ -2073,15 +2092,38 @@ impl<S: ServiceControl> Daemon<S> {
         let bootstrap_sites = self.active_bootstrap_sites(&effective, now_unix);
         self.tor.prepare_validated(&effective, &bootstrap_sites)?;
         let proxy = self.proxy_config(&effective, now_unix)?;
-        self.caddy.prepare(&proxy)?;
-        self.active_proxy_config = Some(proxy);
 
         if effective.sites.iter().any(|site| site.enabled) {
-            restart_or_start(&mut self.services, ManagedComponent::Tor)?;
-            restart_or_start(&mut self.services, ManagedComponent::Caddy)?;
+            if self.services.state(ManagedComponent::Caddy)? == ComponentState::Running {
+                self.caddy.reload(&proxy)?;
+            } else {
+                self.caddy.prepare(&proxy)?;
+                self.services
+                    .control(ManagedComponent::Caddy, ComponentAction::Start)?;
+            }
+            reload_or_start(&mut self.services, ManagedComponent::Tor)?;
+            self.active_proxy_config = Some(proxy);
         } else {
+            self.caddy.prepare(&proxy)?;
+            self.active_proxy_config = Some(proxy);
             self.stop_publication()?;
         }
+        Ok(())
+    }
+
+    fn restart_runtime(
+        &mut self,
+        config: &GatewayConfig,
+        now_unix: i64,
+    ) -> Result<(), DaemonError> {
+        let effective = self.effective_config(config)?;
+        let bootstrap_sites = self.active_bootstrap_sites(&effective, now_unix);
+        self.tor.prepare_validated(&effective, &bootstrap_sites)?;
+        let proxy = self.proxy_config(&effective, now_unix)?;
+        self.caddy.prepare(&proxy)?;
+        self.active_proxy_config = Some(proxy);
+        restart_or_start(&mut self.services, ManagedComponent::Tor)?;
+        restart_or_start(&mut self.services, ManagedComponent::Caddy)?;
         Ok(())
     }
 
@@ -2435,6 +2477,17 @@ impl Drop for SocketGuard {
     }
 }
 
+fn reload_or_start(
+    services: &mut impl ServiceControl,
+    component: ManagedComponent,
+) -> Result<(), ServiceError> {
+    if services.state(component)? == ComponentState::Running {
+        services.reload(component)
+    } else {
+        services.control(component, ComponentAction::Start)
+    }
+}
+
 fn restart_or_start(
     services: &mut impl ServiceControl,
     component: ManagedComponent,
@@ -2725,6 +2778,7 @@ mod tests {
     struct FakeServices {
         states: Arc<Mutex<HashMap<ManagedComponent, ComponentState>>>,
         actions: Arc<Mutex<Vec<(ManagedComponent, ComponentAction)>>>,
+        reloads: Arc<Mutex<Vec<ManagedComponent>>>,
         fail_next: Arc<Mutex<Option<ManagedComponent>>>,
     }
 
@@ -2744,7 +2798,8 @@ mod tests {
             action: ComponentAction,
         ) -> Result<(), ServiceError> {
             self.actions.lock().unwrap().push((component, action));
-            if self.fail_next.lock().unwrap().take() == Some(component) {
+            if *self.fail_next.lock().unwrap() == Some(component) {
+                self.fail_next.lock().unwrap().take();
                 return Err(ServiceError::CommandFailed {
                     operation: "test",
                     component,
@@ -2757,6 +2812,20 @@ mod tests {
                 ComponentAction::Stop => ComponentState::Stopped,
             };
             self.states.lock().unwrap().insert(component, state);
+            Ok(())
+        }
+
+        fn reload(&mut self, component: ManagedComponent) -> Result<(), ServiceError> {
+            self.reloads.lock().unwrap().push(component);
+            if *self.fail_next.lock().unwrap() == Some(component) {
+                self.fail_next.lock().unwrap().take();
+                return Err(ServiceError::CommandFailed {
+                    operation: "test reload",
+                    component,
+                    status: Some(1),
+                    detail: "injected failure".to_owned(),
+                });
+            }
             Ok(())
         }
     }
@@ -2776,6 +2845,13 @@ mod tests {
         )
         .unwrap();
         (temporary, daemon, services)
+    }
+
+    fn service_activity(services: &FakeServices) -> (usize, usize) {
+        (
+            services.actions.lock().unwrap().len(),
+            services.reloads.lock().unwrap().len(),
+        )
     }
 
     fn site() -> Site {
@@ -3080,9 +3156,10 @@ mod tests {
 
     #[test]
     fn enrolls_distinct_encrypted_device_authorization_and_revokes_it() {
-        let (_temporary, mut daemon, _services) = daemon();
+        let (_temporary, mut daemon, services) = daemon();
         initialize(&mut daemon);
         create_generated_test_site(&mut daemon);
+        let before = service_activity(&services);
         let site_id = SiteId::new("alpha").unwrap();
         let guest_id = GuestId::new("family").unwrap();
         let device_id = DeviceId::new("phone").unwrap();
@@ -3178,6 +3255,7 @@ mod tests {
                 .join("authorized_clients/alice_phone.auth")
                 .exists()
         );
+        assert_eq!(service_activity(&services), (before.0, before.1 + 2));
     }
 
     #[test]

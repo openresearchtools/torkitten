@@ -13,6 +13,7 @@ Group=torkitten-tor
 SupplementaryGroups=torkitten-publish
 ExecStartPre=/usr/lib/torkitten/torkitten-tor-prepare
 ExecStart=/usr/lib/torkitten/tor -f /var/lib/torkitten/tor/torrc
+ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure
 RestartSec=5s
 KillSignal=SIGINT

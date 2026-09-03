@@ -149,6 +149,116 @@ const deviceDialog = document.querySelector("#device-dialog");
 const deviceForm = document.querySelector("#device-form");
 const deviceResult = document.querySelector("#device-result");
 let wizardSiteId = null;
+let wizardEnrollment = null;
+let bootstrapExpiresUnix = null;
+let bootstrapTimer = null;
+
+async function loadQr(image, value) {
+  image.removeAttribute("src");
+  image.setAttribute("aria-busy", "true");
+  try {
+    const result = await api("/api/qr", { value });
+    image.src = result.image;
+  } catch (_) {
+    image.alt = `${image.alt} (QR generation failed; use the copy control)`;
+  } finally {
+    image.removeAttribute("aria-busy");
+  }
+}
+
+function linkedValue(linkId, codeId, value) {
+  document.querySelector(`#${linkId}`).href = value;
+  document.querySelector(`#${codeId}`).textContent = value;
+}
+
+function selectPlatform(platform) {
+  for (const button of document.querySelectorAll("[data-platform]")) {
+    const selected = button.dataset.platform === platform;
+    button.classList.toggle("active", selected);
+    button.setAttribute("aria-selected", selected ? "true" : "false");
+    button.tabIndex = selected ? 0 : -1;
+  }
+  for (const panel of document.querySelectorAll("[data-platform-panel], [data-platform-auth], [data-platform-cert]")) {
+    const candidate = panel.dataset.platformPanel || panel.dataset.platformAuth || panel.dataset.platformCert;
+    panel.hidden = candidate !== platform;
+  }
+  for (const field of document.querySelectorAll(".desktop-auth-field")) {
+    field.hidden = platform === "ios" || platform === "android";
+  }
+  const panel = document.querySelector(`[data-platform-panel="${platform}"]`);
+  const staticQr = panel?.querySelector("[data-static-qr]");
+  if (staticQr && !staticQr.hasAttribute("src")) void loadQr(staticQr, staticQr.dataset.staticQr);
+}
+
+function stopBootstrapTimer() {
+  if (bootstrapTimer) window.clearInterval(bootstrapTimer);
+  bootstrapTimer = null;
+}
+
+function updateBootstrapCountdown() {
+  const countdown = document.querySelector("#bootstrap-countdown");
+  if (!bootstrapExpiresUnix) {
+    countdown.textContent = "Not open";
+    return;
+  }
+  const remaining = Math.max(0, bootstrapExpiresUnix - Math.floor(Date.now() / 1000));
+  const minutes = Math.floor(remaining / 60);
+  const seconds = String(remaining % 60).padStart(2, "0");
+  countdown.textContent = remaining ? `${minutes}:${seconds} remaining` : "Window expired";
+  if (!remaining) {
+    stopBootstrapTimer();
+    document.querySelector("[data-action=wizard-bootstrap-close]").hidden = true;
+    document.querySelector("[data-action=wizard-bootstrap-extend]").hidden = false;
+  }
+}
+
+function showBootstrap(result) {
+  bootstrapExpiresUnix = result.expires_unix;
+  linkedValue("bootstrap-link", "bootstrap-url", result.url);
+  document.querySelector("#bootstrap-result").hidden = false;
+  document.querySelector("[data-action=wizard-bootstrap-open]").hidden = true;
+  document.querySelector("[data-action=wizard-bootstrap-extend]").hidden = false;
+  document.querySelector("[data-action=wizard-bootstrap-close]").hidden = false;
+  void loadQr(document.querySelector("#bootstrap-qr"), result.url);
+  stopBootstrapTimer();
+  updateBootstrapCountdown();
+  bootstrapTimer = window.setInterval(updateBootstrapCountdown, 1000);
+}
+
+function clearDeviceResult() {
+  wizardEnrollment = null;
+  deviceResult.hidden = true;
+  deviceForm.hidden = false;
+  for (const section of document.querySelectorAll("[data-enrollment-only]")) section.hidden = true;
+  for (const id of ["device-onion", "device-credential", "device-private-key", "device-enrollment-url", "device-main-url"]) {
+    document.querySelector(`#${id}`).textContent = "";
+  }
+  for (const id of ["device-onion-qr", "device-credential-qr", "device-enrollment-qr", "device-main-qr"]) {
+    document.querySelector(`#${id}`).removeAttribute("src");
+  }
+  document.querySelector("#device-enrollment-link").removeAttribute("href");
+  document.querySelector("#device-main-link").removeAttribute("href");
+}
+
+function showDeviceResult(result) {
+  wizardEnrollment = result;
+  const mainUrl = `https://${result.onion_hostname}/`;
+  const privateKey = result.credential.split(":").at(-1);
+  document.querySelector("#device-onion").textContent = result.onion_hostname;
+  document.querySelector("#device-credential").textContent = result.credential;
+  document.querySelector("#device-private-key").textContent = privateKey;
+  linkedValue("device-enrollment-link", "device-enrollment-url", result.enrollment_url);
+  linkedValue("device-main-link", "device-main-url", mainUrl);
+  deviceForm.hidden = true;
+  deviceResult.hidden = false;
+  for (const section of document.querySelectorAll("[data-enrollment-only]")) section.hidden = false;
+  const platform = document.querySelector("[data-platform][aria-selected=true]")?.dataset.platform || "ios";
+  selectPlatform(platform);
+  void loadQr(document.querySelector("#device-onion-qr"), mainUrl);
+  void loadQr(document.querySelector("#device-credential-qr"), result.credential);
+  void loadQr(document.querySelector("#device-enrollment-qr"), result.enrollment_url);
+  void loadQr(document.querySelector("#device-main-qr"), mainUrl);
+}
 
 function mappingPayload(form) {
   const data = new FormData(form);
@@ -194,9 +304,17 @@ function prepareDeviceWizard(siteCard) {
   wizardSiteId = siteCard.dataset.siteId;
   deviceForm.reset();
   deviceForm.elements.site_id.value = wizardSiteId;
-  deviceResult.hidden = true;
-  document.querySelector("#device-onion").textContent = "";
-  document.querySelector("#device-credential").textContent = "";
+  clearDeviceResult();
+  bootstrapExpiresUnix = null;
+  stopBootstrapTimer();
+  document.querySelector("#bootstrap-result").hidden = true;
+  document.querySelector("#bootstrap-url").textContent = "";
+  document.querySelector("#bootstrap-qr").removeAttribute("src");
+  document.querySelector("[data-action=wizard-bootstrap-open]").hidden = false;
+  document.querySelector("[data-action=wizard-bootstrap-extend]").hidden = true;
+  document.querySelector("[data-action=wizard-bootstrap-close]").hidden = true;
+  updateBootstrapCountdown();
+  selectPlatform("ios");
   const guests = document.querySelector("#existing-guests");
   guests.replaceChildren();
   for (const guest of siteCard.querySelectorAll("[data-guest-id]")) {
@@ -239,18 +357,18 @@ if (deviceForm) {
         client_name: data.get("client_name"),
         mapping_ids: data.getAll("mapping_ids"),
       });
-      document.querySelector("#device-onion").textContent = result.onion_hostname;
-      document.querySelector("#device-credential").textContent = result.credential;
-      deviceResult.hidden = false;
-      showNotice("Device authorization created and publication restarted.");
+      showDeviceResult(result);
+      showNotice("Device authorization created and publication updated.");
     }, false);
   });
   deviceDialog.addEventListener("close", () => {
     wizardSiteId = null;
     deviceForm.reset();
-    deviceResult.hidden = true;
-    document.querySelector("#device-onion").textContent = "";
-    document.querySelector("#device-credential").textContent = "";
+    clearDeviceResult();
+    bootstrapExpiresUnix = null;
+    stopBootstrapTimer();
+    document.querySelector("#bootstrap-url").textContent = "";
+    document.querySelector("#bootstrap-qr").removeAttribute("src");
   });
 }
 
@@ -260,6 +378,12 @@ document.addEventListener("click", async (event) => {
   if (button.dataset.copy) {
     event.preventDefault();
     try { await navigator.clipboard.writeText(button.dataset.copy); showNotice("Copied to clipboard."); }
+    catch (_) { showNotice("Clipboard access was denied.", "error"); }
+    return;
+  }
+  if (button.dataset.copyTarget) {
+    const value = document.querySelector(`#${button.dataset.copyTarget}`)?.textContent || "";
+    try { await navigator.clipboard.writeText(value); showNotice("Copied to clipboard."); }
     catch (_) { showNotice("Clipboard access was denied.", "error"); }
     return;
   }
@@ -390,11 +514,46 @@ document.addEventListener("click", async (event) => {
     await pending(button, "Restoring…", () => api("/api/emergency/clear"));
     return;
   }
-  if (action === "wizard-bootstrap") {
+  if (action === "wizard-bootstrap-open" || action === "wizard-bootstrap-extend") {
     await pending(button, "Opening…", async () => {
       const result = await api(`/api/sites/${encodeURIComponent(wizardSiteId)}/bootstrap/open`, { seconds: 900 });
-      showNotice(`Certificate download opened: ${result.url}`);
+      showBootstrap(result);
+      showNotice("Certificate download is open for 15 minutes.");
     }, false);
+    return;
+  }
+  if (action === "wizard-bootstrap-close") {
+    await pending(button, "Closing…", async () => {
+      await api(`/api/sites/${encodeURIComponent(wizardSiteId)}/bootstrap/close`);
+      bootstrapExpiresUnix = null;
+      stopBootstrapTimer();
+      document.querySelector("#bootstrap-result").hidden = true;
+      document.querySelector("#bootstrap-url").textContent = "";
+      document.querySelector("#bootstrap-link").removeAttribute("href");
+      document.querySelector("#bootstrap-qr").removeAttribute("src");
+      document.querySelector("[data-action=wizard-bootstrap-open]").hidden = false;
+      document.querySelector("[data-action=wizard-bootstrap-extend]").hidden = true;
+      button.hidden = true;
+      updateBootstrapCountdown();
+      showNotice("Certificate download closed.");
+    }, false);
+    return;
+  }
+  if (action === "wizard-revoke-device" && wizardEnrollment) {
+    if (!window.confirm("Revoke this device’s Tor authorization and unfinished enrollment?")) return;
+    await pending(button, "Revoking…", () => api(
+      `/api/sites/${encodeURIComponent(wizardSiteId)}/guests/${encodeURIComponent(wizardEnrollment.guest_id)}/devices/${encodeURIComponent(wizardEnrollment.device_id)}/revoke`,
+    ));
+    return;
+  }
+  if (action === "wizard-another-device") {
+    deviceForm.reset();
+    deviceForm.elements.site_id.value = wizardSiteId;
+    clearDeviceResult();
+    deviceForm.querySelector("input:not([type=hidden])")?.focus();
+    document.querySelector("[data-step='2']").scrollIntoView({ behavior: "smooth", block: "start" });
+    showNotice("Ready to create a separate authorization for another device.");
+    return;
   }
 });
 
@@ -407,8 +566,5 @@ for (const button of document.querySelectorAll("[data-component]")) {
 }
 
 for (const button of document.querySelectorAll("[data-platform]")) {
-  button.addEventListener("click", () => {
-    for (const peer of document.querySelectorAll("[data-platform]")) peer.classList.remove("active");
-    button.classList.add("active");
-  });
+  button.addEventListener("click", () => selectPlatform(button.dataset.platform));
 }

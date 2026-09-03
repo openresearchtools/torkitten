@@ -15,6 +15,8 @@ use axum::{
     response::{Html, IntoResponse, Response},
     routing::{get, post},
 };
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
+use qrcode::{QrCode, render::svg};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use thiserror::Error;
@@ -40,6 +42,7 @@ const MAXIMUM_IPC_RESPONSE_BYTES: u64 = 1024 * 1024;
 const IPC_TIMEOUT: Duration = Duration::from_secs(15);
 const MAXIMUM_REQUEST_BYTES: usize = 64 * 1024;
 const DEFAULT_BOOTSTRAP_SECONDS: u32 = 900;
+const MAXIMUM_QR_INPUT_BYTES: usize = 2048;
 
 #[derive(Clone, Debug)]
 pub struct AdminWebConfig {
@@ -124,6 +127,7 @@ fn router(daemon_socket: PathBuf, origin: ExpectedOrigin) -> Router {
         .route("/api/setup", post(setup))
         .route("/api/login", post(login))
         .route("/api/logout", post(logout))
+        .route("/api/qr", post(qr_code))
         .route("/api/generator/candidate", post(generate_candidate))
         .route("/api/sites", post(create_site))
         .route("/api/sites/{site_id}/enabled", post(set_site_enabled))
@@ -318,6 +322,40 @@ async fn logout(State(state): State<AppState>, headers: HeaderMap) -> ApiResult<
         HeaderValue::from_static("torkitten_admin_csrf=; Path=/; Max-Age=0; SameSite=Strict"),
     );
     Ok(response)
+}
+
+#[derive(Deserialize)]
+struct QrInput {
+    value: SensitiveString,
+}
+
+async fn qr_code(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<QrInput>,
+) -> ApiResult<Json<serde_json::Value>> {
+    authorize_mutation(&state, &headers).await?;
+    Ok(Json(json!({ "image": qr_data_url(input.value.expose())? })))
+}
+
+fn qr_data_url(value: &str) -> ApiResult<String> {
+    if value.is_empty() || value.len() > MAXIMUM_QR_INPUT_BYTES {
+        return Err(ApiError::BadRequest(
+            "QR value must contain 1 to 2048 bytes",
+        ));
+    }
+    let code = QrCode::new(value.as_bytes())
+        .map_err(|_| ApiError::BadRequest("QR value is too large to encode"))?;
+    let image = code
+        .render::<svg::Color>()
+        .min_dimensions(256, 256)
+        .dark_color(svg::Color("#111827"))
+        .light_color(svg::Color("#ffffff"))
+        .build();
+    Ok(format!(
+        "data:image/svg+xml;base64,{}",
+        BASE64_STANDARD.encode(image)
+    ))
 }
 
 async fn generate_candidate(
@@ -1236,6 +1274,37 @@ mod tests {
         assert!(!html.contains("<script>alert(1)</script>"));
         assert!(html.contains("http://127.0.0.1:3000"));
         assert!(html.contains("mapping-row"));
+        assert!(html.contains("https://apps.apple.com/us/app/orbot/id1609461599"));
+        assert!(
+            html.contains("https://play.google.com/store/apps/details?id=org.torproject.android")
+        );
+        assert!(html.contains("https://www.torproject.org/download/"));
+        for platform in ["ios", "android", "linux", "macos", "windows"] {
+            assert!(html.contains(&format!("data-platform-cert=\"{platform}\"")));
+        }
+        let mut previous = 0;
+        for step in 1..=5 {
+            let position = html
+                .find(&format!("data-step=\"{step}\""))
+                .expect("wizard step must be rendered");
+            assert!(position > previous, "wizard steps must remain ordered");
+            previous = position;
+        }
+    }
+
+    #[test]
+    fn qr_images_are_bundled_data_and_bound_to_safe_input_sizes() {
+        let source = "https://example.onion/enroll/short-lived-token";
+        let data_url = qr_data_url(source).unwrap();
+        let encoded = data_url
+            .strip_prefix("data:image/svg+xml;base64,")
+            .expect("QR must be an inline bundled SVG image");
+        let svg = String::from_utf8(BASE64_STANDARD.decode(encoded).unwrap()).unwrap();
+        assert!(svg.starts_with("<?xml"));
+        assert!(svg.contains("<svg"));
+        assert!(!svg.contains(source));
+        assert!(qr_data_url("").is_err());
+        assert!(qr_data_url(&"x".repeat(MAXIMUM_QR_INPUT_BYTES + 1)).is_err());
     }
 
     #[test]
