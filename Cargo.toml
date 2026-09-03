@@ -22,7 +22,9 @@ chacha20poly1305 = "0.10"
 data-encoding = "2"
 getrandom = "0.4"
 hmac = "0.12"
+openssl = "0.10"
 rusqlite = { version = "0.37", features = ["bundled"] }
+rcgen = { version = "0.14.10", features = ["x509-parser"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha1 = "0.10"
@@ -30,10 +32,12 @@ sha2 = "0.10"
 subtle = "2"
 tempfile = "3"
 thiserror = "2"
+time = "0.3.55"
 url = "2"
 uuid = { version = "1", features = ["serde", "v4"] }
 webauthn-rs = "0.5.5"
 x25519-dalek = { version = "2", features = ["static_secrets", "zeroize"] }
+x509-parser = "0.18"
 zeroize = { version = "1", features = ["derive"] }
 
 [workspace.lints.rust]

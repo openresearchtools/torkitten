@@ -278,11 +278,15 @@ impl Store {
     /// # Errors
     ///
     /// Returns an error when SQLite cannot apply the deletion.
-    pub fn remove_site(&self, id: &SiteId) -> Result<bool, StoreError> {
-        Ok(self
-            .connection
-            .execute("DELETE FROM sites WHERE id = ?1", [id.as_str()])?
-            != 0)
+    pub fn remove_site(&mut self, id: &SiteId) -> Result<bool, StoreError> {
+        let transaction = self.connection.transaction()?;
+        let removed = transaction.execute("DELETE FROM sites WHERE id = ?1", [id.as_str()])? != 0;
+        transaction.execute(
+            "DELETE FROM secrets WHERE name GLOB ?1",
+            [format!("pki/site/{}/*", id.as_str())],
+        )?;
+        transaction.commit()?;
+        Ok(removed)
     }
 
     /// Adds or replaces one mapping within an existing site.
@@ -1160,6 +1164,27 @@ impl Store {
              ON CONFLICT(name) DO UPDATE SET encrypted = excluded.encrypted",
             params![name, encrypted.as_bytes()],
         )?;
+        Ok(())
+    }
+
+    pub(crate) fn put_secret_set(&mut self, secrets: &[(&str, &[u8])]) -> Result<(), StoreError> {
+        let encrypted = secrets
+            .iter()
+            .map(|(name, plaintext)| {
+                self.cipher
+                    .encrypt(name, plaintext)
+                    .map(|encrypted| (*name, encrypted))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let transaction = self.connection.transaction()?;
+        for (name, encrypted) in encrypted {
+            transaction.execute(
+                "INSERT INTO secrets (name, encrypted) VALUES (?1, ?2)
+                 ON CONFLICT(name) DO UPDATE SET encrypted = excluded.encrypted",
+                params![name, encrypted.as_bytes()],
+            )?;
+        }
+        transaction.commit()?;
         Ok(())
     }
 
