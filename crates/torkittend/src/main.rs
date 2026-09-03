@@ -40,7 +40,10 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     };
     let mut daemon = Daemon::open(options.paths, services, now)?;
     daemon.startup(now)?;
-    let web = AdminWebConfig::new(options.admin_listen, &socket);
+    let web = options.admin_origin.map_or_else(
+        || AdminWebConfig::new(options.admin_listen, &socket),
+        |origin| AdminWebConfig::for_container(options.admin_listen, &socket, origin),
+    );
     let servers = async {
         tokio::try_join!(
             async {
@@ -79,6 +82,7 @@ async fn shutdown_signal() -> Result<(), std::io::Error> {
 struct LaunchOptions {
     paths: DaemonPaths,
     admin_listen: SocketAddr,
+    admin_origin: Option<String>,
     service_manager: ServiceManager,
 }
 
@@ -97,11 +101,12 @@ fn arguments() -> Result<LaunchOptions, String> {
         .parse::<SocketAddr>()
         .map_err(|_| "invalid built-in administration address".to_owned())?;
     let mut service_manager = ServiceManager::Systemd;
+    let mut admin_origin = None;
     let mut arguments = env::args_os().skip(1);
     while let Some(argument) = arguments.next() {
         if argument == "--help" {
             return Err(
-                "usage: torkittend [--state-dir PATH] [--runtime-dir PATH] [--tor-binary PATH] [--caddy-binary PATH] [--admin-listen LOOPBACK:PORT] [--service-manager systemd|direct]"
+                "usage: torkittend [--state-dir PATH] [--runtime-dir PATH] [--tor-binary PATH] [--caddy-binary PATH] [--admin-listen ADDRESS:PORT] [--admin-origin LOCAL_HTTP_ORIGIN] [--service-manager systemd|direct]"
                     .to_owned(),
             );
         }
@@ -119,6 +124,13 @@ fn arguments() -> Result<LaunchOptions, String> {
                     .ok_or_else(|| "administration address must be valid UTF-8".to_owned())?
                     .parse()
                     .map_err(|_| "invalid administration listen address".to_owned())?;
+            }
+            Some("--admin-origin") => {
+                admin_origin = Some(
+                    value
+                        .into_string()
+                        .map_err(|_| "administration origin must be valid UTF-8".to_owned())?,
+                );
             }
             Some("--service-manager") => {
                 service_manager = match value.to_str() {
@@ -140,6 +152,7 @@ fn arguments() -> Result<LaunchOptions, String> {
     Ok(LaunchOptions {
         paths,
         admin_listen,
+        admin_origin,
         service_manager,
     })
 }

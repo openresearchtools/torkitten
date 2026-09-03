@@ -43,6 +43,18 @@ impl ExpectedOrigin {
         }
     }
 
+    /// Returns whether this is an HTTP origin on localhost or a numeric
+    /// loopback address using the specified externally published port.
+    #[must_use]
+    pub fn is_local_http_at_port(&self, port: u16) -> bool {
+        let local_host = self.host == "localhost"
+            || self
+                .host
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|address| address.is_loopback());
+        self.scheme == "http" && local_host && self.port == port
+    }
+
     /// Enforces Origin and session-bound CSRF checks for every unsafe HTTP
     /// method. Safe methods do not mutate state and require neither value.
     ///
@@ -117,6 +129,17 @@ mod tests {
         assert_eq!(
             expected.validate("http://localhost:12755"),
             Err(OriginError::Mismatch)
+        );
+        assert!(expected.is_local_http_at_port(12_755));
+        assert!(
+            ExpectedOrigin::parse("http://localhost:12755")
+                .unwrap()
+                .is_local_http_at_port(12_755)
+        );
+        assert!(
+            !ExpectedOrigin::parse("https://localhost:12755")
+                .unwrap()
+                .is_local_http_at_port(12_755)
         );
     }
 

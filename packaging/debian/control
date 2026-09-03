@@ -5,7 +5,7 @@ Priority: optional
 Architecture: amd64
 Maintainer: Open Research Tools <maintainers@openresearchtools.org>
 Installed-Size: 67032
-Depends: adduser, libcap2, libevent-core-2.1-7t64 | libevent-core-2.1-7, libgtk-3-0t64 | libgtk-3-0, liblzma5, libseccomp2, libssl3t64 | libssl3, libsystemd0, libwebkit2gtk-4.1-0, libzstd1, policykit-1 | polkitd, systemd, zlib1g
+Depends: adduser, libcap2, libevent-2.1-7t64 | libevent-2.1-7, libgtk-3-0t64 | libgtk-3-0, liblzma5, libseccomp2, libssl3t64 | libssl3, libsystemd0, libwebkit2gtk-4.1-0, libzstd1, policykit-1 | polkitd, systemd, zlib1g
 Description: Persistent self-hosted onion gateway
  Torkitten publishes approved local applications as independently controlled,
  authenticated onion sites and provides one native administration desktop.

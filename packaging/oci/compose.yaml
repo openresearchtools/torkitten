@@ -1,0 +1,25 @@
+services:
+  torkitten:
+    image: ${TORKITTEN_IMAGE:-ghcr.io/openresearchtools/torkitten:0.1.0}
+    restart: unless-stopped
+    stop_grace_period: 20s
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    healthcheck:
+      test: ["CMD", "/opt/torkitten/bin/torkittenctl", "--socket", "/tmp/torkitten/admin.sock", "status"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+    ports:
+      - "127.0.0.1:12755:12755"
+    tmpfs:
+      - /tmp:mode=1777
+    volumes:
+      - torkitten-state:/var/lib/torkitten
+
+volumes:
+  torkitten-state:

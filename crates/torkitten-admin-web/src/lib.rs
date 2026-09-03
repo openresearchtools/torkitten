@@ -48,6 +48,8 @@ const MAXIMUM_QR_INPUT_BYTES: usize = 2048;
 pub struct AdminWebConfig {
     pub listen_address: SocketAddr,
     pub daemon_socket: PathBuf,
+    expected_origin: String,
+    allow_container_listener: bool,
 }
 
 impl AdminWebConfig {
@@ -56,6 +58,24 @@ impl AdminWebConfig {
         Self {
             listen_address,
             daemon_socket: daemon_socket.into(),
+            expected_origin: format!("http://{listen_address}"),
+            allow_container_listener: false,
+        }
+    }
+
+    /// Configures the identical administration application for a container
+    /// listener that is published only through a host-loopback port mapping.
+    #[must_use]
+    pub fn for_container(
+        listen_address: SocketAddr,
+        daemon_socket: impl Into<PathBuf>,
+        expected_origin: impl Into<String>,
+    ) -> Self {
+        Self {
+            listen_address,
+            daemon_socket: daemon_socket.into(),
+            expected_origin: expected_origin.into(),
+            allow_container_listener: true,
         }
     }
 
@@ -66,11 +86,20 @@ impl AdminWebConfig {
     /// Returns an error when the configured listener is not a numeric loopback
     /// address.
     pub fn validate(&self) -> Result<(), AdminWebError> {
-        if self.listen_address.ip().is_loopback() {
-            Ok(())
-        } else {
-            Err(AdminWebError::NonLoopbackListener(self.listen_address))
+        let listener_allowed = self.listen_address.ip().is_loopback()
+            || (self.allow_container_listener && self.listen_address.ip().is_unspecified());
+        if !listener_allowed {
+            return Err(AdminWebError::NonLoopbackListener(self.listen_address));
         }
+        let origin = ExpectedOrigin::parse(&self.expected_origin)?;
+        if self.allow_container_listener
+            && !origin.is_local_http_at_port(self.listen_address.port())
+        {
+            return Err(AdminWebError::NonLocalContainerOrigin(
+                self.expected_origin.clone(),
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -80,6 +109,8 @@ pub enum AdminWebError {
     NonLoopbackListener(SocketAddr),
     #[error("invalid administration origin: {0}")]
     Origin(#[from] torkitten_auth::OriginError),
+    #[error("container administration origin must be local HTTP on the published port: {0}")]
+    NonLocalContainerOrigin(String),
     #[error("failed to bind local administration listener: {0}")]
     Bind(#[source] std::io::Error),
     #[error("local administration server failed: {0}")]
@@ -100,7 +131,7 @@ struct AppState {
 /// or HTTP server failure.
 pub async fn serve(config: AdminWebConfig) -> Result<(), AdminWebError> {
     config.validate()?;
-    let origin = ExpectedOrigin::parse(&format!("http://{}", config.listen_address))?;
+    let origin = ExpectedOrigin::parse(&config.expected_origin)?;
     let listener = TcpListener::bind(config.listen_address)
         .await
         .map_err(AdminWebError::Bind)?;
@@ -1236,6 +1267,21 @@ mod tests {
         assert!(matches!(
             config.validate(),
             Err(AdminWebError::NonLoopbackListener(_))
+        ));
+        let container = AdminWebConfig::for_container(
+            SocketAddr::from(([0, 0, 0, 0], 12_755)),
+            "/run/torkitten/admin.sock",
+            "http://localhost:12755",
+        );
+        assert!(container.validate().is_ok());
+        let unsafe_origin = AdminWebConfig::for_container(
+            SocketAddr::from(([0, 0, 0, 0], 12_755)),
+            "/run/torkitten/admin.sock",
+            "http://example.com:12755",
+        );
+        assert!(matches!(
+            unsafe_origin.validate(),
+            Err(AdminWebError::NonLocalContainerOrigin(_))
         ));
     }
 
