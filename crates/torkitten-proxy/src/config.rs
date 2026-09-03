@@ -289,7 +289,7 @@ fn protected_mapping_handlers(
                 "set": {
                     "X-Forwarded-Method": ["{http.request.method}"],
                     "X-Forwarded-Uri": ["{http.request.uri}"],
-                    "X-Forwarded-Host": ["{http.request.host}"],
+                    "X-Forwarded-Host": ["{http.request.hostport}"],
                     "X-Forwarded-Proto": ["https"],
                     "X-Torkitten-Site": [proxy_site.site.id.as_str()],
                     "X-Torkitten-Mapping": [mapping.id.as_str()],
@@ -522,6 +522,10 @@ mod tests {
         let protected = handles[2]["routes"][0]["handle"].as_array().unwrap();
         assert_eq!(protected[0]["handler"], "reverse_proxy");
         assert_eq!(protected[0]["rewrite"]["uri"], "/authorize?");
+        assert_eq!(
+            protected[0]["headers"]["request"]["set"]["X-Forwarded-Host"][0],
+            "{http.request.hostport}"
+        );
         assert_eq!(protected[1]["handler"], "reverse_proxy");
         assert_eq!(protected[1]["upstreams"][0]["dial"], "127.0.0.1:3000");
     }

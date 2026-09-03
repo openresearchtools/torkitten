@@ -15,7 +15,8 @@
     {% match guest_display_name %}
       {% when Some with (guest_name) %}
         <section class="card">
-          <div class="eyebrow identity">Signed in as {{ guest_name }}</div>
+          <div class="eyebrow identity">Guest account: {{ guest_name }}</div>
+          <p>This account can open only the applications assigned to it by the local administrator.</p>
           <h2>Your applications</h2>
           {% if mappings.is_empty() %}
             <p>No applications are assigned to this guest.</p>
@@ -48,6 +49,8 @@
           {% if passkeys_enabled %}
           <div class="passkey-panel">
             <input type="hidden" name="csrf" value="{{ csrf }}">
+            <input type="hidden" data-return-to value="{{ return_to }}">
+            <input type="hidden" data-return-mapping value="{{ return_mapping }}">
             <label>Guest ID <input data-passkey-guest required maxlength="64" autocomplete="username"></label>
             <button type="button" data-passkey-login>Sign in with a passkey</button>
             <p class="status" data-passkey-status role="status" aria-live="polite"></p>
@@ -58,6 +61,8 @@
             <summary>Use password and a second factor</summary>
             <form method="post" action="/login">
               <input type="hidden" name="csrf" value="{{ csrf }}">
+              <input type="hidden" name="return_to" value="{{ return_to }}">
+              <input type="hidden" name="return_mapping" value="{{ return_mapping }}">
               <label>Guest ID <input name="guest_id" required maxlength="64" autocomplete="username"></label>
               <label>Password <input type="password" name="password" required autocomplete="current-password"></label>
               <label>Second factor

@@ -486,7 +486,7 @@ mod tests {
 
     #[test]
     #[ignore = "requires TORKITTEN_CADDY_BINARY and OpenSSL"]
-    fn downloaded_caddy_denies_then_proxies_a_browser_style_request() {
+    fn downloaded_caddy_redirects_then_proxies_a_browser_style_request() {
         let binary = std::env::var_os("TORKITTEN_CADDY_BINARY")
             .expect("TORKITTEN_CADDY_BINARY must name the downloaded artifact");
         let temporary = tempfile::tempdir().unwrap();
@@ -501,23 +501,7 @@ mod tests {
         *port = application_port;
 
         let authentication = UnixListener::bind(&config.sites[0].authentication_upstream).unwrap();
-        let (auth_tx, auth_rx) = mpsc::channel();
-        let auth_thread = thread::spawn(move || {
-            for _ in 0..2 {
-                let (mut stream, _) = authentication.accept().unwrap();
-                stream
-                    .set_read_timeout(Some(Duration::from_secs(5)))
-                    .unwrap();
-                let request = read_request(&mut stream);
-                let allowed = request.contains("Cookie: torkitten_session=valid\r\n");
-                auth_tx.send(request).unwrap();
-                if allowed {
-                    write_response(&mut stream, "204 No Content", "");
-                } else {
-                    write_response(&mut stream, "401 Unauthorized", "");
-                }
-            }
-        });
+        let (auth_rx, auth_thread) = spawn_authentication(authentication);
 
         let (app_tx, app_rx) = mpsc::channel();
         let app_thread = thread::spawn(move || {
@@ -549,8 +533,14 @@ mod tests {
             None,
         );
         assert!(
-            unauthorized.starts_with("HTTP/1.1 401"),
+            unauthorized.starts_with("HTTP/1.1 303"),
             "unexpected unauthorized response: {unauthorized}"
+        );
+        assert!(
+            unauthorized.contains(&format!(
+                "Location: https://{ONION}/?return_mapping=app&return_to="
+            )),
+            "authentication redirect was not preserved: {unauthorized}"
         );
         assert!(app_rx.try_recv().is_err(), "denied request reached the app");
 
@@ -576,6 +566,10 @@ mod tests {
             assert!(request.contains("X-Torkitten-Site: alpha"), "{request}");
             assert!(request.contains("X-Torkitten-Mapping: app"), "{request}");
             assert!(request.contains("X-Forwarded-Method: GET"), "{request}");
+            assert!(
+                request.contains(&format!("X-Forwarded-Host: {ONION}:8443")),
+                "{request}"
+            );
             assert!(
                 request.contains("X-Forwarded-Uri: /api/items?q=one%20two"),
                 "{request}"
@@ -714,6 +708,43 @@ mod tests {
         stream.flush().unwrap();
     }
 
+    fn spawn_authentication(
+        authentication: UnixListener,
+    ) -> (mpsc::Receiver<String>, thread::JoinHandle<()>) {
+        let (auth_tx, auth_rx) = mpsc::channel();
+        let auth_thread = thread::spawn(move || {
+            for _ in 0..2 {
+                let (mut stream, _) = authentication.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let request = read_request(&mut stream);
+                let allowed = request.contains("Cookie: torkitten_session=valid\r\n");
+                auth_tx.send(request).unwrap();
+                if allowed {
+                    write_response(&mut stream, "204 No Content", "");
+                } else {
+                    write_redirect(
+                        &mut stream,
+                        &format!(
+                            "https://{ONION}/?return_mapping=app&return_to=https%3A%2F%2F{ONION}%3A8443%2Fapi%2Fitems%3Fq%3Done%2520two"
+                        ),
+                    );
+                }
+            }
+        });
+        (auth_rx, auth_thread)
+    }
+
+    fn write_redirect(stream: &mut impl Write, location: &str) {
+        write!(
+            stream,
+            "HTTP/1.1 303 See Other\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        )
+        .unwrap();
+        stream.flush().unwrap();
+    }
+
     fn openssl_request(
         socket: &Path,
         hostname: &str,
@@ -735,7 +766,7 @@ mod tests {
         let cookie = cookie.map_or_else(String::new, |value| format!("Cookie: {value}\r\n"));
         write!(
             child.stdin.take().unwrap(),
-            "GET /api/items?q=one%20two HTTP/1.1\r\nHost: {hostname}\r\nConnection: close\r\n{cookie}X-Forwarded-Proto: http\r\nX-Torkitten-Site: forged\r\nX-Real-IP: 203.0.113.9\r\n\r\n"
+            "GET /api/items?q=one%20two HTTP/1.1\r\nHost: {hostname}:8443\r\nConnection: close\r\n{cookie}X-Forwarded-Proto: http\r\nX-Torkitten-Site: forged\r\nX-Real-IP: 203.0.113.9\r\n\r\n"
         )
         .unwrap();
         let output = child.wait_with_output().unwrap();

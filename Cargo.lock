@@ -3063,6 +3063,7 @@ dependencies = [
  "torkitten-auth",
  "torkitten-core",
  "tower",
+ "url",
 ]
 
 [[package]]

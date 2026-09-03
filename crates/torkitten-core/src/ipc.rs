@@ -255,6 +255,11 @@ pub enum RemoteCommand {
         mapping_id: MappingId,
         session: SensitiveString,
     },
+    ValidateMappingReturn {
+        site_id: SiteId,
+        mapping_id: MappingId,
+        virtual_port: u16,
+    },
     EnrollmentDetails {
         site_id: SiteId,
         token: SensitiveString,
@@ -348,6 +353,7 @@ pub enum RemoteResponse {
     MappingAuthorized {
         guest_id: GuestId,
     },
+    MappingReturnValidated,
     EnrollmentDetails {
         site_id: SiteId,
         guest_id: GuestId,

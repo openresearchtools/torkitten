@@ -66,7 +66,9 @@
     });
     if (!response.ok) throw new Error(`Request failed (${response.status})`);
     const contentType = response.headers.get("content-type") || "";
-    return contentType.includes("application/json") ? response.json() : null;
+    const payload = contentType.includes("application/json") ? await response.json() : {};
+    payload.return_to = response.headers.get("x-torkitten-return-to");
+    return payload;
   };
 
   const run = async (button, action) => {
@@ -75,10 +77,10 @@
     status.textContent = "Waiting for this device…";
     status.dataset.state = "pending";
     try {
-      await action();
+      const returnTo = await action();
       status.textContent = "Passkey verified. Opening the site…";
       status.dataset.state = "success";
-      window.location.assign("/");
+      window.location.assign(returnTo || "/");
     } catch (error) {
       status.textContent = error && error.name === "NotAllowedError"
         ? "The passkey request was cancelled or timed out. Try again."
@@ -94,10 +96,11 @@
     const started = await request(`${base}/passkey/start`);
     const credential = await navigator.credentials.create({ publicKey: creationOptions(started.public_key) });
     if (!credential) throw new Error("No passkey was created");
-    await request(`${base}/passkey/finish`, {
+    const finished = await request(`${base}/passkey/finish`, {
       ceremony: started.ceremony,
       credential: registrationJSON(credential),
     });
+    return finished.return_to;
   }));
 
   const loginButton = document.querySelector("[data-passkey-login]");
@@ -107,11 +110,14 @@
     const started = await request("/passkey/start", { guest_id: guestId });
     const credential = await navigator.credentials.get({ publicKey: requestOptions(started.public_key) });
     if (!credential) throw new Error("No passkey was selected");
-    await request("/passkey/finish", {
+    const finished = await request("/passkey/finish", {
       guest_id: guestId,
       ceremony: started.ceremony,
       credential: authenticationJSON(credential),
+      return_to: document.querySelector("[data-return-to]")?.value || null,
+      return_mapping: document.querySelector("[data-return-mapping]")?.value || null,
     });
+    return finished.return_to;
   }));
 
   const logoutForm = document.querySelector("[data-logout]");

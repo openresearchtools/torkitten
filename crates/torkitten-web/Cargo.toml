@@ -16,6 +16,7 @@ thiserror.workspace = true
 tokio.workspace = true
 torkitten-auth = { path = "../torkitten-auth" }
 torkitten-core = { path = "../torkitten-core" }
+url.workspace = true
 
 [dev-dependencies]
 http-body-util = "0.1"

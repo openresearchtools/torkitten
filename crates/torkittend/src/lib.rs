@@ -455,6 +455,11 @@ impl<S: ServiceControl> Daemon<S> {
                 }
                 Ok(RemoteResponse::MappingAuthorized { guest_id: guest.id })
             }
+            RemoteCommand::ValidateMappingReturn {
+                site_id,
+                mapping_id,
+                virtual_port,
+            } => self.validate_mapping_return(&site_id, &mapping_id, virtual_port),
             RemoteCommand::EnrollmentDetails { site_id, token } => {
                 self.remote_enrollment_details(&site_id, token.expose(), now_unix)
             }
@@ -509,6 +514,22 @@ impl<S: ServiceControl> Daemon<S> {
                 })
             }
             command => self.handle_remote_passkey(command, now_unix),
+        }
+    }
+
+    fn validate_mapping_return(
+        &self,
+        site_id: &SiteId,
+        mapping_id: &MappingId,
+        virtual_port: u16,
+    ) -> Result<RemoteResponse, DaemonError> {
+        let site = self.required_remote_site(site_id)?;
+        if site.mappings.iter().any(|mapping| {
+            &mapping.id == mapping_id && mapping.virtual_port == virtual_port && mapping.enabled
+        }) {
+            Ok(RemoteResponse::MappingReturnValidated)
+        } else {
+            Err(DaemonError::RemoteUnauthorized)
         }
     }
 
@@ -3594,6 +3615,59 @@ mod tests {
         ));
         assert_remote_portal_access(&mut daemon, &site_id, &guest_id, session.expose());
         assert_remote_login_and_logout(&mut daemon, &site_id, &guest_id, &totp, &recovery_code);
+    }
+
+    #[test]
+    fn mapping_return_targets_require_the_enabled_mapping_id_and_port() {
+        let (_temporary, mut daemon, _services) = daemon();
+        initialize(&mut daemon);
+        create_generated_test_site(&mut daemon);
+        let site_id = SiteId::new("alpha").unwrap();
+        let mapping_id = MappingId::new("app").unwrap();
+        assert!(matches!(
+            daemon.handle_remote(
+                RemoteCommand::ValidateMappingReturn {
+                    site_id: site_id.clone(),
+                    mapping_id: mapping_id.clone(),
+                    virtual_port: 8443,
+                },
+                NOW + 2,
+            ),
+            RemoteResponse::MappingReturnValidated
+        ));
+        assert!(matches!(
+            daemon.handle_remote(
+                RemoteCommand::ValidateMappingReturn {
+                    site_id: site_id.clone(),
+                    mapping_id: mapping_id.clone(),
+                    virtual_port: 8444,
+                },
+                NOW + 2,
+            ),
+            RemoteResponse::Error { code, .. } if code == "unauthorized"
+        ));
+        assert!(matches!(
+            daemon.handle(
+                AdminCommand::SetMappingEnabled {
+                    site_id: site_id.clone(),
+                    mapping_id: mapping_id.clone(),
+                    enabled: false,
+                },
+                NOW + 3,
+            ),
+            AdminResponse::Ok
+        ));
+        assert!(matches!(
+            daemon.handle_remote(
+                RemoteCommand::ValidateMappingReturn {
+                    site_id,
+                    mapping_id,
+                    virtual_port: 8443,
+                },
+                NOW + 3,
+            ),
+            RemoteResponse::Error { code, .. } if code == "unauthorized"
+        ));
     }
 
     #[test]

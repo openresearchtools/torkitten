@@ -13,7 +13,7 @@ use askama::Template;
 use axum::{
     Json, Router,
     body::Body,
-    extract::{Form, Path as AxumPath, State},
+    extract::{Form, Path as AxumPath, Query, State},
     http::{
         HeaderMap, HeaderValue, Method, StatusCode, Uri,
         header::{
@@ -45,6 +45,7 @@ const CSRF_COOKIE: &str = "__Host-torkitten_csrf";
 const MAXIMUM_IPC_RESPONSE_BYTES: u64 = 1024 * 1024;
 const IPC_TIMEOUT: Duration = Duration::from_secs(10);
 const RECONCILE_INTERVAL: Duration = Duration::from_secs(2);
+const MAXIMUM_RETURN_TARGET_BYTES: usize = 4096;
 
 #[derive(Clone, Debug)]
 pub struct RemoteWebConfig {
@@ -230,7 +231,17 @@ fn bootstrap_router(state: SiteState) -> Router {
         .with_state(state)
 }
 
-async fn portal(State(state): State<SiteState>, headers: HeaderMap) -> WebResult<Response> {
+#[derive(Default, Deserialize)]
+struct PortalQuery {
+    return_to: Option<String>,
+    return_mapping: Option<String>,
+}
+
+async fn portal(
+    State(state): State<SiteState>,
+    Query(query): Query<PortalQuery>,
+    headers: HeaderMap,
+) -> WebResult<Response> {
     let session = cookie(&headers, SESSION_COOKIE).map(SensitiveString::new);
     let response = request_daemon(
         &state.daemon_socket,
@@ -243,10 +254,14 @@ async fn portal(State(state): State<SiteState>, headers: HeaderMap) -> WebResult
     let RemoteResponse::PortalContext { context } = response else {
         return Err(WebError::from_response(response));
     };
-    render_portal(context, &headers)
+    render_portal(context, &headers, query)
 }
 
-fn render_portal(context: PortalContext, headers: &HeaderMap) -> WebResult<Response> {
+fn render_portal(
+    context: PortalContext,
+    headers: &HeaderMap,
+    query: PortalQuery,
+) -> WebResult<Response> {
     let csrf = csrf_token(headers)?;
     let template = PortalTemplate {
         display_name: context.display_name,
@@ -256,6 +271,8 @@ fn render_portal(context: PortalContext, headers: &HeaderMap) -> WebResult<Respo
         passkeys_enabled: context.remote_access_policy.passkeys_enabled,
         password_totp_enabled: context.remote_access_policy.password_totp_enabled,
         recovery_codes_enabled: context.remote_access_policy.recovery_codes_enabled,
+        return_to: query.return_to.unwrap_or_default(),
+        return_mapping: query.return_mapping.unwrap_or_default(),
         csrf: csrf.expose().to_owned(),
     };
     html_with_csrf(template.render().map_err(WebError::Template)?, &csrf)
@@ -346,7 +363,7 @@ async fn complete_enrollment(
                 .map_err(WebError::Template)?,
         )
     };
-    authenticated_response(&session, expires_unix, max_age_seconds, page)
+    authenticated_response(&session, expires_unix, max_age_seconds, page, None)
 }
 
 #[derive(Serialize)]
@@ -414,7 +431,7 @@ async fn finish_passkey_enrollment(
     else {
         return Err(WebError::from_response(response));
     };
-    authenticated_response(&session, expires_unix, max_age_seconds, None)
+    authenticated_fetch_response(&session, expires_unix, max_age_seconds, None)
 }
 
 #[derive(Deserialize)]
@@ -423,6 +440,8 @@ struct LoginInput {
     password: SensitiveString,
     factor_kind: String,
     factor: SensitiveString,
+    return_to: Option<String>,
+    return_mapping: Option<String>,
     csrf: SensitiveString,
 }
 
@@ -432,6 +451,12 @@ async fn login(
     Form(input): Form<LoginInput>,
 ) -> WebResult<Response> {
     validate_mutation(&state, &headers, input.csrf.expose())?;
+    let return_to = validated_return_target(
+        &state,
+        input.return_mapping.as_deref(),
+        input.return_to.as_deref(),
+    )
+    .await;
     let second_factor = match input.factor_kind.as_str() {
         "totp" => GuestSecondFactor::Totp(input.factor),
         "recovery" => GuestSecondFactor::RecoveryCode(input.factor),
@@ -455,7 +480,13 @@ async fn login(
     else {
         return Err(WebError::from_response(response));
     };
-    authenticated_response(&session, expires_unix, max_age_seconds, None)
+    authenticated_response(
+        &session,
+        expires_unix,
+        max_age_seconds,
+        None,
+        return_to.as_deref(),
+    )
 }
 
 #[derive(Deserialize)]
@@ -495,6 +526,8 @@ struct FinishPasskeyLoginInput {
     guest_id: String,
     ceremony: SensitiveString,
     credential: serde_json::Value,
+    return_to: Option<String>,
+    return_mapping: Option<String>,
 }
 
 async fn finish_passkey_login(
@@ -503,6 +536,12 @@ async fn finish_passkey_login(
     Json(input): Json<FinishPasskeyLoginInput>,
 ) -> WebResult<Response> {
     validate_header_mutation(&state, &headers)?;
+    let return_to = validated_return_target(
+        &state,
+        input.return_mapping.as_deref(),
+        input.return_to.as_deref(),
+    )
+    .await;
     let response = request_daemon(
         &state.daemon_socket,
         RemoteCommand::FinishPasskeyAuthentication {
@@ -521,7 +560,12 @@ async fn finish_passkey_login(
     else {
         return Err(WebError::from_response(response));
     };
-    authenticated_response(&session, expires_unix, max_age_seconds, None)
+    authenticated_fetch_response(
+        &session,
+        expires_unix,
+        max_age_seconds,
+        return_to.as_deref(),
+    )
 }
 
 #[derive(Deserialize)]
@@ -547,7 +591,7 @@ async fn logout(
     if !matches!(response, RemoteResponse::LoggedOut) {
         return Err(WebError::from_response(response));
     }
-    let mut response = safe_portal_redirect(&state)?;
+    let mut response = safe_portal_redirect(&state, None)?;
     response.headers_mut().append(
         SET_COOKIE,
         HeaderValue::from_static(clear_remote_session_cookie()),
@@ -581,18 +625,57 @@ fn authenticated_response(
     expires_unix: i64,
     max_age_seconds: u64,
     page: Option<String>,
+    return_to: Option<&str>,
 ) -> WebResult<Response> {
-    let session = SessionToken::parse(encoded_session.expose().to_owned())?;
-    let cookie = remote_session_cookie(&session, max_age_seconds)?;
     let mut response = if let Some(page) = page {
         Html(page).into_response()
     } else {
         let mut response = StatusCode::SEE_OTHER.into_response();
-        response
-            .headers_mut()
-            .insert(LOCATION, HeaderValue::from_static("/"));
+        response.headers_mut().insert(
+            LOCATION,
+            HeaderValue::from_str(return_to.unwrap_or("/")).map_err(WebError::Header)?,
+        );
         response
     };
+    attach_remote_session(
+        &mut response,
+        encoded_session,
+        max_age_seconds,
+        expires_unix,
+    )?;
+    Ok(response)
+}
+
+fn authenticated_fetch_response(
+    encoded_session: &SensitiveString,
+    expires_unix: i64,
+    max_age_seconds: u64,
+    return_to: Option<&str>,
+) -> WebResult<Response> {
+    let mut response = StatusCode::NO_CONTENT.into_response();
+    attach_remote_session(
+        &mut response,
+        encoded_session,
+        max_age_seconds,
+        expires_unix,
+    )?;
+    if let Some(return_to) = return_to {
+        response.headers_mut().insert(
+            "x-torkitten-return-to",
+            HeaderValue::from_str(return_to).map_err(WebError::Header)?,
+        );
+    }
+    Ok(response)
+}
+
+fn attach_remote_session(
+    response: &mut Response,
+    encoded_session: &SensitiveString,
+    max_age_seconds: u64,
+    expires_unix: i64,
+) -> WebResult<()> {
+    let session = SessionToken::parse(encoded_session.expose().to_owned())?;
+    let cookie = remote_session_cookie(&session, max_age_seconds)?;
     response.headers_mut().append(
         SET_COOKIE,
         HeaderValue::from_str(cookie.expose()).map_err(WebError::Header)?,
@@ -601,7 +684,7 @@ fn authenticated_response(
         "x-torkitten-session-expires",
         HeaderValue::from_str(&expires_unix.to_string()).map_err(WebError::Header)?,
     );
-    Ok(response)
+    Ok(())
 }
 
 async fn authorize_mapping(
@@ -615,13 +698,13 @@ async fn authorize_mapping(
     let mapping_id = MappingId::new(required_header(&headers, "x-torkitten-mapping")?)
         .map_err(WebError::Validation)?;
     let Some(session) = cookie(&headers, SESSION_COOKIE) else {
-        return safe_portal_redirect(&state);
+        return mapping_login_redirect(&state, &mapping_id, &headers).await;
     };
     let response = request_daemon(
         &state.daemon_socket,
         RemoteCommand::AuthorizeMapping {
             site_id: state.site_id.clone(),
-            mapping_id,
+            mapping_id: mapping_id.clone(),
             session: SensitiveString::new(session),
         },
     )
@@ -629,20 +712,132 @@ async fn authorize_mapping(
     match response {
         RemoteResponse::MappingAuthorized { .. } => Ok(StatusCode::NO_CONTENT.into_response()),
         RemoteResponse::Error { code, .. } if code == "unauthorized" => {
-            safe_portal_redirect(&state)
+            mapping_login_redirect(&state, &mapping_id, &headers).await
         }
         response => Err(WebError::from_response(response)),
     }
 }
 
-fn safe_portal_redirect(state: &SiteState) -> WebResult<Response> {
+async fn mapping_login_redirect(
+    state: &SiteState,
+    mapping_id: &MappingId,
+    headers: &HeaderMap,
+) -> WebResult<Response> {
+    let return_target = mapping_return_target(state, mapping_id, headers).await;
+    safe_portal_redirect(state, return_target.as_ref())
+}
+
+fn safe_portal_redirect(
+    state: &SiteState,
+    return_target: Option<&MappingReturnTarget>,
+) -> WebResult<Response> {
+    let location = return_target.map_or_else(
+        || format!("https://{}/", state.onion_hostname),
+        |target| {
+            let query = url::form_urlencoded::Serializer::new(String::new())
+                .append_pair("return_mapping", target.mapping_id.as_str())
+                .append_pair("return_to", &target.url)
+                .finish();
+            format!("https://{}/?{query}", state.onion_hostname)
+        },
+    );
     let mut response = StatusCode::SEE_OTHER.into_response();
     response.headers_mut().insert(
         LOCATION,
-        HeaderValue::from_str(&format!("https://{}/", state.onion_hostname))
-            .map_err(WebError::Header)?,
+        HeaderValue::from_str(&location).map_err(WebError::Header)?,
     );
     Ok(response)
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct MappingReturnTarget {
+    mapping_id: MappingId,
+    url: String,
+}
+
+async fn mapping_return_target(
+    state: &SiteState,
+    mapping_id: &MappingId,
+    headers: &HeaderMap,
+) -> Option<MappingReturnTarget> {
+    let method = headers.get("x-forwarded-method")?.to_str().ok()?;
+    if !matches!(method, "GET" | "HEAD") {
+        return None;
+    }
+    if headers.get("x-forwarded-proto")?.to_str().ok()? != "https" {
+        return None;
+    }
+    let host = headers.get("x-forwarded-host")?.to_str().ok()?;
+    let port = host
+        .strip_prefix(state.onion_hostname.as_ref())?
+        .strip_prefix(':')?
+        .parse::<u16>()
+        .ok()?;
+    if host != format!("{}:{port}", state.onion_hostname) {
+        return None;
+    }
+    let raw_uri = headers.get("x-forwarded-uri")?.to_str().ok()?;
+    if raw_uri.len() > MAXIMUM_RETURN_TARGET_BYTES || raw_uri.starts_with("//") {
+        return None;
+    }
+    let uri = raw_uri.parse::<Uri>().ok()?;
+    if uri.scheme().is_some() || uri.authority().is_some() || !uri.path().starts_with('/') {
+        return None;
+    }
+    let response = request_daemon(
+        &state.daemon_socket,
+        RemoteCommand::ValidateMappingReturn {
+            site_id: state.site_id.clone(),
+            mapping_id: mapping_id.clone(),
+            virtual_port: port,
+        },
+    )
+    .await
+    .ok()?;
+    if !matches!(response, RemoteResponse::MappingReturnValidated) {
+        return None;
+    }
+    Some(MappingReturnTarget {
+        mapping_id: mapping_id.clone(),
+        url: format!(
+            "https://{}:{port}{}",
+            state.onion_hostname,
+            uri.path_and_query().map_or("/", |value| value.as_str())
+        ),
+    })
+}
+
+async fn validated_return_target(
+    state: &SiteState,
+    mapping_id: Option<&str>,
+    candidate: Option<&str>,
+) -> Option<String> {
+    let mapping_id = MappingId::new(mapping_id?.to_owned()).ok()?;
+    let candidate = candidate?.trim();
+    if candidate.len() > MAXIMUM_RETURN_TARGET_BYTES {
+        return None;
+    }
+    let url = url::Url::parse(candidate).ok()?;
+    if url.scheme() != "https"
+        || url.host_str()? != state.onion_hostname.as_ref()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.fragment().is_some()
+    {
+        return None;
+    }
+    let virtual_port = url.port()?;
+    let response = request_daemon(
+        &state.daemon_socket,
+        RemoteCommand::ValidateMappingReturn {
+            site_id: state.site_id.clone(),
+            mapping_id,
+            virtual_port,
+        },
+    )
+    .await
+    .ok()?;
+    matches!(response, RemoteResponse::MappingReturnValidated).then(|| url.into())
 }
 
 async fn bootstrap_resource(State(state): State<SiteState>, method: Method, uri: Uri) -> Response {
@@ -898,6 +1093,8 @@ struct PortalTemplate {
     passkeys_enabled: bool,
     password_totp_enabled: bool,
     recovery_codes_enabled: bool,
+    return_to: String,
+    return_mapping: String,
     csrf: String,
 }
 
@@ -1041,6 +1238,29 @@ mod tests {
             stream.write_all(&encoded).await.unwrap();
             stream.shutdown().await.unwrap();
             serde_json::from_slice(&request).unwrap()
+        })
+    }
+
+    fn mock_daemon_sequence(
+        socket: &Path,
+        responses: &[RemoteResponse],
+    ) -> JoinHandle<Vec<RemoteCommand>> {
+        let listener = UnixListener::bind(socket).unwrap();
+        let responses = responses
+            .iter()
+            .map(|response| serde_json::to_vec(response).unwrap())
+            .collect::<Vec<_>>();
+        tokio::spawn(async move {
+            let mut commands = Vec::with_capacity(responses.len());
+            for encoded in responses {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                stream.read_to_end(&mut request).await.unwrap();
+                stream.write_all(&encoded).await.unwrap();
+                stream.shutdown().await.unwrap();
+                commands.push(serde_json::from_slice(&request).unwrap());
+            }
+            commands
         })
     }
 
@@ -1199,6 +1419,75 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn forward_auth_preserves_only_a_daemon_validated_get_target() {
+        let temporary = tempfile::tempdir().unwrap();
+        let socket = temporary.path().join("daemon.sock");
+        let daemon = mock_daemon(&socket, &RemoteResponse::MappingReturnValidated);
+        let response = auth_router(site_state(socket))
+            .oneshot(
+                Request::builder()
+                    .uri("/authorize")
+                    .header("x-torkitten-site", "alpha")
+                    .header("x-torkitten-mapping", "app")
+                    .header("x-forwarded-method", "GET")
+                    .header("x-forwarded-proto", "https")
+                    .header("x-forwarded-host", format!("{ONION}:8443"))
+                    .header("x-forwarded-uri", "/api/items?q=one%20two")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let location = response.headers().get(LOCATION).unwrap().to_str().unwrap();
+        let location = url::Url::parse(location).unwrap();
+        let query = location.query_pairs().collect::<HashMap<_, _>>();
+        assert_eq!(location.host_str(), Some(ONION));
+        assert_eq!(query.get("return_mapping").unwrap(), "app");
+        assert_eq!(
+            query.get("return_to").unwrap(),
+            &format!("https://{ONION}:8443/api/items?q=one%20two")
+        );
+        assert!(matches!(
+            daemon.await.unwrap(),
+            RemoteCommand::ValidateMappingReturn { site_id, mapping_id, virtual_port }
+                if site_id.as_str() == "alpha"
+                    && mapping_id.as_str() == "app"
+                    && virtual_port == 8443
+        ));
+    }
+
+    #[tokio::test]
+    async fn forward_auth_drops_unsafe_or_non_replayable_return_targets() {
+        for (method, host, uri) in [
+            ("POST", format!("{ONION}:8443"), "/submit"),
+            ("GET", "attacker.example:8443".to_owned(), "/"),
+            ("GET", format!("{ONION}:8443"), "//attacker.example/"),
+        ] {
+            let response = auth_router(site_state(PathBuf::from("/unused/daemon.sock")))
+                .oneshot(
+                    Request::builder()
+                        .uri("/authorize")
+                        .header("x-torkitten-site", "alpha")
+                        .header("x-torkitten-mapping", "app")
+                        .header("x-forwarded-method", method)
+                        .header("x-forwarded-proto", "https")
+                        .header("x-forwarded-host", host)
+                        .header("x-forwarded-uri", uri)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::SEE_OTHER);
+            assert_eq!(
+                response.headers().get(LOCATION).unwrap(),
+                &format!("https://{ONION}/")
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn portal_never_discloses_local_upstream_targets() {
         let temporary = tempfile::tempdir().unwrap();
         let socket = temporary.path().join("daemon.sock");
@@ -1228,6 +1517,8 @@ mod tests {
         let body = response.into_body().collect().await.unwrap().to_bytes();
         let body = String::from_utf8(body.to_vec()).unwrap();
         assert!(body.contains(&format!("https://{ONION}:8443/")));
+        assert!(body.contains("Guest account: Family"));
+        assert!(body.contains("only the applications assigned to it"));
         assert!(body.contains("/assets/app.js"));
         assert!(body.contains("data-logout"));
         assert!(body.contains("data-revoke-other-sessions"));
@@ -1286,6 +1577,61 @@ mod tests {
                 second_factor: GuestSecondFactor::Totp(_),
                 ..
             } if guest_id.as_str() == "family"
+        ));
+    }
+
+    #[tokio::test]
+    async fn password_login_returns_to_a_revalidated_mapping_path() {
+        let temporary = tempfile::tempdir().unwrap();
+        let socket = temporary.path().join("daemon.sock");
+        let session = SessionToken::generate().unwrap();
+        let daemon = mock_daemon_sequence(
+            &socket,
+            &[
+                RemoteResponse::MappingReturnValidated,
+                RemoteResponse::GuestAuthenticated {
+                    session: SensitiveString::new(session.expose()),
+                    expires_unix: 2_000_000_000,
+                    max_age_seconds: 2_592_000,
+                },
+            ],
+        );
+        let csrf = CsrfToken::generate().unwrap();
+        let target = format!("https://{ONION}:8443/api/items?q=one%20two");
+        let body = url::form_urlencoded::Serializer::new(String::new())
+            .append_pair("guest_id", "family")
+            .append_pair("password", "correct horse battery staple")
+            .append_pair("factor_kind", "totp")
+            .append_pair("factor", "123456")
+            .append_pair("return_mapping", "app")
+            .append_pair("return_to", &target)
+            .append_pair("csrf", csrf.expose())
+            .finish();
+        let response = portal_router(site_state(socket))
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/login")
+                    .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .header(ORIGIN, format!("https://{ONION}"))
+                    .header(COOKIE, format!("{CSRF_COOKIE}={}", csrf.expose()))
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert_eq!(response.headers().get(LOCATION).unwrap(), &target);
+        let commands = daemon.await.unwrap();
+        assert!(matches!(
+            &commands[0],
+            RemoteCommand::ValidateMappingReturn { mapping_id, virtual_port, .. }
+                if mapping_id.as_str() == "app" && *virtual_port == 8443
+        ));
+        assert!(matches!(
+            &commands[1],
+            RemoteCommand::AuthenticateGuest { guest_id, .. }
+                if guest_id.as_str() == "family"
         ));
     }
 
@@ -1407,6 +1753,8 @@ mod tests {
             passkeys_enabled: false,
             password_totp_enabled: true,
             recovery_codes_enabled: false,
+            return_to: String::new(),
+            return_mapping: String::new(),
             csrf: "csrf".to_owned(),
         }
         .render()
@@ -1423,6 +1771,8 @@ mod tests {
             passkeys_enabled: true,
             password_totp_enabled: false,
             recovery_codes_enabled: false,
+            return_to: String::new(),
+            return_mapping: String::new(),
             csrf: "csrf".to_owned(),
         }
         .render()
@@ -1476,20 +1826,26 @@ mod tests {
         let temporary = tempfile::tempdir().unwrap();
         let socket = temporary.path().join("daemon.sock");
         let session = SessionToken::generate().unwrap();
-        let daemon = mock_daemon(
+        let daemon = mock_daemon_sequence(
             &socket,
-            &RemoteResponse::GuestAuthenticated {
-                session: SensitiveString::new(session.expose()),
-                expires_unix: 2_000_000_000,
-                max_age_seconds: 2_592_000,
-            },
+            &[
+                RemoteResponse::MappingReturnValidated,
+                RemoteResponse::GuestAuthenticated {
+                    session: SensitiveString::new(session.expose()),
+                    expires_unix: 2_000_000_000,
+                    max_age_seconds: 2_592_000,
+                },
+            ],
         );
         let csrf = CsrfToken::generate().unwrap();
         let ceremony = SessionToken::generate().unwrap();
+        let target = format!("https://{ONION}:8443/api/items?q=one%20two");
         let body = serde_json::json!({
             "guest_id": "family",
             "ceremony": ceremony.expose(),
-            "credential": {"id": "credential", "signature": "secret-assertion"}
+            "credential": {"id": "credential", "signature": "secret-assertion"},
+            "return_mapping": "app",
+            "return_to": &target,
         });
         let response = portal_router(site_state(socket))
             .oneshot(
@@ -1505,7 +1861,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
         let set_cookie = response
             .headers()
             .get(SET_COOKIE)
@@ -1514,9 +1870,18 @@ mod tests {
             .unwrap();
         assert!(set_cookie.starts_with("__Host-torkitten_session="));
         assert!(set_cookie.contains("; Secure; HttpOnly; SameSite=Strict"));
-        let command = daemon.await.unwrap();
+        assert_eq!(
+            response.headers().get("x-torkitten-return-to").unwrap(),
+            &target
+        );
+        let commands = daemon.await.unwrap();
         assert!(matches!(
-            &command,
+            &commands[0],
+            RemoteCommand::ValidateMappingReturn { mapping_id, virtual_port, .. }
+                if mapping_id.as_str() == "app" && *virtual_port == 8443
+        ));
+        assert!(matches!(
+            &commands[1],
             RemoteCommand::FinishPasskeyAuthentication {
                 guest_id,
                 ceremony: received_ceremony,
@@ -1526,6 +1891,6 @@ mod tests {
                 && received_ceremony.expose() == ceremony.expose()
                 && credential.expose().contains("secret-assertion")
         ));
-        assert!(!format!("{command:?}").contains("secret-assertion"));
+        assert!(!format!("{commands:?}").contains("secret-assertion"));
     }
 }
