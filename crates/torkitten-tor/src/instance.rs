@@ -1,4 +1,5 @@
 use std::{
+    collections::HashSet,
     ffi::OsStr,
     fmt::Write as FmtWrite,
     fs::{self, File, OpenOptions},
@@ -113,7 +114,67 @@ impl TorInstance {
     /// Returns an error for invalid configuration, unsafe paths, an ambiguous
     /// legacy identity, randomness failure, or filesystem failure.
     pub fn prepare(&self, config: &GatewayConfig) -> Result<(), TorError> {
+        self.prepare_with_bootstrap(config, &HashSet::new())
+    }
+
+    /// Writes configuration with temporary certificate-bootstrap listeners
+    /// enabled only for the explicitly selected sites.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid configuration, an unknown or disabled
+    /// bootstrap site, unsafe paths, or filesystem failure.
+    pub fn prepare_with_bootstrap(
+        &self,
+        config: &GatewayConfig,
+        bootstrap_sites: &HashSet<SiteId>,
+    ) -> Result<(), TorError> {
+        self.prepare_directories(config, bootstrap_sites)?;
+        let rendered = self.render_torrc(config, bootstrap_sites)?;
+        atomic_write(&self.torrc_path(), rendered.as_bytes(), 0o600)
+    }
+
+    /// Validates a staged configuration with the bundled Tor binary before
+    /// atomically replacing the active file.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid input, filesystem failure, or a Tor
+    /// validation failure. The active configuration is unchanged on failure.
+    pub fn prepare_validated(
+        &self,
+        config: &GatewayConfig,
+        bootstrap_sites: &HashSet<SiteId>,
+    ) -> Result<(), TorError> {
+        self.prepare_directories(config, bootstrap_sites)?;
+        let rendered = self.render_torrc(config, bootstrap_sites)?;
+        let (temporary_path, mut temporary) =
+            create_temporary(&self.paths.state_directory, Some(OsStr::new("torrc")))?;
+        if let Err(error) = temporary
+            .write_all(rendered.as_bytes())
+            .and_then(|()| temporary.sync_all())
+            .and_then(|()| fs::set_permissions(&temporary_path, fs::Permissions::from_mode(0o600)))
+        {
+            let _ = fs::remove_file(&temporary_path);
+            return Err(error.into());
+        }
+        let output = self.verify_command_for(&temporary_path).output()?;
+        if !output.status.success() {
+            let _ = fs::remove_file(&temporary_path);
+            return Err(command_failure(output.status.code(), &output.stderr));
+        }
+        fs::rename(&temporary_path, self.torrc_path())?;
+        File::open(&self.paths.state_directory)?.sync_all()?;
+        Ok(())
+    }
+
+    fn prepare_directories(
+        &self,
+        config: &GatewayConfig,
+        bootstrap_sites: &HashSet<SiteId>,
+    ) -> Result<(), TorError> {
         config.validate()?;
+        validate_bootstrap_sites(config, bootstrap_sites)?;
         ensure_private_directory(&self.paths.state_directory)?;
         ensure_private_directory(&self.paths.runtime_directory)?;
         ensure_private_directory(&self.paths.state_directory.join("data"))?;
@@ -126,8 +187,7 @@ impl TorInstance {
             ensure_private_directory(&self.onion_directory(&site.id).join("authorized_clients"))?;
         }
 
-        let rendered = self.render_torrc(config)?;
-        atomic_write(&self.torrc_path(), rendered.as_bytes(), 0o600)
+        Ok(())
     }
 
     /// Installs one authorized client's public X25519 key for exactly one site.
@@ -185,12 +245,16 @@ impl TorInstance {
     /// configuration, with no system or user defaults.
     #[must_use]
     pub fn command(&self) -> Command {
+        self.command_for(&self.torrc_path())
+    }
+
+    fn command_for(&self, torrc_path: &Path) -> Command {
         let mut command = Command::new(&self.paths.binary);
         command
             .arg("--defaults-torrc")
             .arg("/dev/null")
             .arg("-f")
-            .arg(self.torrc_path())
+            .arg(torrc_path)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -201,12 +265,20 @@ impl TorInstance {
     /// complete configuration without joining the Tor network.
     #[must_use]
     pub fn verify_command(&self) -> Command {
-        let mut command = self.command();
+        self.verify_command_for(&self.torrc_path())
+    }
+
+    fn verify_command_for(&self, torrc_path: &Path) -> Command {
+        let mut command = self.command_for(torrc_path);
         command.arg("--verify-config");
         command
     }
 
-    fn render_torrc(&self, config: &GatewayConfig) -> Result<String, TorError> {
+    fn render_torrc(
+        &self,
+        config: &GatewayConfig,
+        bootstrap_sites: &HashSet<SiteId>,
+    ) -> Result<String, TorError> {
         let mut output = String::new();
         setting(
             &mut output,
@@ -263,7 +335,9 @@ impl TorInstance {
                  HiddenServiceAllowUnknownPorts 0\n\
                  HiddenServiceNumIntroductionPoints 3\n",
             );
-            hidden_service_port(&mut output, 80, &self.bootstrap_socket(&site.id))?;
+            if bootstrap_sites.contains(&site.id) {
+                hidden_service_port(&mut output, 80, &self.bootstrap_socket(&site.id))?;
+            }
             hidden_service_port(&mut output, 443, &self.caddy_socket(&site.id, 443))?;
 
             let mut mappings = site
@@ -334,6 +408,34 @@ fn hidden_service_port(
     writeln!(output, "HiddenServicePort {virtual_port} {target}")
         .expect("writing to a String cannot fail");
     Ok(())
+}
+
+fn validate_bootstrap_sites(
+    config: &GatewayConfig,
+    bootstrap_sites: &HashSet<SiteId>,
+) -> Result<(), TorError> {
+    for site_id in bootstrap_sites {
+        if !config
+            .sites
+            .iter()
+            .any(|site| site.enabled && site.id == *site_id)
+        {
+            return Err(TorError::BootstrapSiteUnavailable(site_id.clone()));
+        }
+    }
+    Ok(())
+}
+
+fn command_failure(status: Option<i32>, stderr: &[u8]) -> TorError {
+    let detail = String::from_utf8_lossy(stderr)
+        .chars()
+        .filter(|character| !character.is_control() || matches!(character, '\n' | '\t'))
+        .take(4096)
+        .collect::<String>();
+    TorError::ValidationFailed {
+        status,
+        detail: detail.trim().to_owned(),
+    }
 }
 
 fn quoted_path(path: &Path) -> Result<String, TorError> {
@@ -414,10 +516,14 @@ pub enum TorError {
     LegacyIdentityUnassigned,
     #[error("legacy and multi-site onion identities both exist at {path}", path = .0.display())]
     LegacyIdentityConflict(PathBuf),
+    #[error("certificate bootstrap site is missing or disabled: {0}")]
+    BootstrapSiteUnavailable(SiteId),
     #[error("could not allocate a temporary filename")]
     TemporaryNameExhausted,
     #[error("operating-system randomness failed: {0}")]
     Random(getrandom::Error),
+    #[error("Tor configuration validation failed with status {status:?}: {detail}")]
+    ValidationFailed { status: Option<i32>, detail: String },
     #[error(transparent)]
     ClientAuth(#[from] ClientAuthError),
     #[error(transparent)]
@@ -500,7 +606,7 @@ mod tests {
         }
         assert!(torrc.contains("ClientOnly 1"));
         assert_eq!(torrc.matches("HiddenServiceDir ").count(), 2);
-        assert_eq!(torrc.matches("HiddenServicePort 80 ").count(), 2);
+        assert_eq!(torrc.matches("HiddenServicePort 80 ").count(), 0);
         assert_eq!(torrc.matches("HiddenServicePort 443 ").count(), 2);
         assert_eq!(torrc.matches("HiddenServicePort 8443 ").count(), 2);
         assert!(!torrc.contains("HiddenServicePort 8444 "));
@@ -534,6 +640,25 @@ mod tests {
                 .onion_directory(&SiteId::new("disabled").unwrap())
                 .is_dir()
         );
+    }
+
+    #[test]
+    fn opens_bootstrap_only_for_an_explicit_enabled_site() {
+        let temporary = tempfile::tempdir().unwrap();
+        let instance = instance(&temporary);
+        let alpha = SiteId::new("alpha").unwrap();
+        instance
+            .prepare_with_bootstrap(&config(), &HashSet::from([alpha.clone()]))
+            .unwrap();
+        let torrc = fs::read_to_string(instance.torrc_path()).unwrap();
+        assert_eq!(torrc.matches("HiddenServicePort 80 ").count(), 1);
+        assert!(torrc.contains(instance.bootstrap_socket(&alpha).to_str().unwrap()));
+
+        let disabled = SiteId::new("disabled").unwrap();
+        assert!(matches!(
+            instance.prepare_with_bootstrap(&config(), &HashSet::from([disabled.clone()])),
+            Err(TorError::BootstrapSiteUnavailable(site_id)) if site_id == disabled
+        ));
     }
 
     #[test]
@@ -616,13 +741,8 @@ mod tests {
             temporary.path().join("state/tor"),
             temporary.path().join("run/tor"),
         ));
-        instance.prepare(&config()).unwrap();
-        let output = instance.verify_command().output().unwrap();
-        assert!(
-            output.status.success(),
-            "Tor rejected the generated configuration:\nstdout:\n{}\nstderr:\n{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
+        instance
+            .prepare_validated(&config(), &HashSet::new())
+            .unwrap();
     }
 }
