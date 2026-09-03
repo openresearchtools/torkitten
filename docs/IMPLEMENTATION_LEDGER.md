@@ -87,6 +87,9 @@ Current verified partial evidence:
 
 Required before M1 completion:
 
+- Prevent mapped applications from receiving Torkitten session/CSRF cookies or
+  overwriting the reserved cookie names while preserving every application-owned
+  cookie. Prove the isolation with real-Caddy request and response tests.
 - Complete authenticated dashboard and reopen evidence on Ubuntu 26.04 without
   changing the user's VM/display configuration.
 - Exercise live guest reset/fresh enrollment, staged password then TOTP, and
@@ -236,6 +239,26 @@ one-second `enp1s0` sample. This does not prove overload resistance.
 Required behavior/evidence: bounded load and connection tests, rate/size limits,
 resource ceilings, fail-closed behavior under auth-service pressure, redacted
 logs, and emergency-stop verification. Do not assist in operating malware.
+
+### SEC-003 — Hostname-wide login cookie crosses protected application ports
+
+Status: OPEN; CRITICAL (M1)
+
+Required behavior: one secure, host-only session created on onion port 443 must
+authorize every permitted HTTPS mapping port. Because browser cookies are not
+isolated by port, Caddy must present the Torkitten cookie only to the trusted
+authorization endpoint. Before contacting the mapped application, it must
+remove Torkitten session and CSRF cookie pairs while preserving all
+application-owned cookies. Responses from mapped applications must not be able
+to set, replace, expire, or shadow reserved Torkitten cookie names.
+
+Current evidence: `torkitten-proxy` performs the fail-closed authorization
+pre-check, but its mapping reverse proxy currently forwards the request cookie
+header unchanged and has no selective reserved-name `Set-Cookie` response
+filter. Code inspection therefore found no isolation proof. Required automated
+evidence includes real-Caddy tests for multiple Cookie and Set-Cookie fields,
+reserved-name prefix/case handling, ordinary application sessions, WebSockets,
+SSE, uploads, and authorization failure.
 
 ### BOUNDARY-001 — Security surfaces must not cross code/listener/credential/UI boundaries
 
