@@ -1,0 +1,53 @@
+{
+  "name": "authelia-website",
+  "version": "1.9.0",
+  "description": "The Authelia Website",
+  "author": "Authelia Contributors",
+  "license": "Apache-2.0",
+  "scripts": {
+    "create": "hugo new",
+    "dev": "hugo server --disableFastRender --noHTTPCache",
+    "ci": "hugo server --disableFastRender --noHTTPCache --disableLiveReload",
+    "format": "prettier **/** -w -c",
+    "build": "hugo --minify --gc",
+    "preview": "vite preview --outDir public"
+  },
+  "dependencies": {
+    "@docsearch/css": "4.6.3",
+    "@docsearch/js": "4.6.3",
+    "@tabler/icons": "3.44.0",
+    "@thulite/core": "1.5.9",
+    "@thulite/doks-core": "1.9.3",
+    "@thulite/images": "3.3.4",
+    "@thulite/inline-svg": "1.2.2",
+    "@thulite/seo": "2.4.3",
+    "bootstrap-icons": "1.13.1",
+    "thulite": "2.6.5"
+  },
+  "devDependencies": {
+    "@changesets/changelog-github": "0.7.0",
+    "@changesets/cli": "2.31.0",
+    "@fullhuman/postcss-purgecss": "8.0.0",
+    "autoprefixer": "10.5.0",
+    "basiclightbox": "5.0.4",
+    "bootstrap": "5.3.8",
+    "clipboard": "2.0.11",
+    "flexsearch": "0.8.212",
+    "postcss": "8.5.15",
+    "postcss-cli": "11.0.1",
+    "prettier": "3.8.3",
+    "vite": "8.0.14"
+  },
+  "optionalDependencies": {
+    "hugo-extended": "0.161.1"
+  },
+  "engines": {
+    "node": ">=24.13.0",
+    "pnpm": "11"
+  },
+  "packageManager": "pnpm@11.3.0",
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  }
+}

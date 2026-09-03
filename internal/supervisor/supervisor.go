@@ -279,6 +279,7 @@ type commandFactory struct{}
 func (commandFactory) New(spec Spec, output io.Writer) Process {
 	command := exec.Command(spec.Path, spec.Args...)
 	command.Dir = spec.Dir
+	command.Env = componentEnvironment(spec.Name)
 	command.Stdout = output
 	command.Stderr = output
 	command.Stdin = nil
@@ -287,6 +288,23 @@ func (commandFactory) New(spec Spec, output io.Writer) Process {
 		Setpgid:   true,
 	}
 	return &commandProcess{command: command}
+}
+
+func componentEnvironment(name string) []string {
+	environment := make([]string, 0, len(os.Environ())+2)
+	for _, variable := range os.Environ() {
+		key, _, _ := strings.Cut(variable, "=")
+		if key == "DO_NOT_TRACK" || key == "GOTELEMETRY" || strings.HasPrefix(key, "OTEL_") ||
+			strings.HasPrefix(key, "AUTHELIA_TELEMETRY_") {
+			continue
+		}
+		environment = append(environment, variable)
+	}
+	environment = append(environment, "DO_NOT_TRACK=1", "GOTELEMETRY=off", "OTEL_SDK_DISABLED=true")
+	if name == "authelia" {
+		environment = append(environment, "AUTHELIA_TELEMETRY_METRICS_ENABLED=false")
+	}
+	return environment
 }
 
 type commandProcess struct {

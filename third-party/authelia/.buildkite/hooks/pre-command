@@ -1,0 +1,101 @@
+#!/usr/bin/env bash
+
+set +u
+
+INTEGRATION() {
+  if [[ "${BUILDKITE_BRANCH}" =~ ^renovate- ]]; then
+    sed -i "s/${CONTAINER}/${CONTAINER}:renovate/" "${FILE}"
+  elif [[ "${BUILDKITE_BRANCH}" != "master" ]] && [[ ! "${BUILDKITE_BRANCH}" =~ .*:.* ]]; then
+    sed -i "s/${CONTAINER}/${CONTAINER}:${BUILDKITE_BRANCH}/" "${FILE}"
+  elif [[ "${BUILDKITE_BRANCH}" != "master" ]] && [[ "${BUILDKITE_BRANCH}" =~ .*:.* ]]; then
+    sed -i "s/${CONTAINER}/${CONTAINER}:PR${BUILDKITE_PULL_REQUEST}/" "${FILE}"
+  fi
+}
+
+if [[ "${BUILDKITE_LABEL}" == ":service_dog: Linting" ]]; then
+  pnpm -C web install
+fi
+
+if [[ "${BUILDKITE_LABEL}" == ":grype: Vulnerability Scanning" ]]; then
+  if [[ "${CI_PRIVATE}" == "true" ]]; then
+    echo "${DOCKER_PASSWORD}" | docker login -u "${DOCKER_USERNAME}" --password-stdin
+  fi
+
+  if [[ "${CI_MERGE_QUEUE}" == "true" ]]; then
+    PR_NUMBER=$(echo "${BUILDKITE_BRANCH}" | sed -E 's|^gh-readonly-queue/.*/pr-([0-9]+)-.*|\1|')
+    PR_HEAD=$(curl -fsL --retry 3 "https://api.github.com/repos/authelia/authelia/pulls/${PR_NUMBER}")
+    PR_BRANCH=$(echo "${PR_HEAD}" | jq -r 'if .head.repo.full_name != .base.repo.full_name then .head.label else .head.ref end')
+
+    PR_BUILD=$(curl -fsL --retry 3 -H "Authorization: Bearer ${BUILDKITE_TOKEN}" \
+      "https://api.buildkite.com/v2/organizations/authelia/pipelines/authelia/builds?branch=${PR_BRANCH}&state=passed&per_page=1&exclude_pipeline=true")
+
+    BUILD_ID=$(echo "${PR_BUILD}" | jq -r 'first | .id')
+
+    if [[ -n "${BUILD_ID}" && "${BUILD_ID}" != "null" ]]; then
+      buildkite-agent artifact download "*.cdx.json" . --build "${BUILD_ID}"
+    else
+      echo "--- :warning: Could not find a passed build for PR#${PR_NUMBER}"
+    fi
+  else
+    buildkite-agent artifact download "*.cdx.json" .
+  fi
+fi
+
+if [[ "${BUILDKITE_LABEL}" == ":docker: Build Image [coverage]" ]]; then
+  cp -R /buildkite/.local .
+fi
+
+if [[ "${BUILDKITE_LABEL}" =~ :selenium: ]]; then
+  echo "--- :docker: Extract and load build container"
+  mkdir coverage
+  buildkite-agent artifact download "authelia-image-coverage.*" .
+
+  if [[ "${SUITE}" == "Kubernetes" ]]; then
+    zstd -d authelia-image-coverage.tar.zst --stdout > ./internal/suites/example/kube/authelia-image-coverage.tar
+  else
+    zstdcat "authelia-image-coverage.tar.zst" | docker load
+  fi
+
+  BUILD_FLAG=""
+  CONTAINER=""
+  FILE=""
+  case "${SUITE}" in
+    DuoPush)
+      BUILD_FLAG="${BUILD_DUO}"
+      CONTAINER="integration-duo"
+      FILE="internal/suites/example/compose/duo-api/compose.yml"
+      ;;
+    HAProxy)
+      BUILD_FLAG="${BUILD_HAPROXY}"
+      CONTAINER="integration-haproxy"
+      FILE="internal/suites/example/compose/haproxy/compose.yml"
+      ;;
+    ActiveDirectory)
+      BUILD_FLAG="${BUILD_SAMBA}"
+      CONTAINER="integration-samba"
+      FILE="internal/suites/example/compose/samba/compose.yml"
+      ;;
+  esac
+  [[ "${BUILD_FLAG}" == "true" ]] && INTEGRATION
+fi
+
+if [[ "${BUILDKITE_LABEL}" == ":docker: Build and Deploy" ]]; then
+  echo "${DOCKER_PASSWORD}" | docker login -u "${DOCKER_USERNAME}" --password-stdin
+fi
+
+if [[ "${BUILDKITE_LABEL}" == ":docker: Deploy Manifest" ]]; then
+  echo "--- :go: :react: :swagger: Extract pre-built binary"
+  PREFIX="authelia"
+  [[ -n "${BUILDKITE_TAG:-}" ]] && PREFIX="authelia-${BUILDKITE_TAG}"
+  for F in linux-amd64 linux-arm linux-arm64; do ARCHIVE="${PREFIX}-${F}.tar.gz"; buildkite-agent artifact download "${ARCHIVE}" .; tar xzf "${ARCHIVE}" --one-top-level="$(echo "${ARCHIVE%.tar.gz}" | sed -E 's/-v[0-9]+\.[0-9]+\.[0-9]+//')" --wildcards "authelia"; done
+fi
+
+if [[ "${BUILDKITE_LABEL}" == ":github: Deploy Artifacts" ]]; then
+  buildkite-agent artifact download "authelia-*.tar.gz*" .
+  buildkite-agent artifact download "authelia_*.deb*" .
+  buildkite-agent artifact download "checksums*" .
+fi
+
+if [[ "${BUILDKITE_LABEL}" == ":debian: :fedora: :ubuntu: Deploy APT" ]]; then
+  buildkite-agent artifact download "authelia_*.deb" .
+fi

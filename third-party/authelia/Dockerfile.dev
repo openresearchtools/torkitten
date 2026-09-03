@@ -1,0 +1,62 @@
+# ========================================
+# ===== Build image for the frontend =====
+# ========================================
+FROM node:25-alpine@sha256:bdf2cca6fe3dabd014ea60163eca3f0f7015fbd5c7ee1b0e9ccb4ced6eb02ef4 AS builder-frontend
+
+WORKDIR /node/src/app
+
+COPY --link web ./
+
+# Install the dependencies and build
+RUN \
+	yarn global add pnpm && \
+	pnpm install --frozen-lockfile --ignore-scripts && \
+	pnpm coverage
+
+# =======================================
+# ===== Build image for the backend =====
+# =======================================
+FROM golang:1.26.3-bookworm@sha256:386d475a660466863d9f8c766fec64d7fdad3edac2c6a05020c09534d71edb4b AS builder-backend
+
+WORKDIR /go/src/app
+
+COPY --link go.mod go.sum ./
+
+RUN \
+	echo ">> Downloading go modules..." && \
+	go mod download
+
+COPY --link / ./
+
+# Prepare static files to be embedded in Go binary
+COPY --link --from=builder-frontend /node/src/internal/server/public_html internal/server/public_html
+
+ARG LDFLAGS_EXTRA
+
+RUN \
+	mv api internal/server/public_html/api && \
+	echo ">> Starting go build..." && \
+	CGO_ENABLED=1 CGO_CPPFLAGS="-D_FORTIFY_SOURCE=2 -fstack-protector-strong" CGO_LDFLAGS="-Wl,-z,relro,-z,now" go build \
+	-tags dev -ldflags "-linkmode=external -s -w ${LDFLAGS_EXTRA}" -trimpath -buildmode=pie -o authelia ./cmd/authelia
+
+# ===================================
+# ===== Authelia official image =====
+# ===================================
+FROM authelia/base:latest@sha256:f98a8d8b2252b839c2a92c8115386b233207313557d77d4ebbb566133dd9ccc6
+
+WORKDIR /app
+
+ENV \
+	PATH="/app:${PATH}" \
+	PUID=0 \
+	PGID=0 \
+	X_AUTHELIA_CONFIG="/config/configuration.yml"
+
+COPY --link --from=builder-backend /go/src/app/authelia /go/src/app/LICENSE /go/src/app/entrypoint.sh /go/src/app/healthcheck.sh ./
+
+COPY --link	--from=builder-backend --chmod=666 /go/src/app/.healthcheck.env ./
+
+EXPOSE 9091
+
+ENTRYPOINT ["/app/entrypoint.sh"]
+HEALTHCHECK --interval=30s --timeout=3s --start-period=1m CMD /app/healthcheck.sh

@@ -2,7 +2,7 @@
 set -euo pipefail
 
 if [[ $# -ne 2 ]]; then
-    echo "usage: $0 <tor|caddy> <release-tag>" >&2
+    echo "usage: $0 <tor|caddy|authelia> <release-tag>" >&2
     exit 2
 fi
 
@@ -15,6 +15,9 @@ case "$component" in
         ;;
     caddy)
         upstream=https://github.com/caddyserver/caddy.git
+        ;;
+    authelia)
+        upstream=https://github.com/authelia/authelia.git
         ;;
     *)
         echo "unknown component: $component" >&2
@@ -38,9 +41,13 @@ esac
 mirror="$build_real/vendor/mirrors/$component.git"
 if [[ -d "$mirror" ]]; then
     git --git-dir="$mirror" remote set-url origin "$upstream"
-    git --git-dir="$mirror" fetch --prune origin "+refs/tags/$release:refs/tags/$release"
+    git --git-dir="$mirror" fetch --no-tags --prune origin \
+        "+refs/tags/$release:refs/tags/$release"
 else
-    git clone --mirror --filter=blob:none "$upstream" "$mirror"
+    git init --bare "$mirror"
+    git --git-dir="$mirror" remote add origin "$upstream"
+    git --git-dir="$mirror" fetch --no-tags --filter=blob:none origin \
+        "+refs/tags/$release:refs/tags/$release"
 fi
 
 tag_object=$(git --git-dir="$mirror" rev-parse "refs/tags/$release")

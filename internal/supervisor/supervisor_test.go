@@ -5,6 +5,8 @@ import (
 	"errors"
 	"io"
 	"os"
+	"os/exec"
+	"strings"
 	"sync"
 	"syscall"
 	"testing"
@@ -102,6 +104,49 @@ func TestSpecRejectsRelativeExecutable(t *testing.T) {
 	_, err := New([]Spec{{Name: "tor", Path: "bin/tor"}}, Options{})
 	if err == nil {
 		t.Fatal("relative executable path was accepted")
+	}
+}
+
+func TestCommandFactoryForcesComponentTelemetryOff(t *testing.T) {
+	t.Setenv("GOTELEMETRY", "on")
+	t.Setenv("DO_NOT_TRACK", "0")
+	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "https://collector.invalid")
+	t.Setenv("OTEL_SDK_DISABLED", "false")
+	t.Setenv("AUTHELIA_TELEMETRY_METRICS_ENABLED", "true")
+
+	process := commandFactory{}.New(
+		Spec{Name: "authelia", Path: "/opt/torkitten/bin/authelia"}, io.Discard,
+	)
+	command := process.(*commandProcess).command
+	assertCommandEnvironment(t, command,
+		map[string]string{
+			"DO_NOT_TRACK":                       "1",
+			"GOTELEMETRY":                        "off",
+			"OTEL_SDK_DISABLED":                  "true",
+			"AUTHELIA_TELEMETRY_METRICS_ENABLED": "false",
+		},
+		[]string{"OTEL_EXPORTER_OTLP_ENDPOINT"},
+	)
+}
+
+func assertCommandEnvironment(t *testing.T, command *exec.Cmd, expected map[string]string, absent []string) {
+	t.Helper()
+	actual := make(map[string]string, len(command.Env))
+	for _, variable := range command.Env {
+		key, value, found := strings.Cut(variable, "=")
+		if found {
+			actual[key] = value
+		}
+	}
+	for key, value := range expected {
+		if actual[key] != value {
+			t.Fatalf("%s=%q, want %q", key, actual[key], value)
+		}
+	}
+	for _, key := range absent {
+		if _, exists := actual[key]; exists {
+			t.Fatalf("%s was inherited by the component", key)
+		}
 	}
 }
 

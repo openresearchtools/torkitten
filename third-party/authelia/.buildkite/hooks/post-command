@@ -1,0 +1,87 @@
+#!/usr/bin/env bash
+set +eu
+
+cleanup_tags() {
+  local docker_list="${1}" github_list="${2}"
+  local tag i ghcr_version
+  local -a tagid
+  for tag in $(comm -23 <(echo "${docker_list}") <(echo "${github_list}")); do
+    echo "Removing tag ${tag} from docker.io"
+    curl -fsL --retry 3 -o /dev/null -X DELETE -H "Authorization: JWT ${authtoken}" "https://hub.docker.com/v2/repositories/authelia/authelia/tags/${tag}/"
+    for i in {1..5}; do
+      for ghcr_version in $(curl -fsL --retry 3 -H "Authorization: Bearer ${GHCR_PASSWORD}" -H "Accept: application/vnd.github.v3+json" "https://api.github.com/orgs/authelia/packages/container/authelia/versions?page=${i}&per_page=100" | jq -j --arg tag "${tag}" '.[] | select(.metadata.container.tags[] | contains($tag)) | .metadata.container.tags[], ",", .id, "\n"'); do
+        IFS=',' read -ra tagid <<< "${ghcr_version}"
+        echo "Removing tag ${tagid[0]} with id ${tagid[1]} from ghcr.io"
+        curl -fsL --retry 3 -o /dev/null -X DELETE -H "Authorization: Bearer ${GHCR_PASSWORD}" -H "Accept: application/vnd.github.v3+json" "https://api.github.com/orgs/authelia/packages/container/authelia/versions/${tagid[1]}"
+      done
+    done
+  done
+}
+
+if [[ ${BUILDKITE_PULL_REQUEST} != "false" ]] && [[ ${CI_PRIVATE} != "true" ]]; then
+  if [[ ${BUILDKITE_LABEL} == ":service_dog: Linting" ]]; then
+    echo "--- :go::service_dog: Provide in-line commentary for pull request"
+    lint.sh -reporter=github-pr-review
+  fi
+fi
+
+if [[ ! ${BUILDKITE_BRANCH} =~ ^(v.*) ]] && [[ ${BUILDKITE_COMMAND_EXIT_STATUS} == 0 ]]; then
+  if [[ ${BUILDKITE_LABEL} == ":hammer_and_wrench: Unit Test" ]] || [[ ${BUILDKITE_LABEL} =~ :selenium: ]]; then
+    echo "--- :codecov: Upload coverage reports"
+    NAME="UnitTest"
+    if [[ ${SUITE} != "" ]]; then
+      NAME=${SUITE}
+      go tool covdata percent -i=coverage
+      go tool covdata textfmt -i=coverage -o coverage.txt
+    fi
+    if [[ ${BUILDKITE_AGENT_META_DATA_CODECOV} == "verbose" ]]; then
+      BUILDKITE_AGENT_META_DATA_CODECOV="-v"
+    fi
+    codecov -Z -c -f 'coverage*.txt' -n "${NAME}" -F backend "${BUILDKITE_AGENT_META_DATA_CODECOV}"
+    if [[ ! ${NAME} =~ ^(BypassAll|CLI|PAM)$ ]]; then
+      if [[ ${BUILDKITE_LABEL} =~ :selenium: ]]; then
+        pnpm -C web report
+      fi
+      codecov -Z -c -f '!Dockerfile*' -f '!*.go' -f '!*.tar' -f '!*.zst' -n "${NAME}" -F frontend "${BUILDKITE_AGENT_META_DATA_CODECOV}"
+    fi
+  fi
+fi
+
+if [[ ${BUILDKITE_LABEL} =~ :selenium: ]] || [[ ${BUILDKITE_LABEL} =~ :docker:\ Build\ Image ]]; then
+  mapfile -t CONTAINERS < <(docker ps -a -q)
+  if [[ ${#CONTAINERS[@]} -gt 0 ]]; then
+    echo "--- :docker: Remove lingering containers"
+    docker rm -f "${CONTAINERS[@]}"
+  fi
+fi
+
+if [[ ${BUILDKITE_LABEL} == ":hammer_and_wrench: Unit Test" ]]; then
+  buildkite-agent annotate --style "success" --context "ctx-success" < <(bash .buildkite/annotations/artifacts.sh)
+fi
+
+if [[ ${BUILDKITE_LABEL} =~ :docker:\ Deploy ]]; then
+  docker logout
+  docker logout ghcr.io
+fi
+
+if [[ ${BUILDKITE_LABEL} == ":grype: Vulnerability Scanning" ]] && [[ ${CI_PRIVATE} == "true" ]]; then
+  docker logout
+fi
+
+if [[ ${BUILDKITE_LABEL} == ":docker: Deploy Manifest" ]] && [[ ${BUILDKITE_BRANCH} == "master" ]] && [[ ${BUILDKITE_PULL_REQUEST} == "false" ]]; then
+  anontoken=$(curl -fsL --retry 3 'https://auth.docker.io/token?service=registry.docker.io&scope=repository:authelia/authelia:pull' | jq -r .token)
+  authtoken=$(curl -fs --retry 3 -H "Content-Type: application/json" -X POST -d "{\"username\": \"${DOCKER_TOKEN_USERNAME}\", \"password\": \"${DOCKER_TOKEN}\"}" https://hub.docker.com/v2/users/login/ | jq -r .token)
+  if [[ -z "${authtoken}" ]]; then
+    echo ":warning: docker.io auth token not acquired; DockerHub tag deletions will fail." >&2
+  fi
+
+  echo "--- :docker: Removing tags for deleted branches"
+  dockerbranchtags=$(curl -fsL --retry 3 -H "Authorization: Bearer ${anontoken}" https://registry-1.docker.io/v2/authelia/authelia/tags/list | jq -r '.tags[] | select(startswith("PR") | not)' | sed -r '/^(latest|master|develop|v.*|([[:digit:]]+)\.?([[:digit:]]+)?\.?([[:digit:]]+)?)$/d' | sort)
+  githubbranches=$(curl -fs --retry 3 https://api.github.com/repos/authelia/authelia/branches?per_page=100 | jq -r '.[].name' | sort)
+  cleanup_tags "${dockerbranchtags}" "${githubbranches}"
+
+  echo "--- :docker: Removing tags for merged or closed pull requests"
+  dockerprtags=$(curl -fsL --retry 3 -H "Authorization: Bearer ${anontoken}" https://registry-1.docker.io/v2/authelia/authelia/tags/list | jq -r '.tags[] | select(startswith("PR"))' | sort)
+  githubprs=$(curl -fs --retry 3 https://api.github.com/repos/authelia/authelia/pulls?per_page=100 | jq -r '.[].number' | sed -e 's/^/PR/' | sort)
+  cleanup_tags "${dockerprtags}" "${githubprs}"
+fi

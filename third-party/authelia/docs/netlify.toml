@@ -1,0 +1,96 @@
+[build]
+  publish = "public"
+  functions = "functions"
+  command = "pnpm build"
+
+[build.environment]
+  NODE_VERSION = "24.13.1"
+  NPM_VERSION = "11.8.0"
+  HUGO_VERSION = "0.160.1"
+  GO_VERSION = "1.26.1"
+  DART_SASS_VERSION = "1.97.3"
+  PNPM_FLAGS = "--no-optional"
+
+[context.staging]
+  command = "pnpm build -b $DEPLOY_PRIME_URL"
+
+[context.deploy-preview]
+  command = "pnpm build -b $DEPLOY_PRIME_URL"
+
+[context.branch-deploy]
+  command = "pnpm build -b $DEPLOY_PRIME_URL"
+
+[context.next.environment]
+  HUGO_ENV = "next"
+
+[dev]
+  framework = "#custom"
+  command = "pnpm dev"
+  targetPort = 1313
+  port = 8888
+  publish = "public"
+  autoLaunch = false
+
+[[redirects]]
+	from = "/*"
+	to = "/404/"
+	status = 404
+
+[[redirects]]
+  from = "/l/apt"
+  to = "/integration/deployment/bare-metal/#add-the-apt-repository"
+  status = 301
+
+[[redirects]]
+  from = "/l/charts"
+  to = "https://charts.authelia.com"
+  status = 301
+
+[[redirects]]
+  from = "/l/translate"
+  to = "https://translate.authelia.com"
+  status = 301
+
+[[redirects]]
+  from = "/l/github"
+  to = "https://github.com/authelia/authelia"
+  status = 301
+
+[[redirects]]
+  from = "/l/bug"
+  to = "https://github.com/authelia/authelia/issues/new?template=bug-report.yml"
+  status = 301
+
+[[redirects]]
+  from = "/l/fr"
+  to = "https://github.com/authelia/authelia/issues/new?template=feature-request.yml"
+  status = 301
+
+[[redirects]]
+  from = "/docs"
+  to = "/"
+  status = 301
+
+[[redirects]]
+  from = "/docs/"
+  to = "/"
+  status = 301
+
+[[redirects]]
+  from = "/c/acl-match-concept-2"
+  to = "/configuration/security/access-control/#rule-matching-concept-2-subject-criteria-requires-authentication"
+  status = 301
+
+[[headers]]
+  for = "/*"
+  [headers.values]
+    Strict-Transport-Security = "max-age=31536000; includeSubDomains; preload"
+    X-Content-Type-Options = "nosniff"
+    X-XSS-Protection = "1; mode=block"
+    Content-Security-Policy = "default-src 'self'; manifest-src 'self'; connect-src 'self' https://*.algolia.net https://*.algolianet.com https://*.algolia.io; font-src 'self'; img-src 'self' https://avatars.githubusercontent.com https://github.com data:; script-src 'self' 'nonce-dXNlcj0iaGVsbG8iLGRvbWFpbj0iaGVua3ZlcmxpbmRlLmNvbSIsZG9jdW1lbnQud3JpdGUodXNlcisiQCIrZG9tYWluKTs=' 'sha256-aWZ3y/RxbBYKHXH0z8+8ljrHG1mSBvyzSfxSMjBSaXk=' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; base-uri 'self'"
+    Cross-Origin-Opener-Policy = "same-origin"
+    X-Frame-Options = "SAMEORIGIN"
+    Referrer-Policy = "strict-origin"
+    Permissions-Policy = "geolocation=(self), microphone=(), camera=()"
+    Cache-Control = "no-cache"
+    Access-Control-Allow-Origin = "*"

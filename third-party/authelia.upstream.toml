@@ -1,0 +1,8 @@
+name = "authelia"
+release = "v4.39.20"
+upstream = "https://github.com/authelia/authelia.git"
+tag_object = "d4d4b733a59ca58c565758b4ab4906988685ec3e"
+commit = "1b524f7f4bbf7b5637f4c6b98f4f66fd4b4aed91"
+tree = "fdfea274cb254ca64cbf137988643d0a0f227c8c"
+license_file = "third-party/authelia/LICENSE"
+imported = "2026-09-03"

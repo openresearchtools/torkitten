@@ -1,12 +1,29 @@
-FROM docker.io/library/golang:1.25.1-bookworm@sha256:c423747fbd96fd8f0b1102d947f51f9b266060217478e5f9bf86f145969562ee AS go-toolchain
+FROM docker.io/library/golang:1.26.3-bookworm@sha256:386d475a660466863d9f8c766fec64d7fdad3edac2c6a05020c09534d71edb4b AS go-toolchain
+
+FROM docker.io/library/node:25-bookworm-slim@sha256:0055701569ea982f398bbf2bd2ab091b554bd5951a7a5dca51a30b88e7f378e0 AS node-toolchain
+
+ENV DO_NOT_TRACK=1 \
+    NPM_CONFIG_AUDIT=false \
+    NPM_CONFIG_FUND=false \
+    NPM_CONFIG_UPDATE_NOTIFIER=false
+
+RUN npm install --global --ignore-scripts pnpm@11.25.0 \
+    && npm cache clean --force
 
 FROM docker.io/library/ubuntu:24.04@sha256:33ceb71981b602c1a7443a53469e4dba065f7503eab3078a2d7a57a2ab987517
 
 ARG DEBIAN_FRONTEND=noninteractive
 
 COPY --from=go-toolchain /usr/local/go /usr/local/go
+COPY --from=node-toolchain /usr/local /usr/local
 
-ENV PATH=/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ENV PATH=/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+    GOTELEMETRY=off \
+    DO_NOT_TRACK=1 \
+    NPM_CONFIG_AUDIT=false \
+    NPM_CONFIG_FUND=false \
+    NPM_CONFIG_UPDATE_NOTIFIER=false \
+    PNPM_DISABLE_SELF_UPDATE_CHECK=true
 
 RUN apt-get update \
     && apt-get install --yes --no-install-recommends \
@@ -29,4 +46,3 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /work
-

@@ -6,9 +6,9 @@ build_root=${TORKITTEN_BUILD_ROOT:-/run/media/user/Data/TorkittenBuild}
 requested_component=${1:-all}
 
 case "$requested_component" in
-    tor|caddy|all) ;;
+    tor|caddy|authelia|all) ;;
     *)
-        echo "usage: $0 [tor|caddy|all]" >&2
+        echo "usage: $0 [tor|caddy|authelia|all]" >&2
         exit 2
         ;;
 esac

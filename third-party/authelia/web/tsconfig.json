@@ -1,0 +1,38 @@
+{
+    "compilerOptions": {
+        "paths": {
+            "@root/*": ["./src/*"],
+            "@assets/*": ["./src/assets/*"],
+            "@components/*": ["./src/components/*"],
+            "@constants/*": ["./src/constants/*"],
+            "@contexts/*": ["./src/contexts/*"],
+            "@hooks/*": ["./src/hooks/*"],
+            "@i18n/*": ["./src/i18n/*"],
+            "@layouts/*": ["./src/layouts/*"],
+            "@models/*": ["./src/models/*"],
+            "@services/*": ["./src/services/*"],
+            "@themes/*": ["./src/themes/*"],
+            "@utils/*": ["./src/utils/*"],
+            "@views/*": ["./src/views/*"]
+        },
+        "target": "es2022",
+        "lib": ["dom", "dom.iterable", "esnext"],
+        "types": ["vite/client", "vite-plugin-svgr/client", "vitest/globals"],
+        "allowJs": true,
+        "skipLibCheck": true,
+        "esModuleInterop": true,
+        "allowImportingTsExtensions": true,
+        "allowSyntheticDefaultImports": true,
+        "strict": true,
+        "forceConsistentCasingInFileNames": true,
+        "noFallthroughCasesInSwitch": true,
+        "module": "esnext",
+        "moduleResolution": "bundler",
+        "resolveJsonModule": true,
+        "isolatedModules": true,
+        "noEmit": true,
+        "jsx": "react-jsx"
+    },
+    "include": ["*.mjs", "vite.config.ts", "src", "types"],
+    "exclude": ["coverage", "html", "node_modules"]
+}

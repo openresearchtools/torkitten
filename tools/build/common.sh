@@ -6,7 +6,7 @@ build_root=${TORKITTEN_BUILD_ROOT:-/run/media/user/Data/TorkittenBuild}
 jobs=${TORKITTEN_BUILD_JOBS:-$(nproc)}
 
 mkdir -p "$build_root/artifacts/third-party" "$build_root/cache/go-build" \
-    "$build_root/cache/go-mod" "$build_root/work"
+    "$build_root/cache/go-mod" "$build_root/cache/pnpm" "$build_root/work"
 
 source_real=$(realpath "$source_root")
 build_real=$(realpath "$build_root")
@@ -35,6 +35,13 @@ component_recipe_hash() {
             "tools/build/${component}.sh"
     ) | sha256sum | cut -d ' ' -f 1
 }
+
+export GOTELEMETRY=off
+export DO_NOT_TRACK=1
+export NPM_CONFIG_AUDIT=false
+export NPM_CONFIG_FUND=false
+export NPM_CONFIG_UPDATE_NOTIFIER=false
+export PNPM_DISABLE_SELF_UPDATE_CHECK=true
 
 component_build_key() {
     local component=$1

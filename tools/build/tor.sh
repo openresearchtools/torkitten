@@ -51,6 +51,20 @@ mkdir "$work_dir/build"
 license_path=usr/share/doc/torkitten/third-party/tor/LICENSE
 mkdir -p "$stage_dir/$(dirname "$license_path")"
 cp "$source_real/third-party/tor/LICENSE" "$stage_dir/$license_path"
+privacy_config=usr/share/torkitten/tor/torrc-no-telemetry
+mkdir -p "$stage_dir/$(dirname "$privacy_config")"
+{
+    printf 'CellStatistics 0\n'
+    printf 'ConnDirectionStatistics 0\n'
+    printf 'DirReqStatistics 0\n'
+    printf 'EntryStatistics 0\n'
+    printf 'ExitPortStatistics 0\n'
+    printf 'ExtraInfoStatistics 0\n'
+    printf 'HiddenServiceStatistics 0\n'
+    printf 'OverloadStatistics 0\n'
+    printf 'PaddingStatistics 0\n'
+    printf 'HeartbeatPeriod 0\n'
+} > "$stage_dir/$privacy_config"
 {
     printf 'component=tor\n'
     printf 'baseline=ubuntu-24.04\n'
@@ -63,6 +77,8 @@ cp "$source_real/third-party/tor/LICENSE" "$stage_dir/$license_path"
     printf 'build_key=%s\n' "$COMPONENT_BUILD_KEY"
     printf 'cflags=-O2 -pipe\n'
     printf 'ldflags=-Wl,-O1 -Wl,--as-needed\n'
+    printf 'runtime_metrics_listener=not_configured\n'
+    printf 'runtime_privacy_config=%s\n' "$privacy_config"
     printf 'configure_flags=--prefix=/usr --sysconfdir=/etc --localstatedir=/var --disable-asciidoc --disable-html-manual --disable-manpage --enable-gcc-hardening --enable-linker-hardening --enable-seccomp --enable-systemd\n'
     printf 'cc_version=%s\n' "$(cc --version | head -n 1)"
     printf 'license=%s\n' "$license_path"
@@ -70,4 +86,5 @@ cp "$source_real/third-party/tor/LICENSE" "$stage_dir/$license_path"
 } > "$stage_dir/BUILD-METADATA"
 
 "$stage_dir/usr/bin/tor" --version
+"$stage_dir/usr/bin/tor" --verify-config -f "$stage_dir/$privacy_config"
 publish_component_build "$stage_dir" "$artifact_dir"

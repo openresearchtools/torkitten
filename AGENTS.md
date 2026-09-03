@@ -188,8 +188,15 @@ the complete container state.
 ## Source and delivery
 
 - First-party implementation is Go. There is no Rust workspace.
-- Keep upstream Tor and Caddy snapshots pristine under `third-party/`.
-- Pin Authelia and every container base by version or digest.
+- Keep upstream Tor, Caddy, and Authelia snapshots pristine under
+  `third-party/` and pin every imported tag, tag object, commit, and tree.
+- Pin every container and build-tool base by version and digest.
+- Build Tor, Caddy, and Authelia as three independent, version-keyed artifacts
+  on separate Ubuntu 24.04 Actions runners. Build-tool reporting and update
+  checks are disabled. Runtime Authelia metrics and Caddy OpenTelemetry are
+  forcibly disabled by the supervisor, not merely omitted from configuration;
+  no Tor metrics listener is configured, and Tor statistics plus heartbeat
+  logging are explicitly disabled in its generated configuration.
 - Build and test through rootless Podman with generated artifacts outside the
   repository.
 - Unit-test validation, deterministic configuration, persistence, API

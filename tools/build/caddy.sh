@@ -27,6 +27,7 @@ cp -a "$source_real/third-party/caddy" "$work_dir/source"
 (
     cd "$work_dir/source"
     CGO_ENABLED=0 \
+    GOTELEMETRY=off \
     GOCACHE="$build_real/cache/go-build" \
     GOMODCACHE="$build_real/cache/go-mod" \
     go build \
@@ -52,6 +53,8 @@ cp "$source_real/third-party/caddy/LICENSE" "$stage_dir/$license_path"
     printf 'recipe_sha256=%s\n' "$recipe_hash"
     printf 'build_key=%s\n' "$COMPONENT_BUILD_KEY"
     printf 'cgo_enabled=0\n'
+    printf 'go_telemetry=off\n'
+    printf 'runtime_opentelemetry=disabled_by_torkitten_supervisor\n'
     printf 'go_build_flags=-buildvcs=false -mod=readonly -trimpath\n'
     printf 'go_ldflags=-s -w -X github.com/caddyserver/caddy/v2.CustomVersion=%s\n' "$release"
     printf 'go_version=%s\n' "$(go version)"

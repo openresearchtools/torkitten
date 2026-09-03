@@ -11,12 +11,16 @@ case "$requested_component" in
     caddy)
         exec "$script_dir/build/caddy.sh"
         ;;
+    authelia)
+        exec "$script_dir/build/authelia.sh"
+        ;;
     all)
         "$script_dir/build/tor.sh"
-        exec "$script_dir/build/caddy.sh"
+        "$script_dir/build/caddy.sh"
+        exec "$script_dir/build/authelia.sh"
         ;;
     *)
-        echo "usage: $0 [tor|caddy|all]" >&2
+        echo "usage: $0 [tor|caddy|authelia|all]" >&2
         exit 2
         ;;
 esac

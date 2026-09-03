@@ -1,6 +1,6 @@
 # Vendored upstream sources
 
-`tor/` and `caddy/` are complete, normal Git-tracked snapshots. They are not
+`tor/`, `caddy/`, and `authelia/` are complete, normal Git-tracked snapshots. They are not
 submodules, so GitHub builds never depend on GitLab or another source host.
 Each adjacent `*.upstream.toml` records the release tag, tag object, commit,
 and Git tree imported from the official repository.
@@ -23,6 +23,7 @@ upstream project's official release channel, then run:
 ```bash
 tools/update-vendor.sh tor tor-X.Y.Z
 tools/update-vendor.sh caddy vX.Y.Z
+tools/update-vendor.sh authelia vX.Y.Z
 ```
 
 The updater uses `TORKITTEN_BUILD_ROOT` (default
@@ -30,4 +31,3 @@ The updater uses `TORKITTEN_BUILD_ROOT` (default
 area. Review the upstream tag signature and release announcement, copy the
 printed object IDs into the component's manifest, stage the source with
 `git add -f`, and run the verifier. Commit each component update separately.
-

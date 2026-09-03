@@ -1,0 +1,14 @@
+{
+  "name": "authelia-duo-api",
+  "version": "1.0.0",
+  "description": "",
+  "main": "duo_api.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "author": "",
+  "license": "Apache-2.0",
+  "dependencies": {
+    "express": "5.2.1"
+  }
+}

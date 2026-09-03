@@ -39,6 +39,9 @@ func TestRenderContainsForwardAuthBeforeTrustedUpstream(t *testing.T) {
 	if !strings.Contains(text, `"wiki.`+testServiceID+`.onion"`) {
 		t.Fatalf("generated exact application hostname is absent:\n%s", text)
 	}
+	if strings.Contains(text, `"metrics"`) || strings.Contains(text, `"tracing"`) {
+		t.Fatalf("generated configuration enabled telemetry:\n%s", text)
+	}
 
 	var parsed map[string]any
 	if err := json.Unmarshal(document, &parsed); err != nil {

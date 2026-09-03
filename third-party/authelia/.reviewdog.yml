@@ -1,0 +1,44 @@
+---
+runner:
+  eslint:
+    cmd: cd web && pnpm eslint --format rdjson --ext '*/**/*.{js,jsx,ts,tsx}' .
+    format: rdjson
+    level: error
+
+  goimports-reviser:
+    cmd: >-
+      goimports-reviser -rm-unused -format
+      -excludes '*/node_modules,*/*/*/node_modules'
+      -company-prefixes authelia.com,github.com/authelia ./...
+      ; git diff --no-prefix -- '*.go'
+    format: diff
+    level: error
+
+  golangci:
+    cmd: golangci-lint run
+    errorformat:
+      - '%E%f:%l:%c: %m'
+      - '%E%f:%l: %m'
+      - '%C%.%#'
+    level: error
+
+  typos:
+    cmd: typos --format brief .
+    errorformat:
+      - '%f:%l:%c: %m'
+    level: error
+
+  shellcheck:
+    cmd: .buildkite/steps/lint.sh shellcheck --format=gcc
+    errorformat:
+      - '%f:%l:%c: %trror: %m'
+      - '%f:%l:%c: %tarning: %m'
+      - '%f:%l:%c: %tote: %m'
+    level: error
+
+  yamllint:
+    cmd: yamllint -f parsable .
+    errorformat:
+      - '%f:%l:%c: %m'
+    level: error
+...

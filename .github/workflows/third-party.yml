@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
     inputs:
       rebuild_third_party:
-        description: Rebuild Tor and Caddy even when their caches exist
+        description: Rebuild Tor, Caddy, and Authelia even when their caches exist
         required: false
         type: boolean
         default: false
@@ -26,6 +26,7 @@ jobs:
         component:
           - tor
           - caddy
+          - authelia
     env:
       TORKITTEN_SOURCE_ROOT: ${{ github.workspace }}
 
@@ -91,11 +92,25 @@ jobs:
           test -s "$artifact_dir/BUILD-METADATA"
           test "$(sed -n 's/^component=//p' "$artifact_dir/BUILD-METADATA")" = "$COMPONENT"
           test "$(sed -n 's/^build_key=//p' "$artifact_dir/BUILD-METADATA")" = "$EXPECTED_KEY"
+          test "$(sed -n 's/^go_telemetry=//p' "$artifact_dir/BUILD-METADATA" || true)" != "on"
           binary_sha=$(sed -n 's/^binary_sha256=//p' "$artifact_dir/BUILD-METADATA")
           binary="$artifact_dir/usr/bin/$COMPONENT"
           test -x "$binary"
           test "$(sha256sum "$binary" | cut -d ' ' -f 1)" = "$binary_sha"
           test -s "$artifact_dir/usr/share/doc/torkitten/third-party/$COMPONENT/LICENSE"
+          case "$COMPONENT" in
+            authelia)
+              grep -qx 'runtime_metrics=forced_off_by_torkitten_supervisor' "$artifact_dir/BUILD-METADATA"
+              ;;
+            caddy)
+              grep -qx 'runtime_opentelemetry=disabled_by_torkitten_supervisor' "$artifact_dir/BUILD-METADATA"
+              ;;
+            tor)
+              privacy_config=$(sed -n 's/^runtime_privacy_config=//p' "$artifact_dir/BUILD-METADATA")
+              test -s "$artifact_dir/$privacy_config"
+              test "$(wc -l < "$artifact_dir/$privacy_config")" -eq 10
+              ;;
+          esac
           echo "artifact_dir=$artifact_dir" >> "$GITHUB_OUTPUT"
 
       - name: Upload reusable binary bundle
@@ -112,7 +127,7 @@ jobs:
     needs: build
     runs-on: ubuntu-24.04
     steps:
-      - name: Download this run's Tor and Caddy bundles
+      - name: Download this run's Tor, Caddy, and Authelia bundles
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           pattern: third-party-*
@@ -121,11 +136,14 @@ jobs:
       - name: Verify downstream inputs
         run: |
           mapfile -t metadata < <(find "$RUNNER_TEMP/third-party" -name BUILD-METADATA -type f | sort)
-          test "${#metadata[@]}" -eq 2
+          test "${#metadata[@]}" -eq 3
+          components=()
           for metadata_file in "${metadata[@]}"; do
             component=$(sed -n 's/^component=//p' "$metadata_file")
+            components+=("$component")
             binary_sha=$(sed -n 's/^binary_sha256=//p' "$metadata_file")
             bundle_dir=$(dirname "$metadata_file")
             test "$(sha256sum "$bundle_dir/usr/bin/$component" | cut -d ' ' -f 1)" = "$binary_sha"
             sed -n '/^component=/p; /^release=/p; /^source_commit=/p; /^binary_sha256=/p' "$metadata_file"
           done
+          test "$(printf '%s\n' "${components[@]}" | sort | tr '\n' ' ')" = "authelia caddy tor "
