@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Enroll {{ device_display_name }} · Torkitten</title>
+  <link rel="stylesheet" href="/assets/app.css">
+</head>
+<body>
+  <main>
+    <div class="eyebrow">Secure device enrollment</div>
+    <h1>{{ device_display_name }}</h1>
+    <section class="card">
+      <p>This one-time enrollment belongs to <strong>{{ guest_display_name }}</strong> on this device only.</p>
+      <p class="muted">It expires at Unix time {{ expires_unix }}. Password, TOTP, or passkey setup will consume this link once.</p>
+    </section>
+  </main>
+</body>
+</html>

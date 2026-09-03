@@ -24,6 +24,9 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let options = arguments()?;
     let now = unix_time()?;
     let socket = options.paths.admin_socket();
+    let remote_socket = options.paths.remote_socket();
+    let remote_web =
+        torkitten_web::RemoteWebConfig::new(&options.paths.runtime_directory, &remote_socket);
     let mut daemon = Daemon::open(options.paths, SystemdServiceControl::default(), now)?;
     daemon.startup(now)?;
     let web = AdminWebConfig::new(options.admin_listen, &socket);
@@ -35,6 +38,11 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         },
         async {
             torkitten_admin_web::serve(web)
+                .await
+                .map_err(Box::<dyn std::error::Error>::from)
+        },
+        async {
+            torkitten_web::serve(remote_web)
                 .await
                 .map_err(Box::<dyn std::error::Error>::from)
         },

@@ -3040,6 +3040,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "torkitten-web"
+version = "0.1.0"
+dependencies = [
+ "askama",
+ "axum",
+ "base64 0.22.1",
+ "http-body-util",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
+ "torkitten-core",
+ "tower",
+]
+
+[[package]]
 name = "torkittenctl"
 version = "0.1.0"
 dependencies = [
@@ -3065,6 +3081,7 @@ dependencies = [
  "torkitten-proxy",
  "torkitten-tor",
  "torkitten-vault",
+ "torkitten-web",
  "uuid",
 ]
 

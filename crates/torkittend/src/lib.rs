@@ -318,7 +318,12 @@ impl<S: ServiceControl> Daemon<S> {
         now_unix: i64,
     ) -> Result<RemoteResponse, DaemonError> {
         if !self.initialized()? {
-            return Err(DaemonError::NotInitialized);
+            return match command {
+                RemoteCommand::PublishedSites => {
+                    Ok(RemoteResponse::PublishedSites { sites: Vec::new() })
+                }
+                _ => Err(DaemonError::NotInitialized),
+            };
         }
         let settings = self.store.publication_settings()?;
         if settings.emergency_disabled || !self.maintenance_enabled {

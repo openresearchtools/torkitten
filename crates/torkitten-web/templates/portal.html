@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>{{ display_name }} · Torkitten</title>
+  <link rel="stylesheet" href="/assets/app.css">
+</head>
+<body>
+  <main>
+    <div class="eyebrow">Protected onion site</div>
+    <h1>{{ display_name }}</h1>
+    <p><code>{{ onion_hostname }}</code></p>
+    {% match guest_display_name %}
+      {% when Some with (guest_name) %}
+        <section class="card">
+          <div class="eyebrow identity">Signed in as {{ guest_name }}</div>
+          <h2>Your applications</h2>
+          {% if mappings.is_empty() %}
+            <p>No applications are assigned to this guest.</p>
+          {% else %}
+            <ul class="apps">
+            {% for mapping in mappings %}
+              <li><a href="https://{{ onion_hostname }}:{{ mapping.virtual_port }}/"><span>{{ mapping.display_name }}</span><span>Port {{ mapping.virtual_port }}</span></a></li>
+            {% endfor %}
+            </ul>
+          {% endif %}
+        </section>
+      {% when None %}
+        <section class="card">
+          <h2>Guest sign-in required</h2>
+          <p>This site requires its Tor client key, private certificate authority, and a Torkitten guest session.</p>
+        </section>
+    {% endmatch %}
+  </main>
+</body>
+</html>

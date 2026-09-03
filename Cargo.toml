@@ -8,6 +8,7 @@ members = [
     "crates/torkitten-proxy",
     "crates/torkitten-tor",
     "crates/torkitten-vault",
+    "crates/torkitten-web",
     "crates/torkittenctl",
     "crates/torkittend",
 ]

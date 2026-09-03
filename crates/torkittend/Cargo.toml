@@ -19,6 +19,7 @@ torkitten-core = { path = "../torkitten-core" }
 torkitten-proxy = { path = "../torkitten-proxy" }
 torkitten-tor = { path = "../torkitten-tor" }
 torkitten-vault = { path = "../torkitten-vault" }
+torkitten-web = { path = "../torkitten-web" }
 uuid.workspace = true
 
 [dev-dependencies]
