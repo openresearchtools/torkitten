@@ -1,0 +1,14 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="referrer" content="no-referrer"><title>Torkitten certificate setup</title>
+<style>body{font:17px system-ui;max-width:44rem;margin:3rem auto;padding:1rem;line-height:1.5}a{font-weight:700}</style>
+<h1>Install this Torkitten’s HTTPS root</h1>
+<p>HTTPS uses ordinary X.509 certificates—the standard certificate format used by TLS. This Torkitten signs its onion certificate with its own private root instead of a public certificate authority.</p>
+<p>This temporary certificate page uses HTTP inside the end-to-end encrypted and authenticated onion connection, and Tor client authorization protects it. It serves only the public root and installation instructions. The permanent main site remains HTTPS.</p>
+<h2>iPhone or iPad</h2>
+<ol><li>Using Safari through Orbot, tap <a href="torkitten-ios.mobileconfig">Download the iPhone certificate profile</a> and allow the profile download.</li><li>Open Settings. Tap <strong>Profile Downloaded</strong>, or open <strong>General → VPN &amp; Device Management</strong>, then install <strong>Torkitten HTTPS Root</strong>.</li><li>Open <strong>General → About → Certificate Trust Settings</strong> and enable full trust for <strong>Torkitten Root CA</strong>.</li><li>Return to Torkitten and scan the permanent HTTPS onion QR.</li></ol>
+<p>This manually installable profile contains only the public root certificate. It does not require Developer Mode, Apple Configurator, MDM, or an Apple developer account. Apple intentionally requires the install and full-trust confirmations.</p>
+<h2>Other platforms</h2>
+<p><a href="torkitten-root-ca.cer">Download the public root certificate</a>, then install it into the trust store used by the intended browser.</p>
+<p><strong>Current Tor Browser is unsupported:</strong> its default privacy policy disables local certificate roots. Do not weaken Tor Browser privacy settings to use Torkitten.</p>
+<p>This temporary page contains no password, TOTP secret, client private key, application, or control API.</p></html>
