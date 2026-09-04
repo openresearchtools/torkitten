@@ -5,6 +5,7 @@ package caddy
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/tls"
 	"encoding/json"
@@ -55,7 +56,7 @@ func TestRenderDeterministicAndFailClosed(t *testing.T) {
 	}
 	text := string(first)
 	for _, required := range []string{
-		"https://:443", "respond \"not found\" 404", "forward_auth unix/", "uri /api/authz/forward-auth",
+		"https://:443", "https://*." + strings.Repeat("a", 56) + ".onion", "respond \"not found\" 404", "forward_auth unix/", "uri /api/authz/forward-auth",
 		"request_header -Remote-User", "request_header -X-Forwarded-For", "reverse_proxy h2c://host.containers.internal:7777",
 		"group:torkitten-owner", // must not occur: checked below.
 	} {
@@ -216,6 +217,25 @@ func TestPinnedCaddyTLSAndForwardAuth(t *testing.T) {
 		}
 	}
 	time.Sleep(500 * time.Millisecond)
+	leaf := func(host string) []byte {
+		raw, dialErr := (&net.Dialer{}).DialContext(ctx, "unix", renderer.OnionTLSSocket)
+		if dialErr != nil {
+			t.Fatal(dialErr)
+		}
+		conn := tls.Client(raw, &tls.Config{ServerName: host, InsecureSkipVerify: true}) // test-only root handling
+		if dialErr = conn.Handshake(); dialErr != nil {
+			t.Fatal(dialErr)
+		}
+		certificate := conn.ConnectionState().PeerCertificates[0]
+		if dialErr = certificate.VerifyHostname(host); dialErr != nil {
+			t.Fatal(dialErr)
+		}
+		_ = conn.Close()
+		return certificate.Raw
+	}
+	if auth, mapping := leaf(state.Host("auth")), leaf(state.Host("api")); !bytes.Equal(auth, mapping) {
+		t.Fatal("prefixed hosts did not share the wildcard leaf certificate")
+	}
 	request := func(path string, secure bool) (int, string, http.Header) {
 		socket := renderer.OnionHTTPSocket
 		if secure {

@@ -79,12 +79,7 @@ func (r Renderer) Render(s model.State) ([]byte, error) {
 	for _, id := range ids {
 		alias := s
 		alias.ServiceID = id
-		fmt.Fprintf(&b, "https://%s, https://%s, ", alias.Host(""), alias.Host("auth"))
-		for _, mapping := range mappings {
-			if mapping.Enabled {
-				fmt.Fprintf(&b, "https://%s, ", alias.Host(mapping.Prefix))
-			}
-		}
+		fmt.Fprintf(&b, "https://%s, https://*.%s, ", alias.Host(""), alias.Host(""))
 	}
 	b.WriteString("https://:443 {\n")
 	fmt.Fprintf(&b, "\tbind unix/%s\n\ttls {\n\t\tissuer internal\n\t\tprotocols tls1.2 tls1.3\n\t}\n", r.OnionTLSSocket)

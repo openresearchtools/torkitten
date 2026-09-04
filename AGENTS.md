@@ -423,7 +423,7 @@ onion address.
 Onion rotation asks Tor to generate a fresh identity in a staged
 `HiddenServiceDir`, stages client credentials and Authelia cookie configuration,
 and loads candidate Caddy configuration that uses Caddy's persistent CA to
-issue the new hostname certificates. The previous complete generation remains
+issue one base-host leaf and one wildcard leaf for all prefixed hosts. The previous complete generation remains
 active until all candidate components validate. Committing rotation deliberately
 invalidates the former address and browser sessions. Any failure restores the
 complete previous generation. Torkitten never generates or parses an onion
@@ -431,8 +431,9 @@ identity private key.
 
 ## Caddy PKI and certificate onboarding
 
-Caddy's stock PKI app owns one persistent private root CA, its intermediate, and
-all onion leaf certificates. The generated Caddy JSON selects the native
+Caddy's stock PKI app owns one persistent private root CA, its intermediate, one
+base-host leaf, and one wildcard leaf shared by all single-label prefixed onion
+hosts. Unknown hosts still fail closed at routing. The generated Caddy JSON selects the native
 internal issuer, fixes Caddy's file storage below `/var/lib/torkitten/caddy`,
 sets `install_trust` to false, and disables Caddy configuration persistence.
 Caddy issues and renews certificates; Torkitten does not implement an X.509
