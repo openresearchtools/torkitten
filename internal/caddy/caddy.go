@@ -61,7 +61,7 @@ func (r Renderer) Render(s model.State) ([]byte, error) {
 		return nil, errors.New("unsafe fixed upstream host")
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "{\n\tadmin unix/%s\n\tpersist_config off\n\tstorage file_system {\n\t\troot %s\n\t}\n\tpki {\n\t\tca local {\n\t\t\tname \"Torkitten Local CA\"\n\t\t}\n\t}\n\tlocal_certs\n\tskip_install_trust\n\tauto_https disable_redirects\n}\n\n", r.AdminSocket, r.StorageRoot)
+	fmt.Fprintf(&b, "{\n\tadmin unix/%s\n\tpersist_config off\n\tstorage file_system {\n\t\troot %s\n\t}\n\tpki {\n\t\tca local {\n\t\t\tname \"Torkitten Local CA\"\n\t\t}\n\t}\n\tcert_issuer internal {\n\t\tlifetime 9528h\n\t\tsign_with_root\n\t}\n\tskip_install_trust\n\tauto_https disable_redirects\n}\n\n", r.AdminSocket, r.StorageRoot)
 	if s.ServiceID == "" || !s.Initialized {
 		r.renderDisabled(&b)
 		return []byte(b.String()), nil
@@ -82,7 +82,7 @@ func (r Renderer) Render(s model.State) ([]byte, error) {
 		fmt.Fprintf(&b, "https://%s, https://*.%s, ", alias.Host(""), alias.Host(""))
 	}
 	b.WriteString("https://:443 {\n")
-	fmt.Fprintf(&b, "\tbind unix/%s\n\ttls {\n\t\tissuer internal\n\t\tprotocols tls1.2 tls1.3\n\t}\n", r.OnionTLSSocket)
+	fmt.Fprintf(&b, "\tbind unix/%s\n\ttls {\n\t\tprotocols tls1.2 tls1.3\n\t}\n", r.OnionTLSSocket)
 	r.renderAuth(&b, hosts(ids, "auth"))
 	fmt.Fprintf(&b, "\t@launcher host %s\n\thandle @launcher {\n", strings.Join(hosts(ids, ""), " "))
 	r.renderProtectedPrefix(&b)

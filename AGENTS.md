@@ -434,9 +434,11 @@ identity private key.
 Caddy's stock PKI app owns one persistent private root CA, its intermediate, one
 base-host leaf, and one wildcard leaf shared by all single-label prefixed onion
 hosts. Unknown hosts still fail closed at routing. The generated Caddy JSON selects the native
-internal issuer, fixes Caddy's file storage below `/var/lib/torkitten/caddy`,
-sets `install_trust` to false, and disables Caddy configuration persistence.
-Caddy issues and renews certificates; Torkitten does not implement an X.509
+internal issuer, uses its supported direct-root signing option and a 397-day
+leaf lifetime instead of Caddy's 12-hour default, fixes Caddy's file storage
+below `/var/lib/torkitten/caddy`, sets `install_trust` to false, and disables
+Caddy configuration persistence. Caddy issues and renews certificates;
+Torkitten does not implement an X.509
 authority or read any Caddy private key. Torkitten reconstructs Caddy
 configuration from its durable typed state after every restart.
 

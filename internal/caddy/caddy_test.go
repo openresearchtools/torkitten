@@ -56,7 +56,7 @@ func TestRenderDeterministicAndFailClosed(t *testing.T) {
 	}
 	text := string(first)
 	for _, required := range []string{
-		"https://:443", "https://*." + strings.Repeat("a", 56) + ".onion", "respond \"not found\" 404", "forward_auth unix/", "uri /api/authz/forward-auth",
+		"https://:443", "https://*." + strings.Repeat("a", 56) + ".onion", "lifetime 9528h", "sign_with_root", "respond \"not found\" 404", "forward_auth unix/", "uri /api/authz/forward-auth",
 		"request_header -Remote-User", "request_header -X-Forwarded-For", "reverse_proxy h2c://host.containers.internal:7777",
 		"group:torkitten-owner", // must not occur: checked below.
 	} {
@@ -229,6 +229,9 @@ func TestPinnedCaddyTLSAndForwardAuth(t *testing.T) {
 		certificate := conn.ConnectionState().PeerCertificates[0]
 		if dialErr = certificate.VerifyHostname(host); dialErr != nil {
 			t.Fatal(dialErr)
+		}
+		if certificate.NotAfter.Sub(certificate.NotBefore) < 396*24*time.Hour {
+			t.Fatal("Caddy issued a short-lived leaf certificate")
 		}
 		_ = conn.Close()
 		return certificate.Raw

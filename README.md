@@ -118,10 +118,11 @@ Android and desktop Tor import the file. It is erased after acknowledgement. A l
 create another. Publication cannot remain enabled with zero acknowledged
 devices.
 
-Remote HTTPS uses Caddy's persistent private CA. Caddy manages one base-host
-leaf and one wildcard leaf shared by `auth` and every application prefix, so
-adding a mapping does not create another prefix-specific certificate. The
-console offers only the public root certificate. A 15-minute onboarding window shows its URL and QR
+Remote HTTPS uses Caddy's persistent private CA. Caddy manages one 397-day
+base-host leaf and one 397-day wildcard leaf shared by `auth` and every
+application prefix, so adding a mapping does not create another prefix-specific
+certificate. Caddy renews them through its native internal issuer; the console
+offers only the persistent public root certificate. A 15-minute onboarding window shows its URL and QR
 inline and serves an iPhone `.mobileconfig` containing only that public root,
 a DER `.cer` for other clients, and static guidance over client-authorized
 onion HTTP. Safari can hand the profile to iOS without Developer Mode, Apple
