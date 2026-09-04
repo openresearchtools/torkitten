@@ -13,6 +13,7 @@ if [[ -n "$unformatted" ]]; then
 fi
 
 node --check internal/api/assets/app.js
+node --check runtime/launcher/app.js
 go vet ./...
 go test -race ./...
 

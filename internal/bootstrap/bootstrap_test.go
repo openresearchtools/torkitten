@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"torkitten/internal/authelia"
+	"torkitten/internal/caddy"
 	"torkitten/internal/model"
 	"torkitten/internal/state"
 )
@@ -47,6 +48,13 @@ func (f fakeIssuer) Issue(owner string) (string, string, model.LocalSession, err
 
 func bootstrapPaths(root string) authelia.Paths {
 	return authelia.Paths{Binary: "/usr/bin/authelia", Config: filepath.Join(root, "etc", "config.yml"), Users: filepath.Join(root, "state", "users.yml"), Database: filepath.Join(root, "state", "db.sqlite3"), SecretsDir: filepath.Join(root, "state", "secrets"), Socket: filepath.Join(root, "run", "authelia.sock"), QR: filepath.Join(root, "run", "totp.png"), Notifications: filepath.Join(root, "state", "notifications")}
+}
+
+func TestCaddyStartsDenyOnly(t *testing.T) {
+	data, err := denyOnlyCaddy(caddy.DefaultRenderer())
+	if err != nil || !strings.Contains(string(data), "respond \"not found\" 404") || strings.Contains(string(data), "forward_auth") {
+		t.Fatalf("unsafe initial Caddy configuration: %v", err)
+	}
 }
 
 func TestSetupFlow(t *testing.T) {

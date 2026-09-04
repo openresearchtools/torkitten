@@ -43,7 +43,7 @@ func TestOpenAndTransition(t *testing.T) {
 
 func TestOpenNormalizesLegacyNullCollections(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.json")
-	body := `{"version":1,"mappings":null,"devices":null,"local_sessions":null,"agent_tokens":null}`
+	body := `{"version":1,"mappings":null,"devices":null,"local_sessions":null,"agent_tokens":null,"bootstrap":{"token":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","expires_at":"2030-01-01T00:00:00Z"}}`
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -52,8 +52,25 @@ func TestOpenNormalizesLegacyNullCollections(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := store.View()
-	if got.Mappings == nil || got.Devices == nil || got.Sessions == nil || got.Tokens == nil {
-		t.Fatal("null collection remained")
+	if got.Mappings == nil || got.Devices == nil || got.Sessions == nil || got.Tokens == nil || got.Bootstrap != nil {
+		t.Fatal("legacy state was not normalized")
+	}
+}
+
+func TestReconcileAppliesWithoutMutation(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	called := false
+	if err = store.Reconcile(func(candidate model.State) error {
+		called = candidate.Version == model.StateVersion
+		return nil
+	}); err != nil || !called {
+		t.Fatalf("err=%v called=%v", err, called)
+	}
+	if got := store.View(); got.ServiceID != "" || got.Initialized {
+		t.Fatalf("reconciliation mutated state: %+v", got)
 	}
 }
 

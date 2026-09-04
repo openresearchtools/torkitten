@@ -53,7 +53,7 @@ Applications use hostname prefixes on that identity:
 
 ```text
 <service-id>.onion            -> protected service launcher
-auth.<service-id>.onion       -> Authelia login portal
+<service-id>.onion/login      -> Authelia login portal
 api.<service-id>.onion        -> protected host loopback port 7777
 chat.<service-id>.onion       -> protected host loopback port 8888
 every unknown hostname        -> deny without contacting an upstream
@@ -82,16 +82,17 @@ front of the base launcher and every configured application host. Only an
 explicit successful authorization response can continue to the protected
 handler or reverse proxy. A denial, timeout, malformed response, unavailable
 Authelia service, or any uncertainty returns a denial and never contacts the
-application. Browser redirects to `auth.<service-id>.onion` exist only for login
-user experience; a client which ignores redirects gains no access.
+application. Browser redirects to `<service-id>.onion/login` exist only for
+login user experience; a client which ignores redirects gains no access.
 
-The `auth` host exposes only the Authelia portal and endpoints needed to perform
-login and cannot be placed behind its own forward-authorization check. Caddy's
-stock static handlers serve the protected launcher and the temporary port-80
-public-CA bootstrap; the bootstrap is the only other narrowly defined bypass.
-Caddy rejects all unknown hosts before proxy selection, removes caller-supplied
-identity and forwarding headers, constructs the authorization metadata itself,
-and trusts identity headers only from Authelia's private Unix-socket upstream.
+The narrowly allowlisted `/login` portal routes expose only the Authelia portal
+and endpoints needed to perform login and cannot be placed behind their own
+forward-authorization check. Caddy's stock static handlers serve the protected
+launcher. Onion port 80 has no application, login, control, onboarding, or
+certificate route and always denies. Caddy rejects all unknown hosts before
+proxy selection, removes caller-supplied identity and forwarding headers,
+constructs the authorization metadata itself, and trusts identity headers only
+from Authelia's private Unix-socket upstream.
 
 ## Authoritative control plane
 
@@ -112,9 +113,10 @@ Torkitten uses supported component boundaries:
 - Caddy's private Unix-socket JSON administration API for validated atomic hot
   loads, native PKI/internal issuance, and public-root retrieval;
 - Authelia's documented Unix-socket listener and forward-authorization endpoint
-  at `/api/authz/forward-auth`;
+  at `/api/authz/forward-auth`, mounted below the configured `/login` base path;
 - Authelia's documented `/api/firstfactor`, `/api/user/info`, and
-  `/api/secondfactor/totp` endpoints for delegated local factor verification;
+  `/api/secondfactor/totp` endpoints, below that same base path, for delegated
+  local factor verification;
 - documented Authelia configuration, regulation, endpoint rate limits, portal,
   and CLI only where Authelia has no administration API.
 
@@ -165,9 +167,12 @@ connections and are never published by Podman or Docker.
 ## Administration and onboarding
 
 There is one compact responsive local control panel implemented by the Go
-service. It is the only place users manage Torkitten mappings, identity,
-publication, onboarding, and API credentials. Authelia's own administration
-concepts are not exposed as product objects.
+service. Its primary navigation is Dashboard, Applications, Remote Devices,
+and Runtime. It is the only place users manage Torkitten mappings, identity,
+publication, onboarding, and API credentials. Applications exposes only the
+bounded name-and-port creation flow, URLs and QR codes, plus one CLI/agent
+mapping-access toggle; it does not add arbitrary host execution. Authelia's own
+administration concepts are not exposed as product objects.
 
 First-run setup creates one owner in Authelia as the sole member of the fixed
 `torkitten-owner` group. The user enters one username, one password, and enrolls
@@ -200,10 +205,12 @@ exists only to express the uniform built-in Authelia policy for every mapped
 application; it is not a product object or a configurable permission system.
 
 Onboarding can be reopened for every new device. It provides the public onion
-address, a Tor client-authorization credential, and the public root certificate
-retrieved from Caddy's private PKI administration endpoint, plus normal Authelia
-login instructions. It never reveals the onion service private key, Caddy CA
-private key, internal component secrets, or an authenticated session.
+address, a one-time Tor client-authorization credential, platform-specific
+import guidance, and normal Authelia login instructions. After remote
+authentication, the protected launcher offers the public root certificate
+retrieved from Caddy's private PKI administration endpoint and an Apple profile
+containing only that root. It never reveals the onion service private key,
+Caddy CA private key, internal component secrets, or an authenticated session.
 
 ## Storage
 
@@ -393,7 +400,7 @@ Tor generates and owns one persistent Ed25519 v3 onion-service identity in its
 All prefixes and devices use that identity:
 
 ```text
-auth.<service-id>.onion
+<service-id>.onion/login
 api.<service-id>.onion
 chat.<service-id>.onion
 ```
@@ -443,17 +450,18 @@ authority or read any Caddy private key. Torkitten reconstructs Caddy
 configuration from its durable typed state after every restart.
 
 Torkitten retrieves the public root through Caddy's private documented PKI
-administration endpoint and exposes only those bounded public bytes through its
-onboarding API. The Caddy administration endpoint itself is never exposed.
+administration endpoint and exposes only those bounded public bytes through an
+authenticated launcher route. The Caddy administration endpoint itself is never
+exposed.
 
 The rootless container never installs a certificate, Tor credential, browser
 setting, DNS entry, native helper, or any other file on the host or a client
 device. It can only offer Caddy's public root certificate and a Tor client
 credential for deliberate user download/import, with platform-specific
-instructions and QR codes. Private-CA HTTPS is unsupported on a device whose
-policy forbids the user from installing or trusting the public root; the product
-must not claim a
-zero-install workaround.
+instructions and QR codes. Installing the root is optional and changes browser
+trust, not the onion connection's encryption or address authentication. A client
+which permits neither root installation nor a manual certificate warning
+exception is unsupported; the product must not claim a zero-install workaround.
 
 Orbot is a Tor transport for other applications, not the browser that owns web
 state. On mobile, cookie-domain behavior, redirects, TLS trust, WebAuthn, and
@@ -463,17 +471,13 @@ must name and test complete pairs, including iOS Safari/WebKit through Orbot and
 the explicitly supported Android browsers through Orbot. Desktop Tor Browser
 remains a separate supported client, not a substitute for the mobile matrix.
 
-For a remote device the local onboarding flow enables Caddy's stock static
-handlers for a 15-minute onion port-80 bootstrap containing only:
-
-- `GET` or `HEAD` of one unguessable public-CA path;
-- static platform installation instructions; and
-- no password, TOTP, session, client private key, application, or control API.
-
-Tor client authorization protects access before HTTP is reached. Closing or
-expiring the window removes that Caddy route without changing application
-mappings. The user manually installs the public CA, then opens the permanent
-HTTPS onion login.
+A newly authorized remote device opens the permanent HTTPS onion address and
+may initially receive a self-issued-certificate warning. After Authelia login,
+the protected launcher first lists enabled applications and then offers an
+optional trust section with the public root and a client-generated Apple
+`.mobileconfig`. Certificate installation is an explicit user choice and never
+exports a CA private key. No certificate, application, login, or control route
+is served over onion HTTP.
 
 ## Mapping and Caddy transaction
 
@@ -517,7 +521,6 @@ bounded API can:
 - create, edit, test, enable, disable, and remove a mapping;
 - start, stop, and restart publication or an individual child component;
 - create, acknowledge, and revoke a Tor-authorized device;
-- open, extend, and close certificate bootstrap;
 - rotate the onion identity with explicit confirmation;
 - coordinate supported Authelia-owned password or TOTP operations and revoke
   local sessions after success;
@@ -559,7 +562,9 @@ Failure behavior is explicit:
 - Torkitten restart: reconstruct component configuration from durable state and
   preserve Tor's identity, Caddy's CA, the Authelia owner and TOTP, mappings,
   local sessions, and acknowledged devices in the same container writable
-  layer.
+  layer. Caddy always starts from a deny-only file and receives the complete
+  durable dynamic configuration only after its private administration endpoint
+  is healthy, including after an independent Caddy restart.
 - Authelia uses its stock memory session provider because this one-container
   product does not add Redis. Restarting Authelia or the container therefore
   destroys onion sessions and requires onion clients to authenticate again;
@@ -631,9 +636,10 @@ the pinned component versions must prove:
 7. Rootless Podman pasta reaches a host-loopback port created after container
    start without publishing that port or restarting the container.
 8. Caddy's native PKI persists its private CA, returns only public certificates
-   through the private PKI API, and issues valid onion certificates; its forward
-   authorization fails closed, and a failed JSON `/load` retains the previous
-   working configuration.
+   through the private PKI API and protected launcher route, and issues valid
+   onion certificates; its forward authorization fails closed, a failed JSON
+   `/load` retains the previous working configuration, and an independent Caddy
+   restart begins deny-only before reloading durable dynamic state.
 9. Stop/start and host reboot retain the ordinary writable layer and all stated
    component state, Authelia/container restart destroys onion sessions as
    documented, and container removal destroys the writable layer.
@@ -657,8 +663,9 @@ behavior or a weakened browser policy.
 5. **Protected mappings:** configure stock Caddy reverse proxy and forward auth,
    the fixed-group Authelia 2FA policy, hot loads, persistence rollback, and live
    host-loopback upstream tests.
-6. **Onboarding:** implement repeated device creation/revocation, Caddy public-CA
-   delivery, a bounded Caddy-served port-80 bootstrap, and credential exports.
+6. **Onboarding:** implement repeated device creation/revocation,
+   platform-specific one-time credential delivery, and authenticated launcher
+   delivery of Caddy's public CA.
 7. **Sensitive controls:** add publication control and onion rotation,
    coordinate Authelia-owned password/TOTP operations, revoke local sessions,
    use only supported Authelia onion-session operations, and add agent

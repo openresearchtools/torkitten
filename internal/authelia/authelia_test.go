@@ -38,7 +38,7 @@ func TestRenderOwnsPolicyInAuthelia(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := string(data)
-	for _, want := range []string{"default_policy: 'deny'", "group:torkitten-owner", "policy: 'two_factor'", "*." + id + ".onion", "implementation: 'ForwardAuth'", "enabled: false", "password_change: { disable: false }", "regulation: { modes: ['user']", "inactivity: '87600h'", "expiration: '87600h'"} {
+	for _, want := range []string{"path=login", "theme: 'dark'", "authelia_url: 'https://" + id + ".onion/login'", "default_policy: 'deny'", "group:torkitten-owner", "policy: 'two_factor'", "*." + id + ".onion", "implementation: 'ForwardAuth'", "enabled: false", "password_change: { disable: false }", "regulation: { modes: ['user']", "inactivity: '87600h'", "expiration: '87600h'"} {
 		if !strings.Contains(text, want) {
 			t.Errorf("missing %q", want)
 		}
@@ -82,28 +82,28 @@ func TestFactorClientUsesIsolatedUnixCookieJar(t *testing.T) {
 	id := strings.Repeat("a", 56)
 	var logins atomic.Int32
 	server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("X-Forwarded-Proto") != "https" || r.Header.Get("X-Forwarded-Host") != "auth."+id+".onion" {
+		if r.Header.Get("X-Forwarded-Proto") != "https" || r.Header.Get("X-Forwarded-Host") != id+".onion" {
 			http.Error(w, "metadata", http.StatusBadRequest)
 			return
 		}
 		switch r.URL.Path {
-		case "/api/firstfactor":
+		case "/login/api/firstfactor":
 			logins.Add(1)
 			http.SetCookie(w, &http.Cookie{Name: "session", Value: "ok", Domain: id + ".onion", Path: "/", Secure: true, HttpOnly: true})
 			_ = json.NewEncoder(w).Encode(map[string]string{"status": "OK"})
-		case "/api/user/info":
+		case "/login/api/user/info":
 			if cookie, _ := r.Cookie("session"); cookie == nil || cookie.Value != "ok" {
 				http.Error(w, "cookie", http.StatusForbidden)
 				return
 			}
 			_, _ = w.Write([]byte(`{"status":"OK","data":{"has_totp":true}}`))
-		case "/api/secondfactor/totp":
+		case "/login/api/secondfactor/totp":
 			if _, err := r.Cookie("session"); err != nil {
 				http.Error(w, "cookie", http.StatusForbidden)
 				return
 			}
 			_, _ = w.Write([]byte(`{"status":"OK","data":{"redirect":""}}`))
-		case "/api/health":
+		case "/login/api/health":
 			_, _ = w.Write([]byte(`{"status":"OK"}`))
 		default:
 			http.NotFound(w, r)

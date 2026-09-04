@@ -6,10 +6,12 @@ package supervisor
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"log"
 	"os"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -31,7 +33,15 @@ func helperSpec(name Name, mode string) Spec {
 }
 
 func TestIndependentLifecycle(t *testing.T) {
-	s, err := New([]Spec{helperSpec(Tor, "stable"), helperSpec(Caddy, "stable"), helperSpec(Authelia, "stable")}, nil)
+	caddy := helperSpec(Caddy, "stable")
+	var recovered atomic.Int32
+	caddy.Recover = func(context.Context) error {
+		if recovered.Add(1) == 1 {
+			return errors.New("retry recovery")
+		}
+		return nil
+	}
+	s, err := New([]Spec{helperSpec(Tor, "stable"), caddy, helperSpec(Authelia, "stable")}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -42,6 +52,9 @@ func TestIndependentLifecycle(t *testing.T) {
 	}
 	defer s.Shutdown()
 	waitStatus(t, s, Caddy, "running", 1)
+	if recovered.Load() != 0 {
+		t.Fatal("recovery ran on the initial start")
+	}
 	if err = s.StopComponent(Caddy); err != nil {
 		t.Fatal(err)
 	}
@@ -53,10 +66,16 @@ func TestIndependentLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitStatus(t, s, Caddy, "running", 2)
+	if recovered.Load() != 2 {
+		t.Fatal("failed recovery was not retried before readiness")
+	}
 	if err = s.RestartComponent(Caddy); err != nil {
 		t.Fatal(err)
 	}
 	waitStatus(t, s, Caddy, "running", 3)
+	if recovered.Load() != 3 {
+		t.Fatal("recovery did not run after restart")
+	}
 }
 
 func TestCrashBackoffDoesNotStopPeers(t *testing.T) {

@@ -47,19 +47,22 @@ func Open(path string) (*Store, error) {
 		return nil, err
 	}
 	normalize(&value)
+	value.Bootstrap = nil
 	s.value = value
 	return s, nil
 }
-
 func (s *Store) View() model.State {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return Clone(s.value)
 }
 
-// Transition serializes all durable writers. The callback may apply a component
-// candidate before returning it. If validation or persistence fails, rollback is
-// invoked while the writer lock remains held.
+func (s *Store) Reconcile(apply func(model.State) error) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return apply(Clone(s.value))
+}
+
 func (s *Store) Transition(fn func(model.State) (model.State, func() error, error)) error {
 	if fn == nil {
 		return errors.New("nil state transition")
@@ -85,7 +88,6 @@ func (s *Store) Transition(fn func(model.State) (model.State, func() error, erro
 	s.value = Clone(next)
 	return nil
 }
-
 func (s *Store) persist(value model.State) error {
 	if err := value.Validate(); err != nil {
 		return fmt.Errorf("refusing invalid state: %w", err)
@@ -103,7 +105,6 @@ func (s *Store) persist(value model.State) error {
 	}
 	return nil
 }
-
 func load(path string) (model.State, error) {
 	var value model.State
 	info, err := os.Lstat(path)
@@ -132,7 +133,6 @@ func load(path string) (model.State, error) {
 	}
 	return value, nil
 }
-
 func normalize(value *model.State) {
 	if value.Mappings == nil {
 		value.Mappings = []model.Mapping{}
@@ -157,6 +157,9 @@ func Clone(value model.State) model.State {
 }
 
 func ComponentChange(ctx context.Context, store *Store, render func(model.State) ([]byte, error), apply func(context.Context, []byte) ([]byte, error), mutate func(*model.State) error) error {
+	if mutate == nil {
+		return errors.New("nil component mutation")
+	}
 	return store.Transition(func(current model.State) (model.State, func() error, error) {
 		if !current.Initialized && len(current.Sessions) != 0 {
 			return current, nil, errors.New("invalid setup transition")

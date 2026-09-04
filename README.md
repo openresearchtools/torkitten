@@ -7,9 +7,9 @@ container containing a small Go control plane, C Tor, Caddy, and Authelia.
 Each application gets a hostname prefix on the same identity:
 
 ```text
-<service-id>.onion       protected launcher
-auth.<service-id>.onion  Authelia portal
-api.<service-id>.onion   a mapped host-loopback application
+<service-id>.onion        protected application launcher
+<service-id>.onion/login  Authelia portal
+api.<service-id>.onion    a mapped host-loopback application
 ```
 
 Tor provides onion identity and client authorization, Caddy provides private-CA
@@ -77,7 +77,8 @@ outputs, credentials, or runtime state into Git.
 ./tools/run-local.sh
 ```
 
-Open <http://localhost:12755>. On first run:
+Open <http://localhost:12755>. The responsive console has four views: Dashboard,
+Applications, Remote Devices, and Runtime. On first run:
 
 1. enter one owner username and password;
 2. scan the TOTP QR code and submit a current code;
@@ -119,19 +120,20 @@ create another. Publication cannot remain enabled with zero acknowledged
 devices.
 
 Remote HTTPS uses Caddy's persistent private CA. Caddy manages one 397-day
-base-host leaf and one 397-day wildcard leaf shared by `auth` and every
-application prefix, so adding a mapping does not create another prefix-specific
-certificate. Caddy renews them through its native internal issuer; the console
-offers only the persistent public root certificate. A 15-minute onboarding window shows its URL and QR
-inline and serves an iPhone `.mobileconfig` containing only that public root,
-a DER `.cer` for other clients, and static guidance over client-authorized
-onion HTTP. Safari can hand the profile to iOS without Developer Mode, Apple
-Configurator, MDM, or a developer account, but Apple still requires explicit
-profile installation and full-trust confirmation in Settings. Only this bounded
-certificate bootstrap uses onion HTTP; permanent links and applications use
-HTTPS.
-Users must deliberately import both the Tor credential and public CA. Devices
-whose normal supported policy forbids private CA installation are unsupported.
+base-host leaf and one 397-day wildcard leaf shared by every application prefix,
+so adding a mapping does not create another prefix-specific certificate. Caddy
+renews them through its native internal issuer. After authentication, the base
+onion launcher lists every enabled application and explains the initial private-
+certificate warning. Installing the CA is optional: the launcher offers the
+public PEM certificate and generates an Apple `.mobileconfig` containing only
+that public root. It never exports a private key. Apple still requires deliberate
+profile installation and trust approval. Permanent links and applications use
+HTTPS; onion HTTP has no application, login, or certificate route.
+
+Users must deliberately import the Tor credential and, if desired, the public
+CA. Devices whose normal policy forbids private CA installation may have to use
+a permitted manual warning exception; clients which permit neither are
+unsupported.
 In particular, current Tor Browser disables its local certificate database by
 default. Tor Project documents a root-CA workaround as development-only and
 warns that it reduces or disables privacy protections; Torkitten therefore does
@@ -139,7 +141,7 @@ not support or recommend that workaround:
 <https://onionservices.torproject.org/apps/web/onionspray/guides/root-ca/>.
 
 The local console can transactionally rotate the onion identity after pending
-device enrollment and certificate onboarding are closed. Rotation stages a new
+device enrollment is closed. Rotation stages a new
 Tor-owned identity, new key for every acknowledged device, Caddy certificates,
 and the new Authelia cookie domain before committing. It revokes all local and
 onion sessions and returns replacement client credentials once; save and import
@@ -154,7 +156,8 @@ from the replacement enrollment is accepted.
 
 ## Local mapping API
 
-The console can create a one-time bearer token with mapping read/write scope.
+The Applications view can enable one-time CLI and agent access with mapping
+read/write scope. It exposes only copy-token and copy-agent-prompt actions.
 Tokens are shown once, rate limited, revocable, and persisted only as hashes.
 For example:
 

@@ -14,16 +14,15 @@ import (
 	"time"
 	"torkitten/internal/authelia"
 	"torkitten/internal/caddy"
-	"torkitten/internal/localsession"
+	local "torkitten/internal/localsession"
 	"torkitten/internal/model"
 	"torkitten/internal/state"
-	"torkitten/internal/supervisor"
+	sup "torkitten/internal/supervisor"
 	torkitTor "torkitten/internal/tor"
 )
 
 type Caddy interface {
 	Apply(context.Context, []byte) ([]byte, error)
-	RootCA(context.Context) ([]byte, error)
 }
 
 func AuthenticateFactors(ctx context.Context, client *authelia.Client, username string, password []byte, token string) (*authelia.FactorSession, error) {
@@ -51,23 +50,19 @@ type Manager struct {
 	tor      torkitTor.Paths
 	control  torkitTor.Client
 	rotation IdentityRuntime
-	sessions *localsession.Manager
-	process  *supervisor.Supervisor
+	sessions *local.Manager
+	process  *sup.Supervisor
 	now      func() time.Time
 }
 
 func New(store *state.Store, renderer caddy.Renderer, caddyClient Caddy, torPaths torkitTor.Paths) *Manager {
 	return &Manager{store: store, renderer: renderer, caddy: caddyClient, tor: torPaths, control: torkitTor.Client{Socket: torPaths.ControlSocket, Cookie: torPaths.CookieFile}, now: time.Now}
 }
-func (m *Manager) State() model.State                         { return m.store.View() }
-func (m *Manager) SetIdentityRuntime(runtime IdentityRuntime) { m.rotation = runtime }
-func (m *Manager) SetCredentials(s *localsession.Manager, p *supervisor.Supervisor) {
-	m.sessions, m.process = s, p
-}
-func (m *Manager) PrepareCredentialChange() error { return m.sessions.RevokeAll() }
-func (m *Manager) FinishCredentialChange(ctx context.Context) error {
-	return caddy.RestartAuth(ctx, m.process)
-}
+func (m *Manager) State() model.State                          { return m.store.View() }
+func (m *Manager) SetIdentityRuntime(runtime IdentityRuntime)  { m.rotation = runtime }
+func (m *Manager) SetAuth(s *local.Manager, p *sup.Supervisor) { m.sessions, m.process = s, p }
+func (m *Manager) PrepareCredentialChange() error              { return m.sessions.RevokeAll() }
+func (m *Manager) FinishAuth(ctx context.Context) error        { return caddy.RestartAuth(ctx, m.process) }
 func (m *Manager) RotateIdentity(ctx context.Context, confirmation string) ([]caddy.RotatedCredential, error) {
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
@@ -77,11 +72,11 @@ func (m *Manager) RotateIdentity(ctx context.Context, confirmation string) ([]ca
 	var credentials []caddy.RotatedCredential
 	var finish func()
 	err := m.store.Transition(func(current model.State) (model.State, func() error, error) {
-		if !current.Initialized || current.Pending != nil || current.Bootstrap != nil || len(current.Devices) == 0 {
+		if !current.Initialized || current.Pending != nil || len(current.Devices) == 0 {
 			return current, nil, errors.New("identity cannot be rotated")
 		}
 		base := state.Clone(current)
-		base.Sessions, base.Bootstrap = []model.LocalSession{}, nil
+		base.Sessions = []model.LocalSession{}
 		candidate, values, rollback, commit, err := m.rotation.Apply(ctx, base)
 		if err != nil {
 			return current, nil, err
@@ -175,6 +170,15 @@ func (m *Manager) TestMapping(ctx context.Context, mapping model.Mapping) error 
 }
 func (m *Manager) caddyChange(ctx context.Context, mutate func(*model.State) error) error {
 	return state.ComponentChange(ctx, m.store, m.renderer.Render, m.caddy.Apply, mutate)
+}
+func ReconcileCaddy(ctx context.Context, store *state.Store, renderer caddy.Renderer, client Caddy) error {
+	return store.Reconcile(func(current model.State) error {
+		config, err := renderer.Render(current)
+		if err == nil {
+			_, err = client.Apply(ctx, config)
+		}
+		return err
+	})
 }
 func (m *Manager) SetPublication(ctx context.Context, enabled bool) error {
 	return m.store.Transition(func(current model.State) (model.State, func() error, error) {
@@ -341,9 +345,6 @@ func (m *Manager) ReconcileTor(ctx context.Context) error {
 		if candidate.Pending != nil && !candidate.Pending.ExpiresAt.After(m.now()) {
 			candidate.Pending = nil
 		}
-		if candidate.Bootstrap != nil && !candidate.Bootstrap.ExpiresAt.After(m.now()) {
-			candidate.Bootstrap = nil
-		}
 		apply := func(callCtx context.Context, value model.State) error {
 			if err := m.tor.Reconcile(value.Devices, value.Pending); err != nil {
 				return err
@@ -361,10 +362,6 @@ func (m *Manager) ReconcileTor(ctx context.Context) error {
 		}
 		return candidate, rollback, nil
 	})
-}
-func (m *Manager) PublicCA(ctx context.Context) ([]byte, error) { return m.caddy.RootCA(ctx) }
-func (m *Manager) SetBootstrap(ctx context.Context, window *model.BootstrapWindow) error {
-	return m.caddyChange(ctx, func(candidate *model.State) error { candidate.Bootstrap = window; return nil })
 }
 func StageOwnerReset(store *state.Store) error {
 	return store.Transition(func(current model.State) (model.State, func() error, error) {

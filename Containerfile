@@ -34,7 +34,7 @@ RUN chown -R 1000:1000 /etc/torkitten/caddy /etc/torkitten/authelia /etc/torkitt
     && chown 0:0 /usr/bin/torkitten /usr/bin/torkittenctl /usr/bin/tor /usr/bin/caddy /usr/bin/authelia \
     && chmod 0555 /usr/bin/torkitten /usr/bin/torkittenctl /usr/bin/tor /usr/bin/caddy /usr/bin/authelia \
     && chmod 0755 /usr/share/torkitten /usr/share/torkitten/launcher \
-    && chmod 0644 /usr/share/torkitten/launcher/index.html \
+    && chmod 0644 /usr/share/torkitten/launcher/* \
     && chmod -R go-w /usr/share/doc/torkitten /usr/share/tor
 ENV HOME=/var/lib/torkitten DO_NOT_TRACK=1 GOTELEMETRY=off OTEL_SDK_DISABLED=true OTEL_METRICS_EXPORTER=none OTEL_TRACES_EXPORTER=none AUTHELIA_TELEMETRY_METRICS_ENABLED=false
 USER 1000:1000

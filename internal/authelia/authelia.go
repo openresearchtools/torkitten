@@ -27,9 +27,7 @@ import (
 
 const maxExchange = 64 << 10
 
-type Paths struct {
-	Binary, Config, Users, Database, SecretsDir, Socket, QR, Notifications string
-}
+type Paths struct{ Binary, Config, Users, Database, SecretsDir, Socket, QR, Notifications string }
 
 func DefaultPaths() Paths {
 	return Paths{
@@ -45,9 +43,10 @@ func (p Paths) Render(serviceID string) ([]byte, error) {
 	if !regexp.MustCompile(`^[a-z2-7]{56}$`).MatchString(serviceID) || !p.safe() {
 		return nil, errors.New("invalid Authelia rendering inputs")
 	}
-	base, auth := s.Host(""), s.Host("auth")
-	return []byte(fmt.Sprintf(`server:
-  address: 'unix://%s?umask=0077'
+	base := s.Host("")
+	return []byte(fmt.Sprintf(`theme: 'dark'
+server:
+  address: 'unix://%s?umask=0077&path=login'
   disable_healthcheck: true
   endpoints:
     enable_pprof: false
@@ -80,13 +79,13 @@ session:
   expiration: '87600h'
   remember_me: -1
   cookies:
-    - { domain: '%s', authelia_url: 'https://%s', default_redirection_url: 'https://%s', name: 'torkitten_onion', same_site: 'lax', inactivity: '87600h', expiration: '87600h', remember_me: -1 }
+    - { domain: '%s', authelia_url: 'https://%s/login', default_redirection_url: 'https://%s', name: 'torkitten_onion', same_site: 'lax', inactivity: '87600h', expiration: '87600h', remember_me: -1 }
 regulation: { modes: ['user'], max_retries: 3, find_time: '2m', ban_time: '5m' }
 storage: { local: { path: '%s' } }
 notifier: { filesystem: { filename: '%s' } }
 ntp: { disable_startup_check: true }
 telemetry: { metrics: { enabled: false } }
-`, p.Socket, p.Users, base, base, model.OwnerGroup, base, auth, base, p.Database, p.Notifications)), nil
+`, p.Socket, p.Users, base, base, model.OwnerGroup, base, base, base, p.Database, p.Notifications)), nil
 }
 
 var safePath = regexp.MustCompile(`^/[A-Za-z0-9._/-]+$`)
@@ -311,7 +310,7 @@ func (c *Client) call(ctx context.Context, client *http.Client, method, path str
 		}
 		body = bytes.NewReader(data)
 	}
-	host := "auth." + c.domain.Load().(string) + ".onion"
+	host, path := c.domain.Load().(string)+".onion", "/login"+path
 	req, err := http.NewRequestWithContext(ctx, method, "https://"+host+path, body)
 	if err != nil {
 		return err

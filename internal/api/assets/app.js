@@ -1,33 +1,409 @@
 "use strict";
-const csrf=document.querySelector('meta[name="csrf-token"]')?.content||"";
-const $=id=>document.getElementById(id);
-const node=(tag,cls,text)=>{const e=document.createElement(tag);if(cls)e.className=cls;if(text!==undefined)e.textContent=text;return e};
-let state,rotated=false,bootstrapQR="",pendingSecret=null;
-async function request(path,body){const response=await fetch(path,{method:"POST",credentials:"same-origin",headers:{"Content-Type":"application/json","X-CSRF-Token":csrf},body:JSON.stringify(body||{})});const data=await response.json().catch(()=>({}));if(!response.ok)throw new Error(data.error||"Request failed");return data}
-function notice(text,good=false){const e=$("notice");e.textContent=text;e.className=good?"success":"";window.setTimeout(()=>{if(e.textContent===text)e.textContent=""},5000)}
-function button(text,action,kind="secondary"){const b=node("button",kind,text);b.type="button";b.addEventListener("click",action);return b}
-function row(title,meta,actions=[]){const r=node("div","row"),main=node("div","row-main"),a=node("div","row-actions");main.append(node("div","row-title",title),node("div","row-meta",meta));actions.forEach(x=>a.append(x));r.append(main,a);return r}
-async function mutate(path,body,message){try{await request(path,body);notice(message,true);await load()}catch(e){notice(e.message)}}
-async function load(){const response=await fetch("/api/state",{credentials:"same-origin"});if(response.status===403){location.href="/login";return}state=await response.json();render()}
-function render(){
- ["mappings","devices","tokens","sessions","components"].forEach(k=>state[k]??=[]);
- const mainURL=`https://${state.onion}/`;$("onion").textContent=mainURL;$("onion-link").href=mainURL;$("open-onion").href=mainURL;$("publication-label").textContent=state.publication_enabled?"Publication running":"Publication stopped";$("publication").textContent=state.publication_enabled?"Stop publication":"Start publication";$("overall").textContent=state.components.every(x=>x.state==="running")?"All components healthy":"Attention needed";
- const mappings=$("mappings");mappings.replaceChildren();state.mappings.forEach(m=>{const toggle=button(m.enabled?"Disable":"Enable",()=>mutate("/api/mappings/enable",{prefix:m.prefix,enabled:!m.enabled},"Mapping updated"));const test=button("Test",()=>mutate("/api/mappings/test",{prefix:m.prefix,port:m.port,protocol:m.protocol},"Upstream is reachable"));const del=button("Delete",()=>{if(confirm(`Delete ${m.prefix}?`))mutate("/api/mappings/delete",{id:m.prefix,confirmation:"DELETE"},"Mapping deleted")},"danger");mappings.append(row(`${m.prefix}.${state.onion}`,`${m.protocol.toUpperCase()} · host port ${m.port}${m.enabled?"":" · disabled"}`,[test,toggle,del]))});if(!state.mappings.length)mappings.textContent="No mappings yet.";
- const components=$("components");components.replaceChildren();state.components.forEach(c=>components.append(row(c.name,c.state+(c.last_error?` · ${c.last_error}`:""),[button("Restart",()=>mutate("/api/components",{name:c.name,action:"restart",confirmation:"RESTART"},`${c.name} restarted`)),button(c.state==="stopped"?"Start":"Stop",()=>mutate("/api/components",{name:c.name,action:c.state==="stopped"?"start":"stop",confirmation:c.state==="stopped"?"":"STOP"},`${c.name} updated`),c.state==="stopped"?"secondary":"danger")])));
- const devices=$("devices");devices.replaceChildren();state.devices.forEach(d=>devices.append(row(d.name,"Authorized · "+new Date(d.acknowledged_at).toLocaleDateString(),[button("Revoke",()=>{if(confirm(`Revoke ${d.name}?`))mutate("/api/devices/revoke",{id:d.id,confirmation:"REVOKE"},"Device revoked")},"danger")])));if(!state.devices.length)devices.textContent="No devices enrolled.";renderPending();renderBootstrap();
- const tokens=$("tokens");tokens.replaceChildren();state.tokens.forEach(t=>tokens.append(row(t.name,(t.scopes||[]).join(", "),[button("Revoke",()=>mutate("/api/tokens/revoke",{id:t.id,confirmation:"REVOKE"},"Token revoked"),"danger")])));if(!state.tokens.length)tokens.textContent="No agent tokens.";
- const sessions=$("sessions");sessions.replaceChildren();state.sessions.forEach(x=>sessions.append(row(x.owner,"Last used "+new Date(x.LastUseAt||x.last_use_at).toLocaleString(),[button("Revoke",()=>mutate("/api/sessions/revoke",{id:x.ID||x.id,confirmation:"REVOKE"},"Session revoked"),"danger")])))
+
+const csrf = document.querySelector('meta[name="csrf-token"]')?.content || "";
+const byID = id => document.getElementById(id);
+const make = (tag, className, text) => {
+  const element = document.createElement(tag);
+  if (className) element.className = className;
+  if (text !== undefined) element.textContent = text;
+  return element;
+};
+
+let state = null;
+let selectedPlatform = "apple";
+let pendingSecret = null;
+let revealedToken = "";
+let noticeTimer = 0;
+
+async function request(path, body) {
+  const response = await fetch(path, {
+    method: "POST",
+    credentials: "same-origin",
+    headers: {"Content-Type": "application/json", "X-CSRF-Token": csrf},
+    body: JSON.stringify(body || {})
+  });
+  const text = await response.text();
+  let value = {};
+  try { value = text ? JSON.parse(text) : {}; } catch (_) {}
+  if (!response.ok) throw new Error(value.error || "That request could not be completed.");
+  return value;
 }
-function renderPending(){const box=$("pending");box.replaceChildren();if(!state.pending_device){pendingSecret=null;return}const id=state.pending_device.id,p=node("div","alert"),title=node("strong","",`Finish enrolling ${state.pending_device.name}`),links=node("div","row-actions"),qr=node("img","qr");qr.src="/api/devices/pending.png";qr.alt="Orbot client-authorization QR code";const text=node("a","button secondary","Download .auth_private");text.href="/api/devices/pending.auth_private";p.append(title,node("p","muted","Scan in Orbot on another device, or copy the onion address and private key below when Orbot is on this device."),qr);if(pendingSecret?.id===id&&pendingSecret.key){for(const [label,value] of [["Onion address for Orbot",pendingSecret.address],["Private key",pendingSecret.key],["Complete Tor credential",pendingSecret.credential]]){p.append(node("p","fine",label),node("div","secret",value),button(`Copy ${label.toLowerCase()}`,()=>navigator.clipboard.writeText(value)))}links.append(text,button("Erase private key and finish enrollment",()=>{if(confirm("Only continue after Orbot or Tor accepted the credential. Torkitten will permanently erase this private key."))mutate("/api/devices/acknowledge",{id},"Device enrolled")}));p.append(links)}else{p.append(node("p","muted","Loading the one-time private key…"));if(pendingSecret?.id!==id){pendingSecret={id};fetch("/api/devices/pending.auth_private",{credentials:"same-origin"}).then(r=>{if(!r.ok)throw Error();return r.text()}).then(value=>{const credential=value.trim(),match=/^([a-z2-7]{56}):descriptor:x25519:([a-z2-7]{52})$/.exec(credential);if(!match)throw Error();pendingSecret={id,credential,address:`http://${match[1]}.onion`,key:match[2]};renderPending()}).catch(()=>{pendingSecret=null;notice("Could not load the pending private key")})}}box.append(p)}
-function renderBootstrap(){const box=$("bootstrap");box.replaceChildren();if(!state.bootstrap){bootstrapQR="";box.append(node("p","muted","No certificate link yet."));return}const url=`http://${state.onion}/onboard/${state.bootstrap.token}/`,link=node("a","secret",url),items=[node("p","muted",`Available until ${new Date(state.bootstrap.expires_at).toLocaleTimeString()}`),link];link.href=url;link.target="_blank";link.rel="noreferrer";if(bootstrapQR){const image=node("img","qr");image.src=bootstrapQR;image.alt="QR code for the certificate download page";items.push(image)}items.push(button("Copy certificate link",()=>navigator.clipboard.writeText(url)),button("Close",()=>mutate("/api/bootstrap/close",{},"Window closed"),"danger"));box.append(...items)}
-async function openBootstrap(){try{const value=await request("/api/bootstrap/open",{});bootstrapQR=value.qr;notice("Onboarding window opened",true);await load()}catch(error){notice(error.message)}}
-async function rotateIdentity(){if(!confirm("Rotate the onion identity and invalidate every existing device credential and session?"))return;rotated=true;try{const value=await request("/api/identity/rotate",{confirmation:"ROTATE"}),text=value.credentials.map(x=>`${x.name}\n${x.credential}`).join("\n\n"),box=$("rotation-result"),link=node("a","button secondary","Download all credentials");link.href=URL.createObjectURL(new Blob([`New onion: ${value.onion}\n\n${text}\n`],{type:"text/plain"}));link.download="torkitten-rotated-client-auth.txt";box.replaceChildren(node("p","alert","Rotation complete. Save these credentials now; they cannot be recovered."),node("div","secret",`New onion: ${value.onion}\n\n${text}`),button("Copy all",()=>navigator.clipboard.writeText(text)),link)}catch(error){rotated=false;notice(error.message)}}
-$("mapping-form").addEventListener("submit",async e=>{e.preventDefault();const form=e.currentTarget,f=new FormData(form);await mutate("/api/mappings/create",{prefix:f.get("prefix"),port:Number(f.get("port")),protocol:f.get("protocol")},"Mapping added");form.reset()});
-$("device-form").addEventListener("submit",async e=>{e.preventDefault();const form=e.currentTarget,f=new FormData(form);try{const value=await request("/api/devices/create",{name:f.get("name")});form.reset();$("token-once").replaceChildren();notice("Device credential created",true);await load();const box=$("pending"),secret=node("div","secret",value.credential);box.prepend(secret,button("Copy credential",()=>navigator.clipboard.writeText(value.credential)))}catch(error){notice(error.message)}});
-$("token-form").addEventListener("submit",async e=>{e.preventDefault();const form=e.currentTarget,f=new FormData(form);try{const value=await request("/api/tokens/create",{name:f.get("name"),scopes:[],lifetime_hours:0});form.reset();const box=$("token-once");box.replaceChildren(node("p","alert","Copy this token now. It will not be shown again."),node("div","secret",value.token),button("Copy token",()=>navigator.clipboard.writeText(value.token)));await load()}catch(error){notice(error.message)}});
-$("password-form").addEventListener("submit",async e=>{e.preventDefault();const form=e.currentTarget,f=new FormData(form),next=f.get("new_password"),confirmation=f.get("confirmation");if(next!==confirmation){notice("New passwords do not match");return}if(!confirm("Change the owner password and sign out every session?"))return;try{await request("/api/owner/password",{username:f.get("username"),password:f.get("password"),totp:f.get("totp"),new_password:next,confirmation});form.reset();location.href="/login"}catch(error){notice(error.message)}});
-$("totp-begin-form").addEventListener("submit",async e=>{e.preventDefault();const form=e.currentTarget,f=new FormData(form);try{const value=await request("/api/owner/totp/begin",{username:f.get("username"),password:f.get("password"),totp:f.get("totp")});form.reset();$("totp-qr").src=value.qr;$("totp-enrollment").hidden=false;notice("Scan the replacement QR, then confirm a new code",true)}catch(error){notice(error.message)}});
-$("totp-complete-form").addEventListener("submit",async e=>{e.preventDefault();const f=new FormData(e.currentTarget);try{await request("/api/owner/totp/complete",{totp:f.get("totp")});location.href="/login"}catch(error){notice(error.message)}});
-document.addEventListener("click",e=>{const action=e.target.closest("[data-action]")?.dataset.action;if(action==="publication"){if(!state.publication_enabled&&!state.devices.length)notice("Enroll and import a device before starting publication");else mutate("/api/publication",{enabled:!state.publication_enabled,confirmation:state.publication_enabled?"STOP":"START"},"Publication updated")}if(action==="bootstrap-open")openBootstrap();if(action==="identity-rotate")rotateIdentity();if(action==="logout")request("/logout",{}).finally(()=>location.href="/login");const copy=e.target.closest("[data-copy]")?.dataset.copy;if(copy)navigator.clipboard.writeText($(copy).textContent)});
-load().catch(()=>notice("Could not load Torkitten state"));
-window.setInterval(()=>{if(!rotated)load().catch(()=>{})},5000);
+
+function notify(message, good = false) {
+  const notice = byID("notice");
+  window.clearTimeout(noticeTimer);
+  notice.textContent = message;
+  notice.className = good ? "success" : "";
+  noticeTimer = window.setTimeout(() => {
+    notice.textContent = "";
+    notice.className = "";
+  }, 4500);
+}
+
+async function copyText(value, label = "Copied") {
+  try {
+    await navigator.clipboard.writeText(value);
+    notify(label, true);
+    return;
+  } catch (_) {}
+  const helper = make("textarea");
+  helper.value = value;
+  helper.setAttribute("readonly", "");
+  helper.style.position = "fixed";
+  helper.style.opacity = "0";
+  document.body.append(helper);
+  helper.select();
+  const copied = document.execCommand("copy");
+  helper.remove();
+  notify(copied ? label : "Copying was blocked by the browser.", copied);
+}
+
+async function mutate(path, body, message) {
+  try {
+    const value = await request(path, body);
+    if (message) notify(message, true);
+    await load();
+    return value;
+  } catch (error) {
+    notify(error.message);
+    throw error;
+  }
+}
+
+async function load() {
+  const response = await fetch("/api/state", {credentials: "same-origin"});
+  if (response.status === 403) {
+    location.href = "/login";
+    return;
+  }
+  if (!response.ok) throw new Error("Could not load Torkitten.");
+  state = await response.json();
+  state.mappings ||= [];
+  state.devices ||= [];
+  state.tokens ||= [];
+  state.components ||= [];
+  render();
+}
+
+function route() {
+  const requested = location.hash.slice(1);
+  const active = ["dashboard", "applications", "devices", "runtime"].includes(requested) ? requested : "dashboard";
+  document.querySelectorAll("[data-view]").forEach(view => view.hidden = view.dataset.view !== active);
+  document.querySelectorAll("[data-tab]").forEach(tab => {
+    if (tab.dataset.tab === active) tab.setAttribute("aria-current", "page");
+    else tab.removeAttribute("aria-current");
+  });
+  if (location.hash !== `#${active}`) history.replaceState(null, "", `#${active}`);
+  document.title = `${active[0].toUpperCase()}${active.slice(1)} · Torkitten`;
+}
+
+function componentDot(component) {
+  const dot = make("i", "status-dot");
+  if (component?.state === "running") dot.classList.add("good");
+  else if (component?.state === "stopped") dot.classList.add("bad");
+  return dot;
+}
+
+function render() {
+  const allRunning = state.components.length === 3 && state.components.every(component => component.state === "running");
+  const topDot = byID("top-status");
+  topDot.className = `status-dot ${allRunning && state.publication_enabled ? "good" : allRunning ? "" : "bad"}`;
+  byID("top-label").textContent = allRunning && state.publication_enabled ? "Running" : allRunning ? "Turned off" : "Needs attention";
+
+  const mainURL = `https://${state.onion}/`;
+  byID("onion").textContent = mainURL;
+  const badge = byID("publication-badge");
+  badge.textContent = state.publication_enabled ? "Running" : "Off";
+  badge.className = `badge ${state.publication_enabled ? "good" : "bad"}`;
+  byID("publication").textContent = state.publication_enabled ? "Turn off" : "Turn on";
+
+  renderDashboardApplications();
+  renderApplications();
+  renderHealth();
+  renderDevices();
+  renderRuntime();
+  renderAutomation();
+}
+
+function renderDashboardApplications() {
+  const list = byID("dashboard-apps");
+  list.replaceChildren();
+  const enabled = state.mappings.filter(mapping => mapping.enabled);
+  for (const mapping of enabled) {
+    const item = make("div", "app-link");
+    item.append(make("strong", "", mapping.prefix));
+    list.append(item);
+  }
+  if (!enabled.length) list.append(make("div", "empty-state", "No applications yet."));
+}
+
+function renderApplications() {
+  const list = byID("applications");
+  list.replaceChildren();
+  for (const mapping of state.mappings) {
+    const url = `https://${mapping.prefix}.${state.onion}/`;
+    const article = make("article", "application panel");
+    const details = make("div");
+    details.append(make("p", "kicker", "Private application"), make("h2", "", mapping.prefix));
+    const block = make("div", "copy-block");
+    block.append(make("code", "", url));
+    const copy = make("button", "copy-button", "Copy");
+    copy.type = "button";
+    copy.addEventListener("click", () => copyText(url, "Application address copied"));
+    block.append(copy);
+    details.append(block);
+    const figure = make("figure", "qr-tile");
+    const image = make("img", "application-qr");
+    image.src = `/api/application.png?prefix=${encodeURIComponent(mapping.prefix)}`;
+    image.alt = `QR code for ${mapping.prefix}`;
+    figure.append(image, make("figcaption", "", mapping.prefix));
+    article.append(details, figure);
+    list.append(article);
+  }
+  if (!state.mappings.length) list.append(make("div", "empty-state", "Add your first application above."));
+}
+
+function renderHealth() {
+  const list = byID("dashboard-runtime");
+  list.replaceChildren();
+  for (const component of state.components) {
+    const item = make("div", "health-item");
+    const copy = make("div");
+    copy.append(make("strong", "", component.name), make("small", "", component.state));
+    item.append(componentDot(component), copy);
+    list.append(item);
+  }
+}
+
+function renderDevices() {
+  const list = byID("devices");
+  list.replaceChildren();
+  for (const device of state.devices) {
+    const row = make("div", "simple-row");
+    const copy = make("div");
+    copy.append(make("strong", "", device.name), make("small", "", `Connected ${new Date(device.acknowledged_at).toLocaleDateString()}`));
+    row.append(copy, make("span", "badge good", "Authorized"));
+    list.append(row);
+  }
+  if (!state.devices.length) list.append(make("div", "empty-state", "No remote devices connected."));
+  if (state.pending_device && byID("device-dialog").open) renderPendingDevice();
+}
+
+function renderRuntime() {
+  const list = byID("runtime-components");
+  list.replaceChildren();
+  for (const component of state.components) {
+    const article = make("article", "runtime-component panel");
+    const name = make("div", "runtime-name");
+    const copy = make("div");
+    copy.append(make("strong", "", component.name), make("small", "", component.last_error || component.state));
+    name.append(componentDot(component), copy);
+    const actions = make("div", "runtime-actions");
+    const running = component.state === "running";
+    const toggle = make("button", running ? "danger" : "secondary", running ? "Stop" : "Start");
+    toggle.type = "button";
+    toggle.dataset.component = component.name;
+    toggle.dataset.action = running ? "stop" : "start";
+    toggle.addEventListener("click", () => componentAction(component.name, running ? "stop" : "start"));
+    const restart = make("button", "secondary", "Restart");
+    restart.type = "button";
+    restart.dataset.component = component.name;
+    restart.dataset.action = "restart";
+    restart.addEventListener("click", () => componentAction(component.name, "restart"));
+    actions.append(toggle, restart);
+    article.append(name, actions);
+    list.append(article);
+  }
+}
+
+function renderAutomation() {
+  const enabled = state.tokens.length > 0;
+  const toggle = byID("automation-toggle");
+  toggle.checked = enabled;
+  byID("automation-label").textContent = enabled ? "On" : "Off";
+  const reveal = byID("token-once");
+  reveal.hidden = !revealedToken;
+  if (revealedToken) byID("token-value").textContent = revealedToken;
+}
+
+async function componentAction(name, action) {
+  const confirmation = action === "start" ? "" : action.toUpperCase();
+  try { await mutate("/api/components", {name, action, confirmation}, `${name} ${action} requested`); } catch (_) {}
+}
+
+function openDevice(platform) {
+  selectedPlatform = platform;
+  const titles = {apple: "iPhone or iPad", android: "Android", computer: "Computer"};
+  const placeholders = {apple: "My iPhone", android: "My Android phone", computer: "My laptop"};
+  byID("device-title").textContent = titles[platform];
+  byID("device-form").elements.name.placeholder = placeholders[platform];
+  const store = byID("store-step");
+  store.hidden = platform === "computer";
+  byID("device-form").querySelector(".step-number").textContent = platform === "computer" ? "1" : "2";
+  if (!store.hidden) {
+    const source = byID(platform === "apple" ? "apple-store-data" : "android-store-data");
+    byID("store-link").href = source.dataset.link;
+    byID("store-qr").src = source.dataset.qr;
+    byID("store-copy").textContent = platform === "apple" ? "Scan this QR with the iPhone or iPad, then connect Orbot." : "Scan this QR with the Android device, then connect Orbot.";
+  }
+  byID("device-start").hidden = Boolean(state.pending_device);
+  byID("pending-device").hidden = !state.pending_device;
+  const dialog = byID("device-dialog");
+  if (!dialog.open) dialog.showModal();
+  if (state.pending_device) renderPendingDevice();
+}
+
+async function ensurePendingSecret() {
+  const pending = state.pending_device;
+  if (!pending) return null;
+  if (pendingSecret?.id === pending.id && pendingSecret.credential) return pendingSecret;
+  const response = await fetch("/api/devices/pending.auth_private", {credentials: "same-origin"});
+  if (!response.ok) throw new Error("Could not load the private access credential.");
+  const credential = (await response.text()).trim();
+  const match = /^([a-z2-7]{56}):descriptor:x25519:([a-z2-7]{52})$/.exec(credential);
+  if (!match) throw new Error("The private access credential was malformed.");
+  pendingSecret = {id: pending.id, credential, address: `http://${match[1]}.onion`, key: match[2]};
+  return pendingSecret;
+}
+
+async function renderPendingDevice() {
+  const box = byID("pending-device");
+  box.hidden = false;
+  box.replaceChildren(make("p", "muted", "Loading private access…"));
+  try {
+    const secret = await ensurePendingSecret();
+    if (!secret || !state.pending_device) return;
+    box.replaceChildren();
+    const access = make("section", "setup-step");
+    access.append(make("span", "step-number", selectedPlatform === "computer" ? "1" : "3"));
+    const content = make("div");
+    content.append(make("h3", "", `Add private access to ${byID("device-title").textContent}`));
+    if (selectedPlatform === "apple") {
+      content.append(make("p", "", "In Orbot, open Client Authentication and scan this QR."));
+      const qr = make("img", "setup-qr");
+      qr.src = "/api/devices/pending.png";
+      qr.alt = "QR code for Orbot client authorization";
+      content.append(qr);
+    } else {
+      content.append(make("p", "", selectedPlatform === "android" ? "Download this authorization file, then import it from Orbot’s Client Authentication screen." : "Save this authorization file in the client-auth directory used by your Tor client."));
+      const download = make("a", "button secondary", "Download .auth_private");
+      download.href = "/api/devices/pending.auth_private";
+      content.append(download);
+    }
+    const credential = make("div", "copy-block credential-block");
+    credential.append(make("code", "", secret.credential));
+    const copy = make("button", "copy-button", "Copy");
+    copy.type = "button";
+    copy.addEventListener("click", () => copyText(secret.credential, "Private access copied"));
+    credential.append(copy);
+    content.append(credential);
+    access.append(content);
+
+    const finish = make("section", "setup-step");
+    finish.append(make("span", "step-number", selectedPlatform === "computer" ? "2" : "4"));
+    const finishContent = make("div");
+    finishContent.append(make("h3", "", "Open your private site"), make("p", "warning", "On the first visit, your browser may report the HTTPS certificate as untrusted. The onion connection is still encrypted and authenticated by Tor. Continue manually to reach the login; after signing in, certificate installation is optional."));
+    const mainURL = `https://${state.onion}/`;
+    const finalBlock = make("div", "copy-block");
+    finalBlock.append(make("code", "", mainURL));
+    const finalCopy = make("button", "copy-button", "Copy");
+    finalCopy.type = "button";
+    finalCopy.addEventListener("click", () => copyText(mainURL, "Site address copied"));
+    finalBlock.append(finalCopy);
+    const finalQR = byID("main-qr").cloneNode();
+    finalQR.removeAttribute("id");
+    finalQR.className = "setup-qr";
+    finishContent.append(finalBlock, finalQR);
+    const acknowledge = make("button", "", "Finish and erase setup key");
+    acknowledge.type = "button";
+    acknowledge.addEventListener("click", async () => {
+      try {
+        await mutate("/api/devices/acknowledge", {id: state.pending_device.id}, "Device connected");
+        pendingSecret = null;
+        byID("device-dialog").close();
+      } catch (_) {}
+    });
+    finishContent.append(acknowledge);
+    finish.append(finishContent);
+    box.append(access, finish);
+  } catch (error) {
+    box.replaceChildren(make("p", "alert", error.message));
+  }
+}
+
+function agentPrompt(token) {
+  return `Use the local Torkitten Applications API at http://localhost:12755.\n\nAuthenticate every request with this HTTP header:\nAuthorization: Bearer ${token}\n\nAllowed operations:\n- GET /api/mappings\n- POST /api/mappings/create with {"prefix":"name","port":7777,"protocol":"http"}\n- POST /api/mappings/update\n- POST /api/mappings/enable\n- POST /api/mappings/test\n- POST /api/mappings/delete\n\nExample CLI request:\ncurl -H 'Authorization: Bearer ${token}' http://localhost:12755/api/mappings\n\nThe token grants application-mapping authority. Do not print it, log it, or send it to another host.`;
+}
+
+byID("mapping-form").addEventListener("submit", async event => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const values = new FormData(form);
+  try {
+    await mutate("/api/mappings/create", {prefix: values.get("prefix"), port: Number(values.get("port")), protocol: "http"}, "Application added");
+    form.reset();
+  } catch (_) {}
+});
+
+byID("publication").addEventListener("click", async () => {
+  if (!state.publication_enabled && !state.devices.length) {
+    notify("Connect a remote device before turning Torkitten on.");
+    location.hash = "#devices";
+    return;
+  }
+  const enabled = !state.publication_enabled;
+  try { await mutate("/api/publication", {enabled, confirmation: enabled ? "START" : "STOP"}, enabled ? "Torkitten turned on" : "Torkitten turned off"); } catch (_) {}
+});
+
+byID("device-form").addEventListener("submit", async event => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const name = new FormData(form).get("name");
+  try {
+    const value = await request("/api/devices/create", {name});
+    pendingSecret = {id: value.id, credential: value.credential};
+    form.reset();
+    await load();
+    byID("device-start").hidden = true;
+    await renderPendingDevice();
+  } catch (error) { notify(error.message); }
+});
+
+document.querySelectorAll("[data-platform]").forEach(button => button.addEventListener("click", () => openDevice(button.dataset.platform)));
+byID("automation-toggle").addEventListener("change", async event => {
+  const toggle = event.currentTarget;
+  toggle.disabled = true;
+  try {
+    if (toggle.checked && !state.tokens.length) {
+      const value = await request("/api/tokens/create", {name: "CLI and agent access", scopes: [], lifetime_hours: 0});
+      revealedToken = value.token;
+      notify("CLI and agent access enabled", true);
+      await load();
+    } else if (!toggle.checked) {
+      for (const token of state.tokens) await request("/api/tokens/revoke", {id: token.id, confirmation: "REVOKE"});
+      revealedToken = "";
+      notify("CLI and agent access disabled", true);
+      await load();
+    }
+  } catch (error) {
+    notify(error.message);
+    await load().catch(() => {});
+  } finally { toggle.disabled = false; }
+});
+
+document.addEventListener("click", event => {
+  const copy = event.target.closest("[data-copy]")?.dataset.copy;
+  if (copy) copyText(byID(copy).textContent);
+  const action = event.target.closest("[data-action]")?.dataset.action;
+  if (action === "logout") request("/logout", {}).finally(() => location.href = "/login").catch(() => {});
+  if (action === "close-device") byID("device-dialog").close();
+  if (action === "copy-agent-prompt" && revealedToken) copyText(agentPrompt(revealedToken), "Agent prompt copied");
+});
+
+byID("device-dialog").addEventListener("click", event => {
+  if (event.target === byID("device-dialog")) byID("device-dialog").close();
+});
+window.addEventListener("hashchange", route);
+route();
+load().catch(error => notify(error.message));
+window.setInterval(() => load().catch(() => {}), 5000);

@@ -59,7 +59,7 @@ type Dependencies struct {
 	Onboarding *onboarding.Manager
 	Supervisor *supervisor.Supervisor
 }
-type page struct{ CSRF, Error, OnionQR string }
+type page struct{ CSRF, Error, OnionQR, AppleQR, AndroidQR string }
 type input struct {
 	Prefix        string         `json:"prefix"`
 	OldPrefix     string         `json:"old_prefix"`
@@ -189,10 +189,7 @@ func (s *Server) setupQR(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	w.Header().Set("Content-Type", "image/png")
-	w.Header().Set("Cache-Control", "no-store")
-	w.Header().Set("Referrer-Policy", "no-referrer")
-	_, _ = w.Write(data)
+	writePNG(w, data)
 }
 func (s *Server) loginRoute(w http.ResponseWriter, r *http.Request) {
 	if !s.control.State().Initialized {
@@ -263,8 +260,7 @@ func (s *Server) dashboard(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/login", http.StatusSeeOther)
 		return
 	}
-	image, _ := onboarding.EnrollmentQR("https://" + s.control.State().Host("") + "/")
-	s.render(w, "dashboard.html", page{CSRF: auth.CSRF, OnionQR: base64.StdEncoding.EncodeToString(image)})
+	s.render(w, "dashboard.html", page{CSRF: auth.CSRF, OnionQR: qr64("https://" + s.control.State().Host("") + "/"), AppleQR: qr64("https://orbot.app/download/"), AndroidQR: qr64("https://play.google.com/store/apps/details?id=org.torproject.android")})
 }
 func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 	cookie, auth, ok := s.browserAuth(r)
@@ -350,15 +346,8 @@ func (s *Server) sensitiveRead(w http.ResponseWriter, r *http.Request) {
 		s.onboard.ServePending(w, false)
 	case "/api/devices/pending.png":
 		s.onboard.ServePending(w, true)
-	case "/api/public-ca.pem":
-		data, err := s.control.PublicCA(r.Context())
-		if err != nil {
-			s.fail(w)
-			return
-		}
-		w.Header().Set("Content-Type", "application/x-pem-file")
-		w.Header().Set("Content-Disposition", `attachment; filename="torkitten-root-ca.pem"`)
-		_, _ = w.Write(data)
+	case "/api/application.png":
+		s.applicationQR(w, r)
 	default:
 		http.NotFound(w, r)
 	}
@@ -381,18 +370,6 @@ func (s *Server) sensitiveAction(w http.ResponseWriter, r *http.Request, in inpu
 		} else {
 			err = errors.New("confirmation required")
 		}
-	case "/api/bootstrap/open":
-		url, expires, openErr := s.onboard.Open(r.Context())
-		image, imageErr := onboarding.EnrollmentQR(url)
-		if openErr == nil && imageErr == nil {
-			s.json(w, map[string]any{"url": url, "expires_at": expires, "qr": "data:image/png;base64," + base64.StdEncoding.EncodeToString(image)})
-			return
-		}
-		err = errors.Join(openErr, imageErr)
-	case "/api/bootstrap/extend":
-		_, err = s.onboard.Extend(r.Context())
-	case "/api/bootstrap/close":
-		err = s.onboard.Close(r.Context())
 	case "/api/publication":
 		expected := "STOP"
 		if in.Enabled {
@@ -468,6 +445,18 @@ func (s *Server) sensitiveAction(w http.ResponseWriter, r *http.Request, in inpu
 	}
 	s.result(w, err)
 }
+func (s *Server) applicationQR(w http.ResponseWriter, r *http.Request) {
+	prefix, current, found := r.URL.Query().Get("prefix"), s.control.State(), false
+	for _, mapping := range current.Mappings {
+		found = found || mapping.Prefix == prefix
+	}
+	image, err := onboarding.EnrollmentQR("https://" + current.Host(prefix) + "/")
+	if !found || err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	writePNG(w, image)
+}
 func (s *Server) stateJSON(w http.ResponseWriter) {
 	current := s.control.State()
 	var pending any
@@ -478,7 +467,7 @@ func (s *Server) stateJSON(w http.ResponseWriter) {
 	for _, token := range current.Tokens {
 		tokens = append(tokens, map[string]any{"id": token.ID, "name": token.Name, "scopes": token.Scopes, "created_at": token.CreatedAt, "last_use_at": token.LastUseAt, "expires_at": token.ExpiresAt})
 	}
-	s.json(w, map[string]any{"onion": current.Host(""), "publication_enabled": current.Publication, "mappings": current.Mappings, "devices": current.Devices, "pending_device": pending, "bootstrap": current.Bootstrap, "sessions": s.sessions.List(), "tokens": tokens, "components": s.process.Statuses()})
+	s.json(w, map[string]any{"onion": current.Host(""), "publication_enabled": current.Publication, "mappings": current.Mappings, "devices": current.Devices, "pending_device": pending, "sessions": s.sessions.List(), "tokens": tokens, "components": s.process.Statuses()})
 }
 func (s *Server) browserAuth(r *http.Request) (string, localsession.Auth, bool) {
 	cookie, err := r.Cookie(localsession.CookieName)
@@ -531,6 +520,16 @@ func (s *Server) validMutation(r *http.Request, cookie, csrf string) bool {
 	return r.Header.Get("Origin") == localOrigin && jsonType(r) && localsession.ValidateCSRF(cookie, csrf) && subtle.ConstantTimeCompare([]byte(r.Header.Get("X-CSRF-Token")), []byte(csrf)) == 1
 }
 func validConfirmation(a, b string) bool { return strings.EqualFold(strings.TrimSpace(a), b) }
+func qr64(value string) string {
+	image, _ := onboarding.EnrollmentQR(value)
+	return base64.StdEncoding.EncodeToString(image)
+}
+func writePNG(w http.ResponseWriter, data []byte) {
+	w.Header().Set("Content-Type", "image/png")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Referrer-Policy", "no-referrer")
+	_, _ = w.Write(data)
+}
 func jsonType(r *http.Request) bool {
 	media, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
 	return err == nil && media == "application/json"

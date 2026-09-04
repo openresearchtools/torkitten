@@ -44,7 +44,7 @@ type Runtime struct {
 func PrepareRuntime(ctx context.Context, current model.State) (*Runtime, error) {
 	tp, ap, renderer := torkitTor.DefaultPaths(), authelia.DefaultPaths(), caddy.DefaultRenderer()
 	configPath := "/etc/torkitten/caddy/Caddyfile"
-	for _, dir := range []string{filepath.Dir(configPath), renderer.StorageRoot, renderer.BootstrapRoot} {
+	for _, dir := range []string{filepath.Dir(configPath), renderer.StorageRoot} {
 		if err := state.EnsureDir(dir, 0o700); err != nil {
 			return nil, err
 		}
@@ -59,7 +59,7 @@ func PrepareRuntime(ctx context.Context, current model.State) (*Runtime, error) 
 			return nil, err
 		}
 	}
-	initial, err := renderer.Render(current)
+	initial, err := denyOnlyCaddy(renderer)
 	if err != nil {
 		return nil, err
 	}
@@ -74,6 +74,9 @@ func PrepareRuntime(ctx context.Context, current model.State) (*Runtime, error) 
 		return nil, err
 	}
 	return &Runtime{Tor: tp, Authelia: ap, Caddy: renderer, CaddyClient: client, CaddyConfig: configPath}, nil
+}
+func denyOnlyCaddy(renderer caddy.Renderer) ([]byte, error) {
+	return renderer.Render(model.NewState())
 }
 
 type SupervisedLifecycle struct {

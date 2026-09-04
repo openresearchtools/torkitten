@@ -5,7 +5,6 @@ package api
 
 import (
 	"context"
-	"encoding/json"
 	"encoding/pem"
 	"net/http"
 	"net/http/httptest"
@@ -59,7 +58,7 @@ func apiFixture(t *testing.T) (*Server, *state.Store, string, string) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	renderer := caddy.Renderer{AdminSocket: filepath.Join(root, "admin.sock"), OnionTLSSocket: filepath.Join(root, "tls.sock"), OnionHTTPSocket: filepath.Join(root, "http.sock"), AutheliaSocket: filepath.Join(root, "authelia.sock"), LauncherRoot: filepath.Join(root, "launcher"), BootstrapRoot: filepath.Join(root, "bootstrap"), StorageRoot: filepath.Join(root, "storage"), TargetHost: "host.containers.internal"}
+	renderer := caddy.Renderer{AdminSocket: filepath.Join(root, "admin.sock"), OnionTLSSocket: filepath.Join(root, "tls.sock"), OnionHTTPSocket: filepath.Join(root, "http.sock"), AutheliaSocket: filepath.Join(root, "authelia.sock"), LauncherRoot: filepath.Join(root, "launcher"), StorageRoot: filepath.Join(root, "storage"), TargetHost: "host.containers.internal"}
 	tp := torkitTor.Paths{Binary: "/bin/true", Config: filepath.Join(root, "torrc"), DataDir: filepath.Join(root, "tor-data"), HiddenServiceDir: filepath.Join(root, "hs"), ControlSocket: filepath.Join(root, "tor.sock"), CookieFile: filepath.Join(root, "cookie"), OnionHTTPSocket: renderer.OnionHTTPSocket, OnionTLSSocket: renderer.OnionTLSSocket}
 	manager := control.New(store, renderer, &apiCaddy{}, tp)
 	sessions := localsession.New(store)
@@ -73,10 +72,7 @@ func apiFixture(t *testing.T) (*Server, *state.Store, string, string) {
 	}
 	paths := authelia.Paths{Binary: "/bin/true", Config: filepath.Join(root, "authelia.yml"), Users: filepath.Join(root, "users.yml"), Database: filepath.Join(root, "db.sqlite"), SecretsDir: filepath.Join(root, "secrets"), Socket: renderer.AutheliaSocket, QR: filepath.Join(root, "qr.png"), Notifications: filepath.Join(root, "notifications")}
 	setup := bootstrap.New(paths, setupLifecycle{}, setupFactors{}, manager, sessions)
-	onboard, err := onboarding.New(manager, factors, renderer.BootstrapRoot)
-	if err != nil {
-		t.Fatal(err)
-	}
+	onboard := onboarding.New(manager, factors)
 	spec := func(name supervisor.Name) supervisor.Spec {
 		return supervisor.Spec{Name: name, Path: "/bin/true", Health: func(context.Context) error { return nil }}
 	}
@@ -84,7 +80,7 @@ func apiFixture(t *testing.T) (*Server, *state.Store, string, string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	manager.SetCredentials(sessions, process)
+	manager.SetAuth(sessions, process)
 	server, err := New(Dependencies{Control: manager, Sessions: sessions, Factors: factors, Setup: setup, Tokens: apitoken.New(store), Onboarding: onboard, Supervisor: process})
 	if err != nil {
 		t.Fatal(err)
@@ -107,7 +103,7 @@ func TestExactHostAndSecurityHeaders(t *testing.T) {
 	request.AddCookie(&http.Cookie{Name: localsession.CookieName, Value: cookie})
 	response = httptest.NewRecorder()
 	server.ServeHTTP(response, request)
-	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "data:image/png;base64,") || !strings.Contains(response.Body.String(), "Permanent HTTPS onion site") {
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "data:image/png;base64,") || !strings.Contains(response.Body.String(), "Your private address") || !strings.Contains(response.Body.String(), "Remote devices") {
 		t.Fatalf("dashboard status=%d", response.Code)
 	}
 }
@@ -140,29 +136,40 @@ func TestPendingCredentialDownloadsAsAttachment(t *testing.T) {
 	}
 }
 
-func TestBootstrapOpenReturnsLinkQR(t *testing.T) {
-	server, store, cookie, csrf := apiFixture(t)
-	now := time.Now().UTC()
+func TestCertificateBootstrapRoutesAreAbsent(t *testing.T) {
+	server, _, cookie, csrf := apiFixture(t)
+	for _, test := range []struct{ method, path string }{{http.MethodGet, "/api/public-ca.pem"}, {http.MethodPost, "/api/bootstrap/open"}} {
+		request := httptest.NewRequest(test.method, test.path, strings.NewReader(`{}`))
+		request.Host = localHost
+		request.Header.Set("Content-Type", "application/json")
+		request.Header.Set("Origin", localOrigin)
+		request.Header.Set("X-CSRF-Token", csrf)
+		request.AddCookie(&http.Cookie{Name: localsession.CookieName, Value: cookie})
+		response := httptest.NewRecorder()
+		server.ServeHTTP(response, request)
+		if response.Code != http.StatusNotFound {
+			t.Fatalf("%s status=%d", test.path, response.Code)
+		}
+	}
+}
+
+func TestApplicationQRRequiresKnownMapping(t *testing.T) {
+	server, store, cookie, _ := apiFixture(t)
 	if err := store.Transition(func(current model.State) (model.State, func() error, error) {
-		current.Devices = []model.Device{{ID: strings.Repeat("b", 32), Name: "phone", PublicKey: strings.Repeat("a", 52), CreatedAt: now, AcknowledgedAt: now}}
+		current.Mappings = []model.Mapping{{Prefix: "photos", Port: 7777, Protocol: model.ProtocolHTTP, Enabled: true}}
 		return current, nil, nil
 	}); err != nil {
 		t.Fatal(err)
 	}
-	request := httptest.NewRequest(http.MethodPost, "/api/bootstrap/open", strings.NewReader(`{}`))
-	request.Host = localHost
-	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("Origin", localOrigin)
-	request.Header.Set("X-CSRF-Token", csrf)
-	request.AddCookie(&http.Cookie{Name: localsession.CookieName, Value: cookie})
-	response := httptest.NewRecorder()
-	server.ServeHTTP(response, request)
-	var value map[string]any
-	decodeErr := json.Unmarshal(response.Body.Bytes(), &value)
-	qr, _ := value["qr"].(string)
-	url, _ := value["url"].(string)
-	if decodeErr != nil || response.Code != http.StatusOK || !strings.HasPrefix(qr, "data:image/png;base64,") || !strings.HasPrefix(url, "http://") || store.View().Bootstrap == nil {
-		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	for prefix, want := range map[string]int{"photos": http.StatusOK, "unknown": http.StatusNotFound} {
+		request := httptest.NewRequest(http.MethodGet, "/api/application.png?prefix="+prefix, nil)
+		request.Host = localHost
+		request.AddCookie(&http.Cookie{Name: localsession.CookieName, Value: cookie})
+		response := httptest.NewRecorder()
+		server.ServeHTTP(response, request)
+		if response.Code != want || want == http.StatusOK && (!strings.HasPrefix(response.Body.String(), "\x89PNG") || response.Header().Get("Content-Type") != "image/png") {
+			t.Fatalf("prefix=%s status=%d", prefix, response.Code)
+		}
 	}
 }
 

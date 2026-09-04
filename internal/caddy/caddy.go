@@ -29,18 +29,18 @@ type Renderer struct {
 	OnionHTTPSocket string
 	AutheliaSocket  string
 	LauncherRoot    string
-	BootstrapRoot   string
 	StorageRoot     string
 	TargetHost      string
 	Aliases         []string
+	PublicRoot      []byte
 }
 
 func DefaultRenderer() Renderer {
 	return Renderer{
 		AdminSocket: "/run/torkitten/caddy-admin.sock", OnionTLSSocket: "/run/torkitten/caddy-https.sock",
 		OnionHTTPSocket: "/run/torkitten/caddy-http.sock", AutheliaSocket: "/run/torkitten/authelia.sock",
-		LauncherRoot: "/usr/share/torkitten/launcher", BootstrapRoot: "/run/torkitten/bootstrap",
-		StorageRoot: "/var/lib/torkitten/caddy/storage", TargetHost: "127.0.0.1",
+		LauncherRoot: "/usr/share/torkitten/launcher",
+		StorageRoot:  "/var/lib/torkitten/caddy/storage", TargetHost: "127.0.0.1",
 	}
 }
 
@@ -52,7 +52,7 @@ func (r Renderer) Render(s model.State) ([]byte, error) {
 	if err := s.Validate(); err != nil {
 		return nil, err
 	}
-	for _, path := range []string{r.AdminSocket, r.OnionTLSSocket, r.OnionHTTPSocket, r.AutheliaSocket, r.LauncherRoot, r.BootstrapRoot, r.StorageRoot} {
+	for _, path := range []string{r.AdminSocket, r.OnionTLSSocket, r.OnionHTTPSocket, r.AutheliaSocket, r.LauncherRoot, r.StorageRoot} {
 		if !filepath.IsAbs(path) || !safePath.MatchString(path) {
 			return nil, errors.New("unsafe internal Caddy path")
 		}
@@ -63,7 +63,7 @@ func (r Renderer) Render(s model.State) ([]byte, error) {
 	var b strings.Builder
 	fmt.Fprintf(&b, "{\n\tadmin unix/%s\n\tpersist_config off\n\tstorage file_system {\n\t\troot %s\n\t}\n\tpki {\n\t\tca local {\n\t\t\tname \"Torkitten Local CA\"\n\t\t}\n\t}\n\tcert_issuer internal {\n\t\tlifetime 9528h\n\t\tsign_with_root\n\t}\n\tskip_install_trust\n\tauto_https disable_redirects\n}\n\n", r.AdminSocket, r.StorageRoot)
 	if s.ServiceID == "" || !s.Initialized {
-		r.renderDisabled(&b)
+		fmt.Fprintf(&b, "https://:443 {\n\tbind unix/%s\n\trespond \"not found\" 404\n}\n\nhttp://:80 {\n\tbind unix/%s\n\trespond \"not found\" 404\n}\n", r.OnionTLSSocket, r.OnionHTTPSocket)
 		return []byte(b.String()), nil
 	}
 	mappings := append([]model.Mapping(nil), s.Mappings...)
@@ -83,10 +83,16 @@ func (r Renderer) Render(s model.State) ([]byte, error) {
 	}
 	b.WriteString("https://:443 {\n")
 	fmt.Fprintf(&b, "\tbind unix/%s\n\ttls {\n\t\tprotocols tls1.2 tls1.3\n\t}\n", r.OnionTLSSocket)
-	r.renderAuth(&b, hosts(ids, "auth"))
+	r.renderPortal(&b, hosts(ids, ""))
 	fmt.Fprintf(&b, "\t@launcher host %s\n\thandle @launcher {\n", strings.Join(hosts(ids, ""), " "))
 	r.renderProtectedPrefix(&b)
-	fmt.Fprintf(&b, "\t\theader {\n\t\t\tCache-Control no-store\n\t\t\tContent-Security-Policy \"default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'\"\n\t\t\tReferrer-Policy no-referrer\n\t\t\tX-Content-Type-Options nosniff\n\t\t}\n\t\troot * %s\n\t\tfile_server\n\t}\n", r.LauncherRoot)
+	b.WriteString("\t\t@apps path /apps.json\n\t\theader @apps Content-Type application/json\n")
+	fmt.Fprintf(&b, "\t\trespond @apps `%s` 200\n", launcherJSON(s, mappings))
+	if len(r.PublicRoot) != 0 {
+		b.WriteString("\t\t@root_ca path /trust/torkitten-root-ca.pem\n\t\theader @root_ca Content-Type application/x-pem-file\n\t\theader @root_ca Content-Disposition `attachment; filename=torkitten-root-ca.pem`\n")
+		fmt.Fprintf(&b, "\t\trespond @root_ca `%s` 200\n", r.PublicRoot)
+	}
+	fmt.Fprintf(&b, "\t\theader {\n\t\t\tCache-Control no-store\n\t\t\tContent-Security-Policy \"default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'\"\n\t\t\tReferrer-Policy no-referrer\n\t\t\tX-Content-Type-Options nosniff\n\t\t}\n\t\troot * %s\n\t\tfile_server\n\t}\n", r.LauncherRoot)
 	for _, mapping := range mappings {
 		if !mapping.Enabled {
 			continue
@@ -97,43 +103,41 @@ func (r Renderer) Render(s model.State) ([]byte, error) {
 		fmt.Fprintf(&b, "\t\treverse_proxy %s://%s:%d\n\t}\n", mapping.Protocol, r.TargetHost, mapping.Port)
 	}
 	b.WriteString("\trespond \"not found\" 404\n}\n\n")
-	r.renderHTTP(&b, s)
+	fmt.Fprintf(&b, "http://:80 {\n\tbind unix/%s\n\trespond \"not found\" 404\n}\n", r.OnionHTTPSocket)
 	return []byte(b.String()), nil
-}
-func (r Renderer) renderDisabled(b *strings.Builder) {
-	fmt.Fprintf(b, "https://:443 {\n\tbind unix/%s\n\trespond \"not found\" 404\n}\n\n", r.OnionTLSSocket)
-	fmt.Fprintf(b, "http://:80 {\n\tbind unix/%s\n\trespond \"not found\" 404\n}\n", r.OnionHTTPSocket)
 }
 func hosts(ids []string, prefix string) []string {
 	result := make([]string, len(ids))
 	for i, id := range ids {
-		state := model.State{ServiceID: id}
-		result[i] = state.Host(prefix)
+		result[i] = (model.State{ServiceID: id}).Host(prefix)
 	}
 	return result
 }
-func (r Renderer) renderAuth(b *strings.Builder, hosts []string) {
-	fmt.Fprintf(b, "\t@auth host %s\n\thandle @auth {\n", strings.Join(hosts, " "))
-	b.WriteString("\t\t@portal {\n\t\t\tpath / /favicon.ico /manifest.json /robots.txt /static/* /locales /locales/* /api/state /api/configuration /api/configuration/password-policy /api/checks/safe-redirection /api/firstfactor /api/logout /api/user/info /api/secondfactor/totp\n\t\t\tmethod GET HEAD POST\n\t\t}\n")
-	b.WriteString("\t\thandle @portal {\n\t\t\troute {\n")
-	for _, h := range untrustedHeaders {
-		fmt.Fprintf(b, "\t\t\t\trequest_header -%s\n", h)
+func launcherJSON(s model.State, mappings []model.Mapping) string {
+	apps := make([]map[string]string, 0, len(mappings))
+	for _, mapping := range mappings {
+		if mapping.Enabled {
+			apps = append(apps, map[string]string{"name": mapping.Prefix, "url": "https://" + s.Host(mapping.Prefix) + "/"})
+		}
 	}
-	fmt.Fprintf(b, "\t\t\t\treverse_proxy unix/%s {\n\t\t\t\t\theader_up X-Forwarded-For 127.0.0.1\n\t\t\t\t\theader_up X-Forwarded-Host {http.request.host}\n\t\t\t\t\theader_up X-Forwarded-Proto https\n\t\t\t\t}\n\t\t\t}\n\t\t}\n\t\trespond \"not found\" 404\n\t}\n", r.AutheliaSocket)
+	data, _ := json.Marshal(map[string]any{"apps": apps})
+	return string(data)
+}
+func (r Renderer) renderPortal(b *strings.Builder, hosts []string) {
+	b.WriteString("\t@portal {\n")
+	fmt.Fprintf(b, "\t\thost %s\n", strings.Join(hosts, " "))
+	b.WriteString("\t\tpath /login /login/ /login/favicon.ico /login/manifest.json /login/robots.txt /login/static/* /login/locales /login/locales/* /login/api/state /login/api/configuration /login/api/configuration/password-policy /login/api/checks/safe-redirection /login/api/firstfactor /login/api/logout /login/api/user/info /login/api/secondfactor/totp\n\t\tmethod GET HEAD POST\n\t}\n\thandle @portal {\n\t\troute {\n")
+	for _, h := range untrustedHeaders {
+		fmt.Fprintf(b, "\t\t\trequest_header -%s\n", h)
+	}
+	fmt.Fprintf(b, "\t\t\treverse_proxy unix/%s {\n\t\t\t\theader_up X-Forwarded-For 127.0.0.1\n\t\t\t\theader_up X-Forwarded-Host {http.request.host}\n\t\t\t\theader_up X-Forwarded-Proto https\n\t\t\t}\n\t\t}\n\t}\n", r.AutheliaSocket)
 }
 func (r Renderer) renderProtectedPrefix(b *strings.Builder) {
 	b.WriteString("\t\troute {\n")
 	for _, h := range untrustedHeaders {
 		fmt.Fprintf(b, "\t\t\trequest_header -%s\n", h)
 	}
-	fmt.Fprintf(b, "\t\t\tforward_auth unix/%s {\n\t\t\t\turi /api/authz/forward-auth\n\t\t\t\theader_up X-Forwarded-For 127.0.0.1\n\t\t\t\theader_up X-Forwarded-Host {http.request.host}\n\t\t\t\theader_up X-Forwarded-Proto https\n\t\t\t\tcopy_headers Remote-User Remote-Groups Remote-Email Remote-Name\n\t\t\t}\n\t\t}\n", r.AutheliaSocket)
-}
-func (r Renderer) renderHTTP(b *strings.Builder, s model.State) {
-	fmt.Fprintf(b, "http://:80 {\n\tbind unix/%s\n", r.OnionHTTPSocket)
-	if s.Bootstrap != nil {
-		fmt.Fprintf(b, "\t@ios_profile {\n\t\thost %s\n\t\tmethod GET HEAD\n\t\tpath /onboard/%s/torkitten-ios.mobileconfig\n\t}\n\theader @ios_profile Content-Type application/x-apple-aspen-config\n\t@bootstrap {\n\t\thost %s\n\t\tmethod GET HEAD\n\t}\n\thandle @bootstrap {\n\t\theader {\n\t\t\tCache-Control no-store\n\t\t\tContent-Security-Policy \"default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'\"\n\t\t\tReferrer-Policy no-referrer\n\t\t\tX-Content-Type-Options nosniff\n\t\t}\n\t\thandle_path /onboard/%s/* {\n\t\t\troot * %s/%s\n\t\t\tfile_server\n\t\t}\n\t\trespond \"not found\" 404\n\t}\n", s.Host(""), s.Bootstrap.Token, s.Host(""), s.Bootstrap.Token, r.BootstrapRoot, s.Bootstrap.Token)
-	}
-	b.WriteString("\trespond \"not found\" 404\n}\n")
+	fmt.Fprintf(b, "\t\t\tforward_auth unix/%s {\n\t\t\t\turi /login/api/authz/forward-auth\n\t\t\t\theader_up X-Forwarded-For 127.0.0.1\n\t\t\t\theader_up X-Forwarded-Host {http.request.host}\n\t\t\t\theader_up X-Forwarded-Proto https\n\t\t\t\tcopy_headers Remote-User Remote-Groups Remote-Email Remote-Name\n\t\t\t}\n\t\t}\n", r.AutheliaSocket)
 }
 
 type Applier interface {

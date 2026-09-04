@@ -56,16 +56,17 @@ func run() error {
 			return err
 		}
 	}
-	autheliaHealth := func(check context.Context) error {
-		if autheliaClient == nil {
-			return errors.New("Authelia is not configured")
-		}
-		return autheliaClient.Healthy(check)
-	}
+	autheliaHealth := func(check context.Context) error { return autheliaClient.Healthy(check) }
 	secretEnv := []string{"AUTHELIA_SESSION_SECRET_FILE=" + filepath.Join(ap.SecretsDir, "session"), "AUTHELIA_STORAGE_ENCRYPTION_KEY_FILE=" + filepath.Join(ap.SecretsDir, "storage"), "AUTHELIA_IDENTITY_VALIDATION_RESET_PASSWORD_JWT_SECRET_FILE=" + filepath.Join(ap.SecretsDir, "jwt")}
 	process, err := supervisor.New([]supervisor.Spec{
 		{Name: supervisor.Tor, Path: tp.Binary, Args: []string{"-f", tp.Config}, Health: (torkitTor.Client{Socket: tp.ControlSocket, Cookie: tp.CookieFile}).Healthy},
-		{Name: supervisor.Caddy, Path: "/usr/bin/caddy", Args: []string{"run", "--config", runtime.CaddyConfig, "--adapter", "caddyfile"}, Health: caddyClient.Healthy},
+		{Name: supervisor.Caddy, Path: "/usr/bin/caddy", Args: []string{"run", "--config", runtime.CaddyConfig, "--adapter", "caddyfile"}, Health: caddyClient.Healthy, Recover: func(ctx context.Context) error {
+			root, rootErr := caddyClient.RootCA(ctx)
+			if rootErr != nil || string(root) != string(renderer.PublicRoot) {
+				return errors.New("Caddy root unavailable or changed during restart")
+			}
+			return control.ReconcileCaddy(ctx, store, renderer, caddyClient)
+		}},
 		{Name: supervisor.Authelia, Path: ap.Binary, Args: []string{"--config", ap.Config}, Env: secretEnv, Health: autheliaHealth, Disabled: !current.Initialized},
 	}, log.Default())
 	if err != nil {
@@ -78,6 +79,9 @@ func run() error {
 	readyCtx, stopReady := context.WithTimeout(ctx, 45*time.Second)
 	defer stopReady()
 	if err = bootstrap.WaitHealth(readyCtx, caddyClient.Healthy); err != nil {
+		return err
+	}
+	if renderer.PublicRoot, err = caddyClient.RootCA(readyCtx); err != nil {
 		return err
 	}
 	serviceID, err := tp.WaitServiceID(readyCtx)
@@ -117,13 +121,10 @@ func run() error {
 		}
 	}
 	sessions := localsession.New(store)
-	manager.SetCredentials(sessions, process)
+	manager.SetAuth(sessions, process)
 	life := bootstrap.SupervisedLifecycle{Process: process, Client: autheliaClient}
 	setup := bootstrap.New(ap, life, autheliaClient, manager, sessions)
-	onboard, err := onboarding.New(manager, autheliaClient, renderer.BootstrapRoot)
-	if err != nil {
-		return err
-	}
+	onboard := onboarding.New(manager, autheliaClient)
 	handler, err := api.New(api.Dependencies{Control: manager, Sessions: sessions, Factors: autheliaClient, Setup: setup, Tokens: apitoken.New(store), Onboarding: onboard, Supervisor: process})
 	if err != nil {
 		return err

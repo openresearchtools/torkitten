@@ -5,43 +5,30 @@ package onboarding
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
-	_ "embed"
-	"encoding/base64"
-	"encoding/pem"
 	"errors"
 	"github.com/boombuler/barcode"
 	"github.com/boombuler/barcode/qr"
 	"image/png"
 	"io"
 	"net/http"
-	"os"
-	"path/filepath"
 	"regexp"
 	"sync"
 	"time"
 	"torkitten/internal/authelia"
 	"torkitten/internal/control"
 	"torkitten/internal/model"
-	"torkitten/internal/state"
 	torkitTor "torkitten/internal/tor"
 )
 
-const WindowDuration = 15 * time.Minute
-
 type Control interface {
 	State() model.State
-	PublicCA(context.Context) ([]byte, error)
-	SetBootstrap(context.Context, *model.BootstrapWindow) error
 	ExpirePending(context.Context) error
 	PrepareCredentialChange() error
-	FinishCredentialChange(context.Context) error
+	FinishAuth(context.Context) error
 }
 type Manager struct {
 	control Control
 	factors *authelia.Client
-	root    string
-	random  io.Reader
 	now     func() time.Time
 	mu      sync.Mutex
 	totp    *totpFlow
@@ -51,29 +38,8 @@ type totpFlow struct {
 	expires time.Time
 }
 
-func New(control Control, factors *authelia.Client, root string) (*Manager, error) {
-	if !filepath.IsAbs(root) || !regexp.MustCompile(`^/[A-Za-z0-9._/-]+$`).MatchString(root) {
-		return nil, errors.New("invalid bootstrap root")
-	}
-	if err := state.EnsureDir(root, 0o700); err != nil {
-		return nil, err
-	}
-	keep := ""
-	if window := control.State().Bootstrap; window != nil {
-		keep = window.Token
-	}
-	entries, err := os.ReadDir(root)
-	if err != nil {
-		return nil, err
-	}
-	for _, entry := range entries {
-		if entry.Name() != keep {
-			if err = os.RemoveAll(filepath.Join(root, entry.Name())); err != nil {
-				return nil, err
-			}
-		}
-	}
-	return &Manager{control: control, factors: factors, root: root, random: rand.Reader, now: time.Now}, nil
+func New(control Control, factors *authelia.Client) *Manager {
+	return &Manager{control: control, factors: factors, now: time.Now}
 }
 func (m *Manager) ChangePassword(ctx context.Context, username string, oldPassword, newPassword, confirmation []byte, token string) error {
 	if len(newPassword) < 12 || len(newPassword) > 128 || !bytes.Equal(newPassword, confirmation) || bytes.IndexByte(newPassword, 0) >= 0 {
@@ -90,7 +56,7 @@ func (m *Manager) ChangePassword(ctx context.Context, username string, oldPasswo
 	if err != nil {
 		return errors.New("password change failed")
 	}
-	return m.control.FinishCredentialChange(ctx)
+	return m.control.FinishAuth(ctx)
 }
 func (m *Manager) BeginTOTP(ctx context.Context, username string, password []byte, token string) ([]byte, error) {
 	flow, err := control.AuthenticateFactors(ctx, m.factors, username, password, token)
@@ -126,7 +92,7 @@ func (m *Manager) CompleteTOTP(ctx context.Context, token string) error {
 		return errors.New("TOTP change failed")
 	}
 	m.clearTOTP()
-	return m.control.FinishCredentialChange(ctx)
+	return m.control.FinishAuth(ctx)
 }
 func (m *Manager) clearTOTP() {
 	if m.totp != nil {
@@ -134,80 +100,13 @@ func (m *Manager) clearTOTP() {
 		m.totp = nil
 	}
 }
-func (m *Manager) Open(ctx context.Context) (string, time.Time, error) {
-	current := m.control.State()
-	if !current.Initialized || len(current.Devices) == 0 {
-		return "", time.Time{}, errors.New("onboarding requires an acknowledged device")
-	}
-	ca, err := m.control.PublicCA(ctx)
-	certificate, _ := pem.Decode(ca)
-	if err != nil || len(ca) == 0 || len(ca) > 64<<10 || certificate == nil || certificate.Type != "CERTIFICATE" {
-		return "", time.Time{}, errors.New("public CA unavailable")
-	}
-	profile := bytes.ReplaceAll(bytes.ReplaceAll([]byte(iosProfile), []byte("CERTIFICATE_DATA"), []byte(base64.StdEncoding.EncodeToString(certificate.Bytes))), []byte("SERVICE_ID"), []byte(current.ServiceID))
-	raw := make([]byte, 32)
-	if _, err = io.ReadFull(m.random, raw); err != nil {
-		return "", time.Time{}, err
-	}
-	token := base64.RawURLEncoding.EncodeToString(raw)
-	clear(raw)
-	dir := filepath.Join(m.root, token)
-	if err = state.EnsureDir(dir, 0o700); err != nil {
-		return "", time.Time{}, err
-	}
-	if err = state.AtomicWrite(filepath.Join(dir, "torkitten-ios.mobileconfig"), profile, 0o600); err == nil {
-		err = state.AtomicWrite(filepath.Join(dir, "torkitten-root-ca.cer"), certificate.Bytes, 0o600)
-	}
-	if err == nil {
-		err = state.AtomicWrite(filepath.Join(dir, "index.html"), []byte(instructions), 0o600)
-	}
-	if err != nil {
-		_ = os.RemoveAll(dir)
-		return "", time.Time{}, err
-	}
-	expires := m.now().UTC().Add(WindowDuration)
-	window := &model.BootstrapWindow{Token: token, ExpiresAt: expires}
-	if err = m.control.SetBootstrap(ctx, window); err != nil {
-		_ = os.RemoveAll(dir)
-		return "", time.Time{}, err
-	}
-	if old := current.Bootstrap; old != nil && old.Token != token {
-		_ = os.RemoveAll(filepath.Join(m.root, old.Token))
-	}
-	return "http://" + current.Host("") + "/onboard/" + token + "/", expires, nil
-}
-func (m *Manager) Extend(ctx context.Context) (time.Time, error) {
-	window := m.control.State().Bootstrap
-	if window == nil {
-		return time.Time{}, errors.New("bootstrap is not open")
-	}
-	window.ExpiresAt = m.now().UTC().Add(WindowDuration)
-	return window.ExpiresAt, m.control.SetBootstrap(ctx, window)
-}
-func (m *Manager) Close(ctx context.Context) error {
-	current := m.control.State()
-	if current.Bootstrap == nil {
-		return nil
-	}
-	if err := m.control.SetBootstrap(ctx, nil); err != nil {
-		return err
-	}
-	return os.RemoveAll(filepath.Join(m.root, current.Bootstrap.Token))
-}
 func (m *Manager) Expire(ctx context.Context) error {
 	m.mu.Lock()
 	if m.totp != nil && !m.totp.expires.After(m.now()) {
 		m.clearTOTP()
 	}
 	m.mu.Unlock()
-	if err := m.control.ExpirePending(ctx); err != nil {
-		return err
-	}
-	window := m.control.State().Bootstrap
-	if window != nil && !window.ExpiresAt.After(m.now()) {
-		return m.Close(ctx)
-	}
-	return nil
+	return m.control.ExpirePending(ctx)
 }
 func (m *Manager) ServePending(w http.ResponseWriter, qr bool) {
 	current := m.control.State()
@@ -235,7 +134,8 @@ func (m *Manager) ServePending(w http.ResponseWriter, qr bool) {
 	_, _ = io.WriteString(w, credential+"\n")
 }
 func EnrollmentQR(value string) ([]byte, error) {
-	if !(len(value) <= 1024 && regexp.MustCompile(`^otpauth://totp/[^\r\n]+$`).MatchString(value)) && !regexp.MustCompile(`^(?:https://[a-z2-7]{56}\.onion/|http://[a-z2-7]{56}\.onion(?:\?key=[a-z2-7]{52}|/onboard/[A-Za-z0-9_-]{43}/))$`).MatchString(value) {
+	public := value == "https://orbot.app/download/" || value == "https://play.google.com/store/apps/details?id=org.torproject.android"
+	if !(len(value) <= 1024 && regexp.MustCompile(`^otpauth://totp/[^\r\n]+$`).MatchString(value)) && !regexp.MustCompile(`^(?:https://(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)?[a-z2-7]{56}\.onion/|http://[a-z2-7]{56}\.onion\?key=[a-z2-7]{52})$`).MatchString(value) && !public {
 		return nil, errors.New("invalid enrollment value")
 	}
 	code, err := qr.Encode(value, qr.M, qr.Auto)
@@ -251,9 +151,3 @@ func EnrollmentQR(value string) ([]byte, error) {
 	}
 	return output.Bytes(), nil
 }
-
-//go:embed instructions.html
-var instructions string
-
-//go:embed ios.mobileconfig
-var iosProfile string

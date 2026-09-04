@@ -28,12 +28,12 @@ const (
 
 type HealthFunc func(context.Context) error
 type Spec struct {
-	Name     Name
-	Path     string
-	Args     []string
-	Env      []string
-	Health   HealthFunc
-	Disabled bool
+	Name            Name
+	Path            string
+	Args            []string
+	Env             []string
+	Health, Recover HealthFunc
+	Disabled        bool
 }
 type Status struct {
 	Name        Name      `json:"name"`
@@ -231,6 +231,14 @@ func (s *Supervisor) checkHealth(w *worker, started time.Time) bool {
 	err := w.spec.Health(ctx)
 	cancel()
 	s.mu.Lock()
+	starting := w.status.State == "starting" && w.status.Restarts > 1
+	s.mu.Unlock()
+	if err == nil && starting && w.spec.Recover != nil {
+		ctx, cancel = context.WithTimeout(s.ctx, 15*time.Second)
+		err = w.spec.Recover(ctx)
+		cancel()
+	}
+	s.mu.Lock()
 	defer s.mu.Unlock()
 	if w.cmd == nil {
 		return false
@@ -287,14 +295,7 @@ func (s *Supervisor) disableCrashLoop(w *worker) {
 	w.desired, w.status.State, w.status.LastError = false, "crash-loop", "restart ceiling reached"
 	s.mu.Unlock()
 }
-func (s *Supervisor) contextDone() bool {
-	select {
-	case <-s.ctx.Done():
-		return true
-	default:
-		return false
-	}
-}
+func (s *Supervisor) contextDone() bool { return s.ctx.Err() != nil }
 func (s *Supervisor) waitWake(w *worker, delay time.Duration) bool {
 	if delay == 0 {
 		select {

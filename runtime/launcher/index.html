@@ -1,1 +1,32 @@
-<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>Torkitten applications</title><style>body{color-scheme:dark;background:#0b0d12;color:#f5f7fb;font:17px/1.5 system-ui;max-width:46rem;margin:4rem auto;padding:1rem}main{background:#151922;border:1px solid #2b3240;border-radius:18px;padding:2rem}h1{margin-top:0}p{color:#aab3c2}</style></head><body><main><h1>🐱 Torkitten</h1><p>You are authenticated. Open one of the application hostnames supplied by this Torkitten’s owner.</p></main></body></html>
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>Your applications · Torkitten</title>
+  <link rel="stylesheet" href="/app.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <header><a class="brand" href="/"><span>T</span>Torkitten</a><div class="private"><i></i>Private onion site</div></header>
+  <main>
+    <section class="intro"><p class="kicker">Your private space</p><h1>Applications</h1><p>Choose an application to open it securely through Torkitten.</p></section>
+    <section id="applications" class="applications" aria-live="polite"><div class="empty">Loading applications…</div></section>
+
+    <details class="trust">
+      <summary><span><strong>Certificate trust on this device</strong><small>Optional installation and connection information</small></span><b>+</b></summary>
+      <div class="trust-content">
+        <h2>Why your browser may show a warning</h2>
+        <p>Tor onion connections are already end-to-end encrypted and authenticated by the onion address. Torkitten adds HTTPS as another encrypted layer for browser compatibility, secure cookies, login, and two-factor authentication.</p>
+        <p>Torkitten uses its own private certificate authority so your onion address does not have to be submitted to a public certificate authority or published through Certificate Transparency. Your browser does not initially recognize this private authority, so it may show a warning.</p>
+        <div class="options">
+          <article><span>Continue without installing</span><h3>Accept the warning manually</h3><p>Where your browser permits it, continue to the site. The connection remains encrypted, but the warning may return later.</p></article>
+          <article><span>Trust this Torkitten</span><h3>Install the public certificate</h3><p>This only teaches this device to trust certificates from your Torkitten. It contains no private key and does not add another encryption layer.</p><div class="downloads"><button id="apple-profile" type="button">Apple profile</button><a href="/trust/torkitten-root-ca.pem" download>Public root certificate</a></div><p><strong>iPhone or iPad:</strong> approve the downloaded profile in Settings and, if required, Certificate Trust Settings. <strong>Android or computer:</strong> import the public root as a CA certificate into the browser or system trust store you intend to use.</p></article>
+        </div>
+        <aside><strong>Public certificate alternative</strong><p>The Tor Project currently lists DigiCert EV and HARICA DV for publicly trusted onion certificates. This may disclose the onion hostname to the authority and through Certificate Transparency.</p><a href="https://community.torproject.org/onion-services/advanced/https/" target="_blank" rel="noreferrer">Read the Tor Project guidance</a></aside>
+      </div>
+    </details>
+  </main>
+</body>
+</html>

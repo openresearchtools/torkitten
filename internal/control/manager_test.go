@@ -5,6 +5,7 @@ package control
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"net"
@@ -41,8 +42,6 @@ func (f *fakeCaddy) Apply(_ context.Context, config []byte) ([]byte, error) {
 	}
 	return []byte(`{}`), nil
 }
-func (f *fakeCaddy) RootCA(context.Context) ([]byte, error) { return []byte("ca"), nil }
-
 func controlFixture(t *testing.T) (*Manager, *state.Store, *fakeCaddy, string) {
 	t.Helper()
 	root := t.TempDir()
@@ -57,7 +56,7 @@ func controlFixture(t *testing.T) (*Manager, *state.Store, *fakeCaddy, string) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	renderer := caddy.Renderer{AdminSocket: filepath.Join(root, "run", "admin.sock"), OnionTLSSocket: filepath.Join(root, "run", "tls.sock"), OnionHTTPSocket: filepath.Join(root, "run", "http.sock"), AutheliaSocket: filepath.Join(root, "run", "authelia.sock"), LauncherRoot: filepath.Join(root, "launcher"), BootstrapRoot: filepath.Join(root, "bootstrap"), StorageRoot: filepath.Join(root, "storage"), TargetHost: "host.containers.internal"}
+	renderer := caddy.Renderer{AdminSocket: filepath.Join(root, "run", "admin.sock"), OnionTLSSocket: filepath.Join(root, "run", "tls.sock"), OnionHTTPSocket: filepath.Join(root, "run", "http.sock"), AutheliaSocket: filepath.Join(root, "run", "authelia.sock"), LauncherRoot: filepath.Join(root, "launcher"), StorageRoot: filepath.Join(root, "storage"), TargetHost: "host.containers.internal"}
 	tp := torkitTor.Paths{Binary: "/bin/true", Config: filepath.Join(root, "etc", "torrc"), DataDir: filepath.Join(root, "tor", "data"), HiddenServiceDir: filepath.Join(root, "tor", "hs"), ControlSocket: filepath.Join(root, "run", "tor.sock"), CookieFile: filepath.Join(root, "run", "cookie"), OnionHTTPSocket: renderer.OnionHTTPSocket, OnionTLSSocket: renderer.OnionTLSSocket}
 	if err = tp.Ensure(); err != nil {
 		t.Fatal(err)
@@ -92,6 +91,24 @@ func TestInitializeAndMappingTransactions(t *testing.T) {
 	}
 	if len(caddyClient.configs) != 3 {
 		t.Fatalf("loads=%d", len(caddyClient.configs))
+	}
+}
+
+func TestReconcileCaddyLoadsDurableState(t *testing.T) {
+	manager, store, caddyClient, _ := controlFixture(t)
+	if err := manager.Initialize(context.Background(), validSession()); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.CreateMapping(context.Background(), model.Mapping{Prefix: "api", Port: 7777, Protocol: model.ProtocolHTTP, Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	manager.renderer.PublicRoot = []byte("public root")
+	caddyClient.configs = nil
+	if err := ReconcileCaddy(context.Background(), store, manager.renderer, caddyClient); err != nil {
+		t.Fatal(err)
+	}
+	if len(caddyClient.configs) != 1 || !bytes.Contains(caddyClient.configs[0], []byte("api."+strings.Repeat("a", 56)+".onion")) || !bytes.Contains(caddyClient.configs[0], []byte("/trust/torkitten-root-ca.pem")) {
+		t.Fatal("durable Caddy state was not recovered")
 	}
 }
 
