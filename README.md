@@ -181,10 +181,12 @@ There is no named volume, bind mount, host keyring, or automatic migration in
 this preview. Do not run `podman rm`, `tools/container.sh rm`, or recreate the
 container unless erasure is intended.
 
-Authelia intentionally uses its memory session provider. Restarting Authelia or
-the container preserves credentials but destroys onion sessions, so remote
-clients must authenticate again. Torkitten localhost sessions persist until
-expiry or revocation.
+Authelia intentionally uses its memory session provider. Routine remote idle
+and absolute expiry are set to ten years, effectively disabling Torkitten's
+short session timeout; a browser may still impose its own cookie lifetime.
+Restarting Authelia or the container preserves credentials but destroys onion
+sessions, so remote clients must authenticate again. Torkitten localhost
+sessions persist until expiry or revocation.
 
 ## Owner lockout recovery
 

@@ -76,11 +76,11 @@ access_control:
 session:
   name: 'torkitten_onion'
   same_site: 'lax'
-  inactivity: '15m'
-  expiration: '8h'
+  inactivity: '87600h'
+  expiration: '87600h'
   remember_me: -1
   cookies:
-    - { domain: '%s', authelia_url: 'https://%s', default_redirection_url: 'https://%s', name: 'torkitten_onion', same_site: 'lax', inactivity: '15m', expiration: '8h', remember_me: -1 }
+    - { domain: '%s', authelia_url: 'https://%s', default_redirection_url: 'https://%s', name: 'torkitten_onion', same_site: 'lax', inactivity: '87600h', expiration: '87600h', remember_me: -1 }
 regulation: { modes: ['user'], max_retries: 3, find_time: '2m', ban_time: '5m' }
 storage: { local: { path: '%s' } }
 notifier: { filesystem: { filename: '%s' } }

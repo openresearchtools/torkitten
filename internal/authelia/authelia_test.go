@@ -38,13 +38,13 @@ func TestRenderOwnsPolicyInAuthelia(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := string(data)
-	for _, want := range []string{"default_policy: 'deny'", "group:torkitten-owner", "policy: 'two_factor'", "*." + id + ".onion", "implementation: 'ForwardAuth'", "enabled: false", "password_change: { disable: false }", "regulation: { modes: ['user']"} {
+	for _, want := range []string{"default_policy: 'deny'", "group:torkitten-owner", "policy: 'two_factor'", "*." + id + ".onion", "implementation: 'ForwardAuth'", "enabled: false", "password_change: { disable: false }", "regulation: { modes: ['user']", "inactivity: '87600h'", "expiration: '87600h'"} {
 		if !strings.Contains(text, want) {
 			t.Errorf("missing %q", want)
 		}
 	}
-	if strings.Contains(text, "bypass") {
-		t.Fatal("unexpected bypass policy")
+	if strings.Contains(text, "bypass") || strings.Contains(text, "inactivity: '15m'") || strings.Contains(text, "expiration: '8h'") {
+		t.Fatal("unexpected bypass or short session expiry")
 	}
 }
 
