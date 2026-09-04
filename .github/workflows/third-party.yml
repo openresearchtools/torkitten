@@ -59,23 +59,13 @@ jobs:
           path: ${{ runner.temp }}/torkitten-build/artifacts/third-party/${{ matrix.component }}
           key: ${{ steps.identity.outputs.cache_key }}
 
-      - name: Build pinned release
+      - name: Build pinned release with rootless Podman
         if: ${{ steps.binary-cache.outputs.cache-hit != 'true' }}
         env:
           COMPONENT: ${{ matrix.component }}
         run: |
-          docker build \
-            --file tools/build/Containerfile \
-            --tag torkitten-builder:ubuntu-24.04 \
-            tools/build
-          docker run --rm \
-            --volume "$GITHUB_WORKSPACE:/src:ro" \
-            --volume "$TORKITTEN_BUILD_ROOT:/work:rw" \
-            --env TORKITTEN_SOURCE_ROOT=/src \
-            --env TORKITTEN_BUILD_ROOT=/work \
-            --env TORKITTEN_BUILD_JOBS="$(nproc)" \
-            torkitten-builder:ubuntu-24.04 \
-            /src/tools/build-third-party.sh "$COMPONENT"
+          podman info --format '{{.Host.Security.Rootless}}' | grep -qx true
+          ./tools/build-local.sh "$COMPONENT"
 
       - name: Verify binary bundle
         id: bundle
@@ -117,6 +107,20 @@ jobs:
           include-hidden-files: true
           if-no-files-found: error
           retention-days: 90
+
+  control-plane:
+    name: Verify Go control plane
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Run checks with rootless Podman
+        env:
+          TORKITTEN_BUILD_ROOT: ${{ runner.temp }}/torkitten-build
+        run: |
+          podman info --format '{{.Host.Security.Rootless}}' | grep -qx true
+          ./tools/test-local.sh
 
   consume:
     name: Consume reusable bundles
