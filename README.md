@@ -19,11 +19,18 @@ available only at `http://localhost:12755`.
 
 > **Development preview / client blocker:** the pinned-component and local
 > container paths are tested, but no remote browser is currently advertised as
-> supported. Tor Browser 15.0.21 rejects the private CA with its default
+> supported. Desktop Tor Browser 15.0.21 rejects the private CA with its default
 > `security.nocertdb=true` policy. A technical test succeeded only after applying
 > Tor Project's development-only root-CA procedure, which explicitly reduces or
 > disables privacy protections. Torkitten does not ask users to weaken Tor
-> Browser this way. The mobile browser/Orbot matrix remains untested.
+> Browser this way. An [Android emulator experiment](docs/android-trust-test.md)
+> proved native Chrome trust and configured Firefox trust through Orbot, with
+> additional Firefox requirements and a cold-start retry limitation. Stock
+> Android Tor Browser was separately blocked at onion client authorization.
+> The physical-device matrix and reported Safari trust failure remain unresolved.
+> The [Apple trust investigation](docs/apple-trust-investigation.md) compares
+> Apple's profile example and certificate requirements with the running
+> service's public chain; it is not an iOS compatibility proof.
 
 ## Security model
 
@@ -232,10 +239,12 @@ Torkitten is licensed under Apache-2.0. Runtime images include the Torkitten,
 Go, barcode, Tor, Caddy, and Authelia license texts under
 `/usr/share/doc/torkitten`.
 
-The project does not claim supported-client compatibility. Live Tor Browser
-15.0.21 testing proved client authorization, private-CA TLS, Authelia TOTP, the
+The project does not claim supported-client compatibility. Live desktop Tor
+Browser 15.0.21 testing proved client authorization, private-CA TLS, Authelia TOTP, the
 cross-prefix cookie, and a mapped request only in Tor Project's explicitly
 privacy-reduced development configuration; the default browser correctly
-rejected the private CA. Mobile browsers through Orbot remain untested.
-Container success, direct Unix-socket tests, BrowserOS, and a modified Tor
-Browser are not substitutes for a supported-client matrix.
+rejected the private CA. The [Android trust experiment](docs/android-trust-test.md)
+records native Chrome and configured Firefox results, CA-removal negative
+controls, and the remaining limitations. Physical Android and iOS verification
+is still required. Container success, direct Unix-socket tests, BrowserOS, and a
+modified Tor Browser are not substitutes for a supported-client matrix.
