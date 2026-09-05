@@ -61,7 +61,7 @@ func (r Renderer) Render(s model.State) ([]byte, error) {
 		return nil, errors.New("unsafe fixed upstream host")
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "{\n\tadmin unix/%s\n\tpersist_config off\n\tstorage file_system {\n\t\troot %s\n\t}\n\tpki {\n\t\tca local {\n\t\t\tname \"Torkitten Local CA\"\n\t\t}\n\t}\n\tcert_issuer internal {\n\t\tlifetime 9528h\n\t\tsign_with_root\n\t}\n\tskip_install_trust\n\tauto_https disable_redirects\n}\n\n", r.AdminSocket, r.StorageRoot)
+	fmt.Fprintf(&b, "{\n\tadmin unix/%s\n\tpersist_config off\n\tstorage file_system {\n\t\troot %s\n\t}\n\tpki {\n\t\tca local {\n\t\t\tname \"Torkitten Local CA\"\n\t\t\tintermediate_lifetime 17520h\n\t\t}\n\t}\n\tcert_issuer internal {\n\t\tlifetime 9528h\n\t}\n\tskip_install_trust\n\tauto_https disable_redirects\n}\n\n", r.AdminSocket, r.StorageRoot)
 	if s.ServiceID == "" || !s.Initialized {
 		fmt.Fprintf(&b, "https://:443 {\n\tbind unix/%s\n\trespond \"not found\" 404\n}\n\nhttp://:80 {\n\tbind unix/%s\n\trespond \"not found\" 404\n}\n", r.OnionTLSSocket, r.OnionHTTPSocket)
 		return []byte(b.String()), nil

@@ -128,8 +128,11 @@ devices.
 
 Remote HTTPS uses Caddy's persistent private CA. Caddy manages one 397-day
 base-host leaf and one 397-day wildcard leaf shared by every application prefix,
-so adding a mapping does not create another prefix-specific certificate. Caddy
-renews them through its native internal issuer. After authentication, the base
+so adding a mapping does not create another prefix-specific certificate. This
+[isolated compatibility trial](docs/caddy-intermediate-trial.md) signs those
+leaves through a Caddy-managed 730-day intermediate instead of directly with the
+root. Caddy owns generation and renewal; the persistent root and the public-root
+download/profile are unchanged. This is not a verified iOS fix. After authentication, the base
 onion launcher lists every enabled application and explains the initial private-
 certificate warning. Installing the CA is optional: the launcher offers the
 public PEM certificate and generates an Apple `.mobileconfig` containing only

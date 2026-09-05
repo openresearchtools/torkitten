@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
 	"io"
@@ -58,7 +59,7 @@ func TestRenderDeterministicAndFailClosed(t *testing.T) {
 	}
 	text := string(first)
 	for _, required := range []string{
-		"https://:443", "https://*." + strings.Repeat("a", 56) + ".onion", "lifetime 9528h", "sign_with_root", "respond \"not found\" 404", "forward_auth unix/", "uri /login/api/authz/forward-auth", "path /login /login/", "respond @apps", "/trust/torkitten-root-ca.pem",
+		"https://:443", "https://*." + strings.Repeat("a", 56) + ".onion", "lifetime 9528h", "intermediate_lifetime 17520h", "respond \"not found\" 404", "forward_auth unix/", "uri /login/api/authz/forward-auth", "path /login /login/", "respond @apps", "/trust/torkitten-root-ca.pem",
 		"request_header -Remote-User", "request_header -X-Forwarded-For", "reverse_proxy h2c://host.containers.internal:7777",
 		"group:torkitten-owner", // must not occur: checked below.
 	} {
@@ -74,6 +75,9 @@ func TestRenderDeterministicAndFailClosed(t *testing.T) {
 	}
 	if strings.Contains(text, "zeta."+strings.Repeat("a", 56)) {
 		t.Fatal("disabled mapping was routed")
+	}
+	if strings.Contains(text, "sign_with_root") {
+		t.Fatal("intermediate-signing trial still enables direct-root signing")
 	}
 	if strings.Contains(text, "/login/api/change-password") || strings.Contains(text, "/login/api/secondfactor/totp/register") || !strings.Contains(text, "method GET HEAD POST") {
 		t.Fatal("uncoordinated credential mutation was exposed")
@@ -207,25 +211,38 @@ func TestPinnedCaddyTLSAndForwardAuth(t *testing.T) {
 		}
 	}
 	time.Sleep(500 * time.Millisecond)
+	publicRoot, err := client.RootCA(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	roots := x509.NewCertPool()
+	if !roots.AppendCertsFromPEM(publicRoot) {
+		t.Fatal("Caddy returned an unusable root certificate")
+	}
 	leaf := func(host string) []byte {
 		raw, dialErr := (&net.Dialer{}).DialContext(ctx, "unix", renderer.OnionTLSSocket)
 		if dialErr != nil {
 			t.Fatal(dialErr)
 		}
-		conn := tls.Client(raw, &tls.Config{ServerName: host, InsecureSkipVerify: true}) // test-only root handling
+		conn := tls.Client(raw, &tls.Config{ServerName: host, RootCAs: roots})
 		if dialErr = conn.Handshake(); dialErr != nil {
 			t.Fatal(dialErr)
 		}
-		certificate := conn.ConnectionState().PeerCertificates[0]
-		if dialErr = certificate.VerifyHostname(host); dialErr != nil {
-			t.Fatal(dialErr)
+		chains := conn.ConnectionState().VerifiedChains
+		if len(chains) == 0 || len(chains[0]) != 3 {
+			t.Fatal("Caddy did not provide a verifiable leaf/intermediate/root chain")
 		}
-		if certificate.NotAfter.Sub(certificate.NotBefore) < 396*24*time.Hour {
-			t.Fatal("Caddy issued a short-lived leaf certificate")
+		certificate, intermediate, root := chains[0][0], chains[0][1], chains[0][2]
+		if certificate.CheckSignatureFrom(intermediate) != nil || intermediate.CheckSignatureFrom(root) != nil || certificate.CheckSignatureFrom(root) == nil {
+			t.Fatal("website certificate was not signed exclusively through the intermediate")
+		}
+		if certificate.NotAfter.Sub(certificate.NotBefore) != 397*24*time.Hour || intermediate.NotAfter.Sub(intermediate.NotBefore) != 730*24*time.Hour || certificate.NotAfter.After(intermediate.NotAfter) {
+			t.Fatal("unexpected native certificate lifetimes")
 		}
 		_ = conn.Close()
 		return certificate.Raw
 	}
+	baseLeaf := leaf(state.Host(""))
 	if first, second := leaf(state.Host("photos")), leaf(state.Host("api")); !bytes.Equal(first, second) {
 		t.Fatal("prefixed hosts did not share the wildcard leaf certificate")
 	}
@@ -240,7 +257,7 @@ func TestPinnedCaddyTLSAndForwardAuth(t *testing.T) {
 		}
 		var conn net.Conn = raw
 		if secure {
-			conn = tls.Client(raw, &tls.Config{ServerName: state.Host(""), InsecureSkipVerify: true}) // test-only trust bootstrap
+			conn = tls.Client(raw, &tls.Config{ServerName: state.Host(""), RootCAs: roots})
 		}
 		if _, dialErr = io.WriteString(conn, "GET "+path+" HTTP/1.1\r\nHost: "+state.Host("")+"\r\nRemote-User: attacker\r\nConnection: close\r\n\r\n"); dialErr != nil {
 			t.Fatal(dialErr)
@@ -274,10 +291,6 @@ func TestPinnedCaddyTLSAndForwardAuth(t *testing.T) {
 	if status, body, _ := request("/", true); status != http.StatusOK || !strings.Contains(body, "protected launcher") {
 		t.Fatalf("status=%d body=%q", status, body)
 	}
-	publicRoot, err := client.RootCA(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
 	renderer.PublicRoot = publicRoot
 	config, err = renderer.Render(state)
 	if err != nil {
@@ -299,6 +312,24 @@ func TestPinnedCaddyTLSAndForwardAuth(t *testing.T) {
 	}
 	if status, _, _ := request("/", true); status != http.StatusOK {
 		t.Fatal("failed load replaced working configuration")
+	}
+	_ = cmd.Process.Kill()
+	_ = cmd.Wait()
+	cmd = exec.Command(binary, "run", "--config", path, "--adapter", "caddyfile")
+	cmd.Stdout, cmd.Stderr = io.Discard, io.Discard
+	if err = cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	for client.Healthy(ctx) != nil {
+		select {
+		case <-ctx.Done():
+			t.Fatal(ctx.Err())
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+	rootAfterRestart, err := client.RootCA(ctx)
+	if err != nil || !bytes.Equal(publicRoot, rootAfterRestart) || !bytes.Equal(baseLeaf, leaf(state.Host(""))) {
+		t.Fatal("Caddy restart did not retain the root and intermediate-signed leaf")
 	}
 }
 
