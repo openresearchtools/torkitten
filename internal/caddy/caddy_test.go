@@ -59,7 +59,7 @@ func TestRenderDeterministicAndFailClosed(t *testing.T) {
 	}
 	text := string(first)
 	for _, required := range []string{
-		"https://:443", "https://*." + strings.Repeat("a", 56) + ".onion", "lifetime 9528h", "intermediate_lifetime 17520h", "respond \"not found\" 404", "forward_auth unix/", "uri /login/api/authz/forward-auth", "path /login /login/", "respond @apps", "/trust/torkitten-root-ca.pem",
+		"https://:443", "https://*." + strings.Repeat("a", 56) + ".onion", "lifetime 9528h", "intermediate_lifetime 17520h", "respond \"not found\" 404", "forward_auth unix/", "uri /login/api/authz/forward-auth", "path /login /login/ /login/2fa/one-time-password /login/2fa/password /login/authenticated /login/logout", "respond @apps", "/trust/torkitten-root-ca.pem",
 		"request_header -Remote-User", "request_header -X-Forwarded-For", "reverse_proxy h2c://host.containers.internal:7777",
 		"group:torkitten-owner", // must not occur: checked below.
 	} {
@@ -170,6 +170,15 @@ func TestPinnedCaddyTLSAndForwardAuth(t *testing.T) {
 		}
 		if r.Header.Get("X-Forwarded-For") == "127.0.0.1" && r.Header.Get("X-Forwarded-Proto") == "https" {
 			metadata.Store(true)
+		}
+		switch r.URL.Path {
+		case "/login/2fa/one-time-password", "/login/2fa/password", "/login/authenticated", "/login/logout":
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			_, _ = io.WriteString(w, "<!doctype html><title>Authelia login</title>")
+			return
+		}
+		if r.URL.Path != "/login/api/authz/forward-auth" {
+			t.Error("unapproved endpoint reached the portal upstream")
 		}
 		if !authorized.Load() {
 			http.Error(w, "denied", http.StatusUnauthorized)
@@ -307,6 +316,20 @@ func TestPinnedCaddyTLSAndForwardAuth(t *testing.T) {
 	if status, body, header := request("/trust/torkitten-root-ca.pem", true); status != http.StatusOK || string(publicRoot) != body || header.Get("Content-Type") != "application/x-pem-file" {
 		t.Fatalf("root download status=%d type=%q", status, header.Get("Content-Type"))
 	}
+	for _, authenticated := range []bool{false, true} {
+		authorized.Store(authenticated)
+		for _, path := range []string{"/login/2fa/one-time-password?rd=https%3A%2F%2F" + state.Host("") + "%2F&rm=GET", "/login/2fa/password", "/login/authenticated", "/login/logout"} {
+			if status, body, header := request(path, true); status != http.StatusOK || !strings.HasPrefix(header.Get("Content-Type"), "text/html") || header.Get("Content-Disposition") != "" || !strings.Contains(body, "Authelia login") {
+				t.Fatalf("login history route %s: status=%d type=%q", path, status, header.Get("Content-Type"))
+			}
+		}
+		for _, path := range []string{"/login/api/change-password", "/login/api/secondfactor/totp/register", "/login/2fa/one-time-password/unapproved", "/login/settings", "/login/unapproved"} {
+			if status, _, _ := request(path, true); status != http.StatusUnauthorized && status != http.StatusNotFound {
+				t.Fatalf("unapproved portal route %s: status=%d", path, status)
+			}
+		}
+	}
+	authorized.Store(true)
 	if err = client.Load(ctx, []byte(`{"invalid":`)); err == nil {
 		t.Fatal("invalid load succeeded")
 	}

@@ -126,7 +126,7 @@ func launcherJSON(s model.State, mappings []model.Mapping) string {
 func (r Renderer) renderPortal(b *strings.Builder, hosts []string) {
 	b.WriteString("\t@portal {\n")
 	fmt.Fprintf(b, "\t\thost %s\n", strings.Join(hosts, " "))
-	b.WriteString("\t\tpath /login /login/ /login/favicon.ico /login/manifest.json /login/robots.txt /login/static/* /login/locales /login/locales/* /login/api/state /login/api/configuration /login/api/configuration/password-policy /login/api/checks/safe-redirection /login/api/firstfactor /login/api/logout /login/api/user/info /login/api/secondfactor/totp\n\t\tmethod GET HEAD POST\n\t}\n\thandle @portal {\n\t\troute {\n")
+	b.WriteString("\t\tpath /login /login/ /login/2fa/one-time-password /login/2fa/password /login/authenticated /login/logout /login/favicon.ico /login/manifest.json /login/robots.txt /login/static/* /login/locales /login/locales/* /login/api/state /login/api/configuration /login/api/configuration/password-policy /login/api/checks/safe-redirection /login/api/firstfactor /login/api/logout /login/api/user/info /login/api/secondfactor/totp\n\t\tmethod GET HEAD POST\n\t}\n\thandle @portal {\n\t\troute {\n")
 	for _, h := range untrustedHeaders {
 		fmt.Fprintf(b, "\t\t\trequest_header -%s\n", h)
 	}
