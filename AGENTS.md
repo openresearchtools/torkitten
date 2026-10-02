@@ -1,3 +1,57 @@
+# Torkitten v2 branch contract
+
+On `torkitten-v2`, the user's October 2026 desktop/tunnel requirements and
+[the v2 plan](docs/v2-plan.md) supersede the v1 product contract below. The
+existing runtime is still v1 until the v2 milestones are implemented and proved.
+
+- Build one small native application with client and server modes and multiple
+  independent TorKitten connection profiles. Use an embedded web UI; host setup
+  and preset editing are reachable only through a private Unix socket.
+- Reuse pristine, pinned, current stable upstream Tor, Caddy, Authelia and the
+  selected transport. Keep integration outside `third-party/`. No custom
+  transport protocol, password/TOTP verifier, OAuth broker, or process manager.
+- Launch and control services using host-authored presets. Preserve their
+  arguments and explicit lifecycle commands. Do not add CPU, memory, swap,
+  task-limit, container, or scheduling policy to the wrapper. Those settings
+  belong to the user's existing launch configuration.
+- Transport configured TCP and Unix stream endpoints as native client loopback
+  ports. Preserve the payload. Remote requests cannot create launch commands,
+  supply destination addresses, edit presets, or enable host SSH capability.
+- The authenticated client web UI displays a live service list. Ordinary list
+  and status updates do not force logout. SSH security-boundary changes and
+  explicit session revocation close active access and require fresh 2FA.
+- Keep the UI to the requested controls: client mapping checkbox, chosen/Auto
+  port and assigned port, Load/Reload/Stop; host name, command, endpoint,
+  availability, the same actions, encrypted file/QR, Issue new identity and
+  Revoke sessions. Use one agent-editable `services.json`, not a preset system
+  with additional dashboards. Service removal closes server-side streams.
+- Issue new identity replaces Tor identity, TLS/mTLS and Authelia credentials
+  together, closes old connections and requires new onboarding and 2FA. Never
+  export server identity keys or silently restore an old security identity.
+- Authelia owns login and session validity. Use its supported session cookie for
+  the minimal native tunnel client; do not invent OAuth-issued service configs.
+- Encrypted onboarding contains device credentials and public server trust,
+  never server identity or CA private keys. Application content cannot access
+  native credentials or the host administration bridge.
+- There are zero alternative security paths: no direct-network fallback, HTTP
+  downgrade, TLS-error bypass, unauthenticated mode, automatic alternative
+  transport, implicit shell, or fabricated configuration/build metadata.
+  Missing prerequisites and failed proofs stop the feature.
+- Retain the existing first-party Go size ceiling and pristine-source, secret
+  handling, atomic persistence, and verification requirements. Prune replaced
+  v1 code instead of layering a second product over it. Keep native glue small;
+  moving logic to another language does not excuse unnecessary code.
+- Builds and test state for this branch go under
+  `/run/media/user/Data/TorkittenV2Build`, outside the repository. Never disturb
+  existing v1 runtime state or containers.
+
+## V1 contract retained as implementation reference
+
+The following describes the previous product. Its container-only deployment,
+hostname publication model, supported-client matrix and feature exclusions are
+not requirements for v2. Unchanged security and source-integrity rules remain
+applicable as specified above.
+
 # Torkitten Agent Contract
 
 Read this entire file before changing the repository. This is the authoritative

@@ -1,5 +1,13 @@
 # Torkitten
 
+> **`torkitten-v2` development branch:** the new direction is a minimal native
+> client/server application with encrypted connection import, Authelia 2FA,
+> transparent localhost tunnels, and user-authored launch presets. Read the
+> [v2 implementation plan](docs/v2-plan.md) and [upstream refresh record](docs/upstream-refresh-v2.md).
+> The existing executable and the documentation below still describe v1; the
+> v2 native application is not implemented yet. There are no automatic network,
+> authentication or TLS fallbacks in the v2 design.
+
 Torkitten publishes deliberately selected applications from the immediate host
 loopback through one persistent v3 onion identity. It runs as one rootless OCI
 container containing a small Go control plane, C Tor, Caddy, and Authelia.
@@ -57,26 +65,28 @@ Requirements:
 
 - rootless Podman with pasta networking;
 - Bash and normal core utilities; and
-- an external build directory with enough space for three upstream builds.
+- an external build directory with enough space for four upstream builds.
 
-The default external directory is `/run/media/user/Data/TorkittenBuild`. Choose
+The v2 branch defaults to `/run/media/user/Data/TorkittenV2Build`. Choose
 another location with `TORKITTEN_BUILD_ROOT`; it must not be inside this
 repository.
 
 ```sh
-export TORKITTEN_BUILD_ROOT=/absolute/path/to/TorkittenBuild
+export TORKITTEN_BUILD_ROOT=/absolute/path/to/TorkittenV2Build
 ./tools/build-local.sh all
 ./tools/build-runtime.sh
 ```
 
-The scripts verify the pristine pinned source trees, build Tor, Caddy, and
-Authelia independently, run the Go checks, and produce
-`localhost/torkitten:dev`. Current pins are Tor 0.4.9.11, Caddy 2.11.4, Authelia
-4.39.20, Ubuntu 24.04 build/runtime bases, and Go 1.26.3. Manifests under
+The source build verifies the pristine pinned trees and builds Tor, Caddy,
+Authelia and GOST independently. The retained runtime build runs the Go checks
+and produces the existing v1 `localhost/torkitten:dev` image; it does not yet
+package a native v2 app. Current pins are Tor 0.4.9.13, Caddy 2.11.6, Authelia
+4.39.28, GOST 3.3.0, Ubuntu 24.04 build/runtime bases, and Go 1.27.1. Manifests under
 `third-party/*.upstream.toml` are authoritative.
 
 Artifacts and Podman storage remain outside the repository. Do not copy build
-outputs, credentials, or runtime state into Git.
+outputs, credentials, or runtime state into Git. Keep the existing v1 build and
+runtime store separate from this branch's default store.
 
 ## Run and set up
 
