@@ -92,6 +92,13 @@ with a Fedora-maintained package; Fedora packaging does not mean Fedora
 develops the tunnel protocol. Only one transport will be selected; there is no
 automatic substitution after a failure.
 
+One transport implementation does not require all services to share one
+network connection. The real Tor sample in `tor-concurrency-sample-v2.md`
+preserved checked data but showed a 10.49-second SSE arrival gap on a shared
+Chisel connection. Separate connections reduced that gap in the sample, with
+slower bulk completion; circuit variation was not isolated. Performance remains
+a measured acceptance requirement, not a consequence of byte preservation.
+
 ## Connections and private controls
 
 ```text
@@ -114,6 +121,14 @@ Caddy is unnecessary. Only the authenticated gateway is onion-published.
 Component administration and host setup sockets have no remote route or service
 mapping. Remote lifecycle calls contain only an existing service ID and an
 allowed action, never a shell string, destination, path or replacement config.
+
+Only onion port 443 exposes the gateway; service ports such as 8080 are not Tor
+port mappings or plain Caddy application routes. Possessing just an onion
+address and its Tor client-authorization key permits reaching the gateway, not
+using its services. Device mTLS, Authelia 2FA-session authorization and the
+selected transport's configured authentication still apply. Caddy authorizes
+the outer tunnel upgrade and control requests; it does not inspect encrypted
+inner API calls. Explicit revocation must close already-open tunnels.
 
 Use a separate login web context, first-party control UI context, and service
 view context. Arbitrary service pages have no native credential or host-control
