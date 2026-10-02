@@ -880,11 +880,23 @@ connection_ap_process_end_not_open(
   /* This end cell is now valid. */
   circuit_read_valid_data(circ, msg->length);
 
-  control_reason = reason | END_STREAM_REASON_FLAG_REMOTE;
+  /* Generate a reason code that we will use for controller events. This
+   * is the reason the END cell contained, with
+   * END_STREAM_REASON_FLAG_REMOTE to make it clear that it came from
+   * the other side of the circuit. As an exception, if the other side
+   * sent us a reason of 0, replace that with MISC so we don't get
+   * confused on our side (because we use 0 to mean successful connect).
+   */
+  control_reason = (reason ? reason : END_STREAM_REASON_MISC) |
+                   END_STREAM_REASON_FLAG_REMOTE;
 
   if (edge_reason_is_retriable(reason) &&
       /* avoid retry if rend */
-      !connection_edge_is_rendezvous_stream(edge_conn)) {
+      !connection_edge_is_rendezvous_stream(edge_conn) &&
+      /* also don't retry if it was a begindir request: those are tunneled
+       * requests to a specific relay, and if that relay didn't want
+       * it, asking again isn't going to work better. */
+      !conn->use_begindir) {
     const char *chosen_exit_digest =
       circ->build_state->chosen_exit->identity_digest;
     log_info(LD_APP,"Address '%s' refused due to '%s'. Considering retrying.",
@@ -1794,6 +1806,11 @@ handle_relay_msg(const relay_msg_t *msg, circuit_t *circ,
         return -END_CIRC_REASON_TORPROTOCOL;
       }
       reason = get_uint8(msg->body);
+      if (reason == 0) {
+        /* Not a valid END reason; don't let it alias our local "no error"
+         * value in end_reason (see same exception in end_not_open). */
+        reason = END_STREAM_REASON_MISC;
+      }
       if (!conn) {
         if (CIRCUIT_IS_ORIGIN(circ)) {
           origin_circuit_t *ocirc = TO_ORIGIN_CIRCUIT(circ);
@@ -2872,10 +2889,15 @@ uint64_t oom_stats_n_bytes_removed_cell = 0;
 uint64_t oom_stats_n_bytes_removed_geoip = 0;
 uint64_t oom_stats_n_bytes_removed_hsdir = 0;
 
+/** If true, the mainloop needs to run cell_queues_reclaim_memory(). */
+bool mainloop_must_free_memory = false;
+
 /** Check whether we've got too much space used for cells.  If so,
- * call the OOM handler and return 1.  Otherwise, return 0. */
-STATIC int
-cell_queues_check_size(void)
+ * then schedle the OOM handler (if reclaim_immediately is true) or
+ * free the memory (if reclaim_immediately is false) and return 1.
+ * Otherwise, return 0. */
+static int
+cell_queues_check_reclaim_impl(bool reclaim_immediately)
 {
   size_t removed = 0;
   time_t now = time(NULL);
@@ -2892,9 +2914,26 @@ cell_queues_check_size(void)
   alloc += dns_cache_total;
   const size_t conflux_total = conflux_get_total_bytes_allocation();
   alloc += conflux_total;
+
   if (alloc >= get_options()->MaxMemInQueues_low_threshold) {
     last_time_under_memory_pressure = approx_time();
-    if (alloc >= get_options()->MaxMemInQueues) {
+
+    if (alloc >= get_options()->MaxMemInQueues && ! reclaim_immediately) {
+      /* Note that we're breaking the mainloop because we are OOM. */
+      mainloop_must_free_memory = true;
+
+      /* We stop invoking any more pending callbacks after this one,
+       * since we want to reclaim free memory immediately.
+       *
+       * We do not use a post-loop callback since that would wait
+       * for many other callbacks, which could themselves allocate more
+       * memory.
+       */
+      tor_libevent_exit_loop_after_callback(tor_libevent_get_base());
+      return 1;
+    } else if (alloc >= get_options()->MaxMemInQueues && reclaim_immediately) {
+      /* We are reclaiming the memory _now_ */
+
       /* Note this overload down */
       rep_hist_note_overload(OVERLOAD_GENERAL);
 
@@ -2942,6 +2981,30 @@ cell_queues_check_size(void)
     }
   }
   return 0;
+}
+
+/**
+ * Check whether we are out of ram; if so, schedule an OOM scan, and
+ * return 1.  Otherwise return 0.
+ */
+STATIC int
+cell_queues_check_size(void)
+{
+  return cell_queues_check_reclaim_impl(false);
+}
+
+/**
+ * Assuming we are out of ram,
+ * try to reclaim memory until we are below our threshold.
+ *
+ * Note that this function tends to free circuits, conflux join points,
+ * and other structures.  Do not call it while holding live references
+ * to such objects. */
+void
+cell_queues_reclaim_memory(void)
+{
+  cell_queues_check_reclaim_impl(true);
+  mainloop_must_free_memory = false;
 }
 
 /** Return true if we've been under memory pressure in the last

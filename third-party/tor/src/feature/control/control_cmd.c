@@ -883,6 +883,7 @@ handle_control_extendcircuit(control_connection_t *conn,
 }
 
 static const control_cmd_syntax_t setcircuitpurpose_syntax = {
+  .min_args=1,
   .max_args=1,
   .accept_keywords=true,
 };
@@ -1465,7 +1466,8 @@ handle_control_hsfetch(control_connection_t *conn,
       const char *server = line->value;
 
       const node_t *node = node_get_by_hex_id(server, 0);
-      if (!node) {
+      /* As with HSPOST, we need a routerstatus to use this as an HSDir. */
+      if (!node || !node->rs) {
         control_printf_endreply(conn, 552, "Server \"%s\" not found", server);
         goto done;
       }

@@ -32,6 +32,10 @@ void reset_bandwidth_test(void);
 int circuit_enough_testing_circs(void);
 
 void circuit_has_opened(origin_circuit_t *circ);
+void circuit_reset_isolation(origin_circuit_t *circ);
+void circuit_sync_isolation(origin_circuit_t *circ);
+void circuit_copy_isolation(origin_circuit_t *dst,
+                           const origin_circuit_t *src);
 void circuit_try_attaching_streams(origin_circuit_t *circ);
 void circuit_build_failed(origin_circuit_t *circ);
 
@@ -105,6 +109,8 @@ STATIC int needs_hs_client_circuits(time_t now,
 
 STATIC int needs_circuits_for_build(int num);
 
+STATIC int circuit_get_open_circ_or_launch(entry_connection_t *conn,
+    uint8_t desired_circuit_purpose, origin_circuit_t **circp);
 STATIC origin_circuit_t *circuit_get_best(const entry_connection_t *conn,
                                           int must_be_open,
                                           uint8_t purpose,

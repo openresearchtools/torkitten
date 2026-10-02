@@ -112,6 +112,7 @@
 #include "app/config/or_state_st.h"
 #include "feature/nodelist/routerinfo_st.h"
 #include "core/or/socks_request_st.h"
+#include "core/or/relay.h"
 
 #ifdef HAVE_UNISTD_H
 #include <unistd.h>
@@ -1173,7 +1174,7 @@ directory_info_has_arrived(time_t now, int from_cache, int suppress_logs)
 /** Perform regular maintenance tasks for a single connection.  This
  * function gets run once per second per connection by run_scheduled_events.
  */
-static void
+STATIC void
 run_connection_housekeeping(int i, time_t now)
 {
   cell_t cell;
@@ -1254,7 +1255,7 @@ run_connection_housekeeping(int i, time_t now)
       /* We never managed to actually get this connection open and happy. */
       log_info(LD_OR,"Expiring non-open OR connection to fd %d (%s:%d).",
                (int)conn->s, fmt_and_decorate_addr(&conn->addr), conn->port);
-      connection_or_close_normally(TO_OR_CONN(conn), 0);
+      connection_or_close_for_error(or_conn, 0);
     }
   } else if (we_are_hibernating() &&
              ! have_any_circuits &&
@@ -2492,6 +2493,14 @@ run_main_loop_once(void)
    * of these happens, then run all the appropriate callbacks. */
   loop_result = tor_libevent_run_event_loop(tor_libevent_get_base(),
                                             called_loop_once);
+
+  if (mainloop_must_free_memory) {
+    /* Note that calling event_base_loopbreak() can set the return value
+     * to -1, so we need to clear it in this case. :/
+     */
+    cell_queues_reclaim_memory();
+    loop_result = 0;
+  }
 
   if (get_options()->MainloopStats) {
     /* Update our main loop counters. */
