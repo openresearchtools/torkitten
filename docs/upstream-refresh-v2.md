@@ -164,3 +164,25 @@ changed-command reconciliation, stale authorization denial, preservation of
 other applications' units and failure without an executable or user manager.
 The wrapper applies no resource limits or restart policy. Separate cgroup
 ownership is not a promise of survival during a machine-wide OOM.
+
+## Distribution notice completion
+
+`THIRD-PARTY-NOTICES.txt` now accompanies the repository and Linux bundle. It
+identifies the separately supplied, dynamically linked LGPL system libraries,
+preserves modification/relinking rights, and points to the included unmodified
+LGPL-2.1 text. MPL-2.0 modules have both explicit upstream source links and their
+exact Go-module source archives in `sources/go-modules/`, with SHA256 hashes in
+`metadata/go-notices.json`.
+
+The app packaging step installs Authelia's unchanged frozen frontend lockfile
+with scripts disabled and uses pnpm's production-license inventory. It copies
+the actual texts for 60 production packages and three runtime-helper sources
+(Vite, Rolldown and Tailwind), including the two packages whose full MIT text
+appears in README.md. The inventory is `metadata/authelia-web-notices.json`.
+
+`proofs/license-notices-001/results.json` records 364 Go notice files, 66 frontend
+notice files, valid source archives for all three MPL modules, matching pinned
+frontend lockfile, and exact LGPL/notice copies. The rootless Podman app build
+completed; all eight executable hashes are unchanged from the 23-check Tor
+proof. Packaging syntax and whitespace checks passed. This change adds
+distribution materials and does not change runtime behavior or authentication.

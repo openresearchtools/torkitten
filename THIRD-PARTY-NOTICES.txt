@@ -1,0 +1,81 @@
+TorKitten third-party notices and source availability
+===================================================
+
+TorKitten's original code is licensed under Apache-2.0 (LICENSE in this
+repository; licenses/torkitten in a binary bundle). Third-party components
+retain their own copyrights, licenses and notices. This document does not
+relicense them or limit any rights granted by their licenses.
+
+Bundled components
+------------------
+Tor: BSD-3-Clause and the additional notices in licenses/tor.
+Caddy and Authelia: Apache-2.0; see licenses/caddy and licenses/authelia.
+Chisel and gozxing: MIT and included component notices; see licenses/chisel
+and licenses/gozxing. age: BSD-3-Clause; see licenses/age.
+OpenSSH: the permissive component licenses reproduced in licenses/openssh.
+
+Complete upstream source snapshots and their exact revisions are available at
+https://github.com/openresearchtools/torkitten/tree/torkitten-v2/third-party
+The adjacent *.upstream.toml files identify their upstream repositories,
+release tags, commits and source-tree hashes. Bundle metadata/ records the
+versions used to build its executables.
+
+Go dependency and toolchain notices are reproduced in licenses/go-modules/.
+metadata/go-notices.json identifies the linked modules, versions, checksums
+and notice files. Authelia frontend dependency notices, including bundled
+runtime helpers, are in licenses/authelia-web/; metadata/authelia-web-notices.json
+records their exact versions and the upstream frontend lockfile hash.
+
+Mozilla Public License 2.0 components
+------------------------------------
+The following unchanged modules used by Caddy and/or Authelia are provided
+under MPL-2.0. Their license texts and copyright notices remain in
+licenses/go-modules/. Their complete corresponding Go-module source archives
+are supplied in this binary bundle under sources/go-modules/; archive paths
+and SHA256 checksums are recorded in metadata/go-notices.json.
+
+* github.com/go-sql-driver/mysql v1.10.1
+  https://github.com/go-sql-driver/mysql/tree/v1.10.1
+* github.com/hashicorp/go-cleanhttp v0.5.2
+  https://github.com/hashicorp/go-cleanhttp/tree/v0.5.2
+* github.com/hashicorp/go-retryablehttp v0.7.8
+  https://github.com/hashicorp/go-retryablehttp/tree/v0.7.8
+
+Recipients may obtain, use, modify and redistribute that source under the MPL.
+TorKitten imposes no additional restriction on those rights. The source
+archives include their original license and notices. The inventory in bundle
+metadata is authoritative for the versions in that particular build.
+
+System shared libraries
+-----------------------
+The Linux executables use replaceable, dynamically linked system libraries.
+These libraries are supplied separately by the operating system; their binary
+files are not included in this TorKitten bundle.
+
+The native interface uses GTK, WebKitGTK, GLib/GObject/GIO and libsoup. These
+include code under the GNU Lesser/Library General Public License (LGPL) and,
+for parts of WebKit, BSD licenses. The C executables also use the system's
+runtime libraries, including glibc, and Tor may use LGPL system libraries such
+as libsystemd and libseccomp. Copyright remains with their respective authors.
+
+The LGPL-2.1 text accompanies this distribution at licenses/LGPL-2.1.txt.
+We use the LGPL-2.1 option where a library permits that or a later version.
+You may replace these libraries with interface-compatible modified versions.
+TorKitten does not restrict modification for your own use, relinking, or
+reverse engineering for debugging modifications to these libraries.
+
+Library copyright notices, exact versions and corresponding sources are
+available through the operating system's package manager/source packages.
+Upstream projects and source repositories:
+* GTK: https://gitlab.gnome.org/GNOME/gtk
+* WebKitGTK: https://webkitgtk.org/releases/
+  WebKit licensing: https://webkit.org/licensing-webkit/
+* GLib/GObject/GIO: https://gitlab.gnome.org/GNOME/glib
+* libsoup: https://gitlab.gnome.org/GNOME/libsoup
+* glibc: https://www.gnu.org/software/libc/
+* systemd libraries: https://github.com/systemd/systemd
+* libseccomp: https://github.com/seccomp/libseccomp
+
+Keep this notice and the accompanying license files with redistributed
+TorKitten bundles. Anyone separately bundling or modifying system libraries
+must also fulfill the applicable obligations for those library distributions.

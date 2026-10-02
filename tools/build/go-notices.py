@@ -83,6 +83,16 @@ for binary in ("torkitten", "caddy", "authelia"):
             directory = Path(downloaded["Dir"])
             provenance = {"module": module, "version": version, "sum": dep["Sum"]}
         record["modules"].append(collect(identifier, directory, provenance, module == "torkitten"))
+        notices = manifest["modules"][identifier]
+        if any("Mozilla Public License" in (bundle / name).read_text(errors="replace")[:300]
+               for name in notices["files"]):
+            if version == "(devel)":
+                raise RuntimeError(f"MPL source packaging needs a versioned module: {identifier}")
+            archive = bundle / "sources" / "go-modules" / (identifier + ".zip")
+            archive.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(downloaded["Zip"], archive)
+            archive.chmod(0o644)
+            notices["source"].update({"archive": str(archive.relative_to(bundle)), "archive_sha256": sha(archive)})
     manifest["binaries"][binary] = record
 
 destination = bundle / "metadata" / "go-notices.json"

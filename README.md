@@ -58,6 +58,12 @@ The [upstream refresh record](docs/upstream-refresh-v2.md) and
 No generated identities, credentials, binaries or runtime state belong in Git.
 The existing v1 runtime store is independent and is not migrated or modified.
 
+TorKitten's own code is Apache-2.0. Dependencies retain their respective
+licenses. [Third-party notices](THIRD-PARTY-NOTICES.txt) accompany each bundle,
+including frontend attributions, LGPL terms for system libraries, and the
+corresponding source archives for MPL-2.0 modules. The bundle's `metadata/`
+inventories identify exact dependency versions and notice/source checksums.
+
 ## Host setup
 
 1. Open **This host → New identity** and choose a QR password (12–256 characters).

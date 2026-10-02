@@ -38,6 +38,13 @@ and `openssh-client` explicitly. `tools/run-local.sh` checks the two command
 prerequisites before opening the bundle and accepts the app's usual arguments.
 The obsolete v1 container image/owner-reset launch paths are removed on this branch.
 
+The bundle's `THIRD-PARTY-NOTICES.txt` identifies the dynamically linked LGPL
+libraries and recipients' modification/relinking rights; `licenses/LGPL-2.1.txt`
+contains the license. Authelia frontend license texts are collected from the
+frozen pnpm dependency graph, with Vite/Rolldown/Tailwind runtime attribution.
+MPL-2.0 Go module source archives accompany their notices in `sources/go-modules/`.
+The `metadata/` inventories record the notice and source-archive hashes.
+
 Launch with an explicit state directory and the bundle's absolute bin path:
 
 ```sh
