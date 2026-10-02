@@ -4,7 +4,7 @@
 set -euo pipefail
 
 repo_root=$(git rev-parse --show-toplevel)
-build_root=${TORKITTEN_BUILD_ROOT:-/run/media/user/Data/TorkittenBuild}
+build_root=${TORKITTEN_BUILD_ROOT:-/run/media/user/Data/TorkittenV2Build}
 mkdir -p "$build_root/podman/storage" "$build_root/podman/runroot" \
     "$build_root/podman/tmp" "$build_root/cache/go-build" "$build_root/cache/go-mod"
 repo_real=$(realpath "$repo_root")

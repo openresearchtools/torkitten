@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 set -euo pipefail
 
-build_root=${TORKITTEN_BUILD_ROOT:-/run/media/user/Data/TorkittenBuild}
+build_root=${TORKITTEN_BUILD_ROOT:-/run/media/user/Data/TorkittenV2Build}
 exec podman --root "$build_root/podman/storage" \
     --runroot "$build_root/podman/runroot" \
     --tmpdir "$build_root/podman/tmp" "$@"

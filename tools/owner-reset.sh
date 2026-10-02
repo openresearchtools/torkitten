@@ -4,7 +4,7 @@
 set -euo pipefail
 
 repo_root=$(git rev-parse --show-toplevel)
-build_root=${TORKITTEN_BUILD_ROOT:-/run/media/user/Data/TorkittenBuild}
+build_root=${TORKITTEN_BUILD_ROOT:-/run/media/user/Data/TorkittenV2Build}
 name=${TORKITTEN_CONTAINER:-torkitten}
 case "$(realpath "$build_root")/" in "$(realpath "$repo_root")/"*) echo "build root must be outside the repository" >&2; exit 1;; esac
 podman_args=(--root "$build_root/podman/storage" --runroot "$build_root/podman/runroot" --tmpdir "$build_root/podman/tmp")

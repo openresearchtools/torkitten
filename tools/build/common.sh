@@ -2,7 +2,7 @@
 
 build_script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
 source_root=${TORKITTEN_SOURCE_ROOT:-$(cd "$build_script_dir/../.." && pwd -P)}
-build_root=${TORKITTEN_BUILD_ROOT:-/run/media/user/Data/TorkittenBuild}
+build_root=${TORKITTEN_BUILD_ROOT:-/run/media/user/Data/TorkittenV2Build}
 jobs=${TORKITTEN_BUILD_JOBS:-$(nproc)}
 
 mkdir -p "$build_root/artifacts/third-party" "$build_root/cache/go-build" \
