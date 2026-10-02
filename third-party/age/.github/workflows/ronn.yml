@@ -1,0 +1,58 @@
+name: Generate man pages
+on:
+  push:
+    branches:
+      - '**'
+    paths:
+      - '**.ronn'
+      - '**/ronn.yml'
+permissions:
+  contents: read
+jobs:
+  ronn:
+    name: Ronn
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: geomys/sandboxed-step@v1.2.2
+        with:
+          persist-workspace-changes: true
+          run: |
+            sudo apt-get update && sudo apt-get install -y ronn
+            bash -O globstar -c 'ronn **/*.ronn'
+            # rdiscount randomizes the output for no good reason, which causes
+            # changes to always get committed. Sigh.
+            # https://github.com/davidfstr/rdiscount/blob/6b1471ec3/ext/generate.c#L781-L795
+            for f in doc/*.html; do
+              awk '/Filippo Valsorda/ { $0 = "<p>Filippo Valsorda <a href=\"mailto:age@filippo.io\" data-bare-link=\"true\">age@filippo.io</a></p>" } { print }' "$f" > "$f.tmp"
+              mv "$f.tmp" "$f"
+            done
+      - uses: actions/upload-artifact@v7
+        with:
+          name: man-pages
+          path: |
+            doc/*.1
+            doc/*.html
+  commit:
+    name: Commit changes
+    needs: ronn
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: true
+      - uses: actions/download-artifact@v8
+        with:
+          name: man-pages
+          path: doc/
+      - name: Commit and push if changed
+        run: |-
+          git config user.name "GitHub Actions"
+          git config user.email "actions@users.noreply.github.com"
+          git add doc/
+          git commit -m "doc: regenerate groff and html man pages" || exit 0
+          git push

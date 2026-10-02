@@ -1,14 +1,15 @@
 # Vendored upstream sources
 
-`tor/`, `caddy/`, `authelia/`, and `gost/` are complete, normal Git-tracked snapshots. They are not
+`tor/`, `caddy/`, `authelia/`, `chisel/`, `age/`, and `gozxing/` are complete, normal Git-tracked snapshots. They are not
 submodules, so GitHub builds never depend on GitLab or another source host.
 Each adjacent `*.upstream.toml` records the release tag, tag object, commit,
 and Git tree imported from the official repository.
 
-GOST supplies the v2 fixed stream-forwarding transport. Its full release snapshot
-and upstream Go dependency lockfiles remain intact; Torkitten's transport
-configuration belongs outside this directory. An unsigned upstream tag is
-recorded as unsigned in its manifest.
+Chisel supplies the selected v2 stream transport; age supplies passphrase
+encryption. Gozxing decodes QR images. Their complete source snapshots and Go dependency lockfiles remain
+intact. Integration belongs outside this directory. The root Go module uses
+local replacements so builds consume these verified snapshots. Unsigned upstream
+tags and commits are explicitly recorded as unsigned.
 
 Keep these directories byte-for-byte and mode-for-mode identical to their
 recorded upstream trees. Torkitten integration, configuration, patches, and
@@ -29,7 +30,9 @@ upstream project's official release channel, then run:
 tools/update-vendor.sh tor tor-X.Y.Z
 tools/update-vendor.sh caddy vX.Y.Z
 tools/update-vendor.sh authelia vX.Y.Z
-tools/update-vendor.sh gost vX.Y.Z
+tools/update-vendor.sh chisel vX.Y.Z
+tools/update-vendor.sh age vX.Y.Z
+tools/update-vendor.sh gozxing vX.Y.Z
 ```
 
 The updater uses `TORKITTEN_BUILD_ROOT` (default

@@ -5,145 +5,95 @@ package main
 import (
 	"context"
 	"errors"
-	"log"
+	"flag"
+	"fmt"
 	"net"
-	"net/http"
+	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"syscall"
 	"time"
-	"torkitten/internal/api"
-	"torkitten/internal/apitoken"
-	"torkitten/internal/authelia"
-	"torkitten/internal/bootstrap"
-	"torkitten/internal/caddy"
-	"torkitten/internal/control"
-	"torkitten/internal/localsession"
-	"torkitten/internal/model"
-	"torkitten/internal/onboarding"
-	"torkitten/internal/state"
-	"torkitten/internal/supervisor"
-	torkitTor "torkitten/internal/tor"
+	"torkitten/internal/app"
 )
 
 func main() {
 	if err := run(); err != nil {
-		log.Fatalf("torkitten stopped: %v", err)
+		fmt.Fprintln(os.Stderr, "TorKitten:", err)
+		os.Exit(1)
 	}
 }
 func run() error {
-	syscall.Umask(0o077)
-	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer cancel()
-	store, err := state.Open("/var/lib/torkitten/state.json")
+	syscall.Umask(0077)
+	args := os.Args[1:]
+	daemon := len(args) > 0 && args[0] == "daemon"
+	if daemon {
+		args = args[1:]
+	}
+	executable, err := os.Executable()
 	if err != nil {
 		return err
 	}
-	current := store.View()
-	prepareCtx, stopPrepare := context.WithTimeout(ctx, 15*time.Second)
-	runtime, err := bootstrap.PrepareRuntime(prepareCtx, current)
-	stopPrepare()
+	config, err := os.UserConfigDir()
 	if err != nil {
 		return err
 	}
-	tp, ap, renderer, caddyClient := runtime.Tor, runtime.Authelia, runtime.Caddy, runtime.CaddyClient
-	var autheliaClient *authelia.Client
-	if current.ServiceID != "" {
-		checkCtx, stop := context.WithTimeout(ctx, 15*time.Second)
-		autheliaClient, err = bootstrap.PrepareAuthelia(checkCtx, ap, current.ServiceID)
-		stop()
+	f := flag.NewFlagSet("torkitten", flag.ContinueOnError)
+	state := f.String("state", filepath.Join(config, "torkitten-v2"), "private application state directory")
+	bin := f.String("bin-dir", filepath.Dir(executable), "directory containing pinned upstream binaries")
+	if err = f.Parse(args); err != nil {
+		return err
+	}
+	if f.NArg() != 0 {
+		return errors.New("unexpected arguments")
+	}
+	if daemon {
+		ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+		defer cancel()
+		a, err := app.Open(ctx, *state, *bin)
 		if err != nil {
 			return err
 		}
-	}
-	autheliaHealth := func(check context.Context) error { return autheliaClient.Healthy(check) }
-	secretEnv := []string{"AUTHELIA_SESSION_SECRET_FILE=" + filepath.Join(ap.SecretsDir, "session"), "AUTHELIA_STORAGE_ENCRYPTION_KEY_FILE=" + filepath.Join(ap.SecretsDir, "storage"), "AUTHELIA_IDENTITY_VALIDATION_RESET_PASSWORD_JWT_SECRET_FILE=" + filepath.Join(ap.SecretsDir, "jwt")}
-	process, err := supervisor.New([]supervisor.Spec{
-		{Name: supervisor.Tor, Path: tp.Binary, Args: []string{"-f", tp.Config}, Health: (torkitTor.Client{Socket: tp.ControlSocket, Cookie: tp.CookieFile}).Healthy},
-		{Name: supervisor.Caddy, Path: "/usr/bin/caddy", Args: []string{"run", "--config", runtime.CaddyConfig, "--adapter", "caddyfile"}, Health: caddyClient.Healthy, Recover: func(ctx context.Context) error {
-			root, rootErr := caddyClient.RootCA(ctx)
-			if rootErr != nil || string(root) != string(renderer.PublicRoot) {
-				return errors.New("Caddy root unavailable or changed during restart")
-			}
-			return control.ReconcileCaddy(ctx, store, renderer, caddyClient)
-		}},
-		{Name: supervisor.Authelia, Path: ap.Binary, Args: []string{"--config", ap.Config}, Env: secretEnv, Health: autheliaHealth, Disabled: !current.Initialized},
-	}, log.Default())
-	if err != nil {
-		return err
-	}
-	if err = process.Start(ctx); err != nil {
-		return err
-	}
-	defer process.Shutdown()
-	readyCtx, stopReady := context.WithTimeout(ctx, 45*time.Second)
-	defer stopReady()
-	if err = bootstrap.WaitHealth(readyCtx, caddyClient.Healthy); err != nil {
-		return err
-	}
-	if renderer.PublicRoot, err = caddyClient.RootCA(readyCtx); err != nil {
-		return err
-	}
-	serviceID, err := tp.WaitServiceID(readyCtx)
-	if err != nil {
-		return err
-	}
-	if current.ServiceID != "" && current.ServiceID != serviceID {
-		return errors.New("Tor onion identity does not match durable state")
-	}
-	if current.ServiceID == "" {
-		if err = store.Transition(func(next model.State) (model.State, func() error, error) {
-			next.ServiceID = serviceID
-			return next, nil, nil
-		}); err != nil {
-			return err
-		}
-		autheliaClient, err = bootstrap.PrepareAuthelia(readyCtx, ap, serviceID)
-		if err != nil {
-			return err
-		}
-	}
-	manager := control.New(store, renderer, caddyClient, tp)
-	manager.SetIdentityRuntime(caddy.IdentityRotator{Tor: tp, Renderer: renderer, Caddy: caddyClient, Authelia: ap, Auth: autheliaClient, Processes: process})
-	if err = manager.ReconcileTor(readyCtx); err != nil {
-		return err
-	}
-	config, err := renderer.Render(store.View())
-	if err != nil {
-		return err
-	}
-	if _, err = caddyClient.Apply(readyCtx, config); err != nil {
-		return err
-	}
-	if store.View().Initialized {
-		if err = bootstrap.WaitHealth(readyCtx, autheliaClient.Healthy); err != nil {
-			return err
-		}
-	}
-	sessions := localsession.New(store)
-	manager.SetAuth(sessions, process)
-	life := bootstrap.SupervisedLifecycle{Process: process, Client: autheliaClient}
-	setup := bootstrap.New(ap, life, autheliaClient, manager, sessions)
-	onboard := onboarding.New(manager, autheliaClient)
-	handler, err := api.New(api.Dependencies{Control: manager, Sessions: sessions, Factors: autheliaClient, Setup: setup, Tokens: apitoken.New(store), Onboarding: onboard, Supervisor: process})
-	if err != nil {
-		return err
-	}
-	listener, err := net.Listen("tcp4", "0.0.0.0:12755")
-	if err != nil {
-		return err
-	}
-	server := &http.Server{Handler: handler, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 20 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16 << 10}
-	go state.ReconcileLoop(ctx, onboard.Expire, func() { _ = process.StopComponent(supervisor.Tor) })
-	go func() {
+		defer a.Close()
 		<-ctx.Done()
-		shutdown, stop := context.WithTimeout(context.Background(), 10*time.Second)
-		defer stop()
-		_ = server.Shutdown(shutdown)
-	}()
-	err = server.Serve(listener)
-	if errors.Is(err, http.ErrServerClosed) {
 		return nil
 	}
-	return err
+	socket := filepath.Join(*state, "admin.sock")
+	ready := func() bool {
+		c, e := net.DialTimeout("unix", socket, time.Second)
+		if e != nil {
+			return false
+		}
+		c.Close()
+		return true
+	}
+	if !ready() {
+		if err = os.MkdirAll(*state, 0700); err != nil {
+			return err
+		}
+		log, err := os.OpenFile(filepath.Join(*state, "daemon.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
+		if err != nil {
+			return err
+		}
+		defer log.Close()
+		child := exec.Command(executable, "daemon", "--state", *state, "--bin-dir", *bin)
+		child.Stdout = log
+		child.Stderr = log
+		child.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+		if err = child.Start(); err != nil {
+			return err
+		}
+		child.Process.Release()
+		until := time.Now().Add(45 * time.Second)
+		for !ready() {
+			if time.Now().After(until) {
+				return errors.New("daemon did not become ready; inspect private daemon.log")
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+	}
+	window := exec.Command(filepath.Join(*bin, "torkitten-native"), socket)
+	window.Stdout = os.Stdout
+	window.Stderr = os.Stderr
+	return window.Run()
 }

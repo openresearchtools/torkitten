@@ -40,7 +40,11 @@ RUN apt-get update \
         libseccomp-dev \
         libssl-dev \
         libsystemd-dev \
+        libwebkitgtk-6.0-dev \
+        libsoup-3.0-dev \
         libzstd-dev \
+        openssh-client \
+        openssl \
         pkg-config \
         python3 \
         zlib1g-dev \

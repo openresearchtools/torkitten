@@ -2,7 +2,7 @@
 set -euo pipefail
 
 if [[ $# -ne 2 ]]; then
-    echo "usage: $0 <tor|caddy|authelia|gost> <release-tag>" >&2
+    echo "usage: $0 <tor|caddy|authelia|chisel|age|gozxing> <release-tag>" >&2
     exit 2
 fi
 
@@ -19,8 +19,14 @@ case "$component" in
     authelia)
         upstream=https://github.com/authelia/authelia.git
         ;;
-    gost)
-        upstream=https://github.com/go-gost/gost.git
+    chisel)
+        upstream=https://github.com/jpillora/chisel.git
+        ;;
+    age)
+        upstream=https://github.com/FiloSottile/age.git
+        ;;
+    gozxing)
+        upstream=https://github.com/makiuchi-d/gozxing.git
         ;;
     *)
         echo "unknown component: $component" >&2

@@ -1,7 +1,0 @@
-services:
-- name: http-proxy
-  addr: :8080
-  handler:
-    type: http
-  listener:
-    type: tcp

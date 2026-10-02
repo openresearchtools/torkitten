@@ -1,9 +1,0 @@
-services:
-- name: http-idle
-  addr: :8080
-  handler:
-    type: http
-    metadata:
-      idleTimeout: 3s
-  listener:
-    type: tcp

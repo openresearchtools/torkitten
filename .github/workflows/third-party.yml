@@ -1,10 +1,10 @@
-name: Third-party binaries
+name: Native app and pinned upstreams
 
 on:
   workflow_dispatch:
     inputs:
       rebuild_third_party:
-        description: Rebuild Tor, Caddy, Authelia, and GOST even when their caches exist
+        description: Rebuild Tor, Caddy, Authelia, Chisel, and age even when their caches exist
         required: false
         type: boolean
         default: false
@@ -23,7 +23,8 @@ jobs:
           - tor
           - caddy
           - authelia
-          - gost
+          - chisel
+          - age
     env:
       TORKITTEN_SOURCE_ROOT: ${{ github.workspace }}
 
@@ -124,11 +125,16 @@ jobs:
           ./tools/test-local.sh
 
   consume:
-    name: Consume reusable bundles
-    needs: build
+    env:
+      TORKITTEN_BUILD_ROOT: ${{ runner.temp }}/torkitten-build
+    name: Assemble Linux app from reusable bundles
+    needs: [build, control-plane]
     runs-on: ubuntu-24.04
     steps:
-      - name: Download this run's Tor, Caddy, Authelia, and GOST bundles
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Download this run's Tor, Caddy, Authelia, Chisel, and age bundles
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           pattern: third-party-*
@@ -137,14 +143,37 @@ jobs:
       - name: Verify downstream inputs
         run: |
           mapfile -t metadata < <(find "$RUNNER_TEMP/third-party" -name BUILD-METADATA -type f | sort)
-          test "${#metadata[@]}" -eq 4
+          test "${#metadata[@]}" -eq 5
+          source tools/build/common.sh
           components=()
           for metadata_file in "${metadata[@]}"; do
             component=$(sed -n 's/^component=//p' "$metadata_file")
+            case "$component" in tor|caddy|authelia|chisel|age) ;; *) exit 1;; esac
             components+=("$component")
+            key=$(component_build_key "$component")
+            test "$(sed -n 's/^build_key=//p' "$metadata_file")" = "$key"
             binary_sha=$(sed -n 's/^binary_sha256=//p' "$metadata_file")
             bundle_dir=$(dirname "$metadata_file")
             test "$(sha256sum "$bundle_dir/usr/bin/$component" | cut -d ' ' -f 1)" = "$binary_sha"
+            test -f "$bundle_dir/.complete"
+            destination="$TORKITTEN_BUILD_ROOT/artifacts/third-party/$component/$key"
+            mkdir -p "$destination"
+            cp -a "$bundle_dir/." "$destination/"
+            chmod 0755 "$destination/usr/bin/$component"
             sed -n '/^component=/p; /^release=/p; /^source_commit=/p; /^binary_sha256=/p' "$metadata_file"
           done
-          test "$(printf '%s\n' "${components[@]}" | sort | tr '\n' ' ')" = "authelia caddy gost tor "
+          test "$(printf '%s\n' "${components[@]}" | sort | tr '\n' ' ')" = "age authelia caddy chisel tor "
+
+      - name: Assemble Linux bundle
+        run: |
+          podman info --format '{{.Host.Security.Rootless}}' | grep -qx true
+          ./tools/build-local.sh app
+          (cd "$TORKITTEN_BUILD_ROOT/artifacts/app" && sha256sum --check SHA256SUMS)
+          tar -C "$TORKITTEN_BUILD_ROOT/artifacts" -czf "$RUNNER_TEMP/torkitten-linux-x86_64.tar.gz" app
+
+      - name: Upload Linux bundle with executable modes
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: torkitten-linux-x86_64
+          path: ${{ runner.temp }}/torkitten-linux-x86_64.tar.gz
+          if-no-files-found: error

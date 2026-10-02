@@ -1,323 +1,147 @@
-# TorKitten v2 implementation plan
+# TorKitten v2 design and verification
 
-Status: branch foundation and upstream refresh; the native v2 application is
-not implemented yet. Repository: `openresearchtools/torkitten`, branch
-`torkitten-v2`, checkout `/run/media/user/Data/Repositories/torkitten`.
+The `torkitten-v2` branch implements a Linux native app with host and client
+modes, encrypted onboarding, a portable bundled web UI, OAuth authorization and
+transparent native localhost mappings. Android reuses the client core and UI;
+its package/device validation is still outstanding. Build and runtime details
+are in [native builds](native-builds-v2.md); usage is in the [README](../README.md).
 
-## Product
+## Small ownership boundaries
 
-One native Linux application can act as a server, a client, or both. Its small
-GTK/WebKit interface has host setup, a live service list, and saved connections
-to additional TorKitten servers. It does not add a general proxy/VPN product,
-standalone cloud-provider connections, or a resource-management dashboard.
-
-The server shares owner-selected TCP or Unix **stream** endpoints. The client
-maps them onto `127.0.0.1` ports so existing SSH, API and browser clients use
-their ordinary protocols. SSH, HTTP, SSE, application WebSockets, uploads and
-downloads remain opaque payloads inside the authenticated tunnel. No OAuth
-headers, cookie rewriting or application-specific transformations are inserted
-into those payloads. Unix FD passing, peer credentials, datagrams and UDP are
-not representable by this byte-stream contract and are rejected.
-
-The UI shows the service list and status dynamically while connected. There is
-no separate service-configuration import after login. File/QR import is only
-the initial connection setup. Mapping controls show the actual local port and
-allow a chosen port or an automatically allocated one, held by its listener.
-
-Keep the two views plain and limited to these controls:
-
-- **Client:** saved TorKitten connection, Authelia login, live service rows with
-  a local-mapping checkbox, chosen port or Auto, assigned port, and
-  Load / Reload / Stop buttons.
-- **Host admin:** encrypted configuration download or QR, Issue new identity,
-  Revoke sessions, and service rows with name, launch command, TCP address:port
-  or Unix socket, Available checkbox, and the same lifecycle buttons. SSH can
-  be enabled only here. This view is accessible only over the private admin
-  socket, never through an onion route.
-
-One versioned `services.json` file holds all service entries; the admin UI and
-agents edit that same model. Do not add dashboards or resource settings. An
-endpoint may be derived from an explicit supported command flag only when it
-is unambiguous. Otherwise require its port/socket field; do not scan, guess, or
-silently substitute a destination.
-
-## Keep the implementation small
-
-| Responsibility | Owner |
+| Responsibility | Implementation |
 | --- | --- |
-| Onion identity, client authorization, Tor routing | C Tor |
-| Private-CA HTTPS, mTLS, exact routes, forward authorization | Caddy |
-| Account, password, 2FA, browser session validity | Authelia |
-| Byte-stream forwarding | Upstream transport selection remains open; GOST is a tested candidate |
-| Process lifecycle and launch options | User's presets and their upstream launcher |
-| File encryption | Established age implementation |
-| Host keys and SSH authentication | OpenSSH |
-| Local UI, preset storage, config rendering, component coordination | Small Go/GTK wrapper |
+| Onion identity, client authorization, Tor routing | Pinned C Tor |
+| Private-CA HTTPS, device mTLS, routes, forward authorization | Pinned Caddy |
+| Account, password, TOTP, OAuth validity, refresh and revocation | Pinned Authelia |
+| SSH-encrypted WebSocket carrier | Pristine Chisel wire components and Go SSH |
+| File encryption | Pristine age scrypt recipient |
+| QR reading/writing | Pristine gozxing and barcode |
+| Service lifecycle and launch options | Explicit user-authored launcher commands |
+| Local model, configuration, component coordination, UI bridge | Small Go/GTK wrapper |
 
-Do not implement a transport protocol, OAuth broker, replacement session store,
-certificate framework, workflow engine, or service supervisor. Keep the
-existing 5,000-line first-party Go ceiling. Native bindings must also remain
-thin. Remove obsolete v1 code as v2 replaces it; do not use language changes or
-generated code to evade the size constraint.
+Replaced v1 runtime packages are removed. There is no second transport, custom
+password verifier, OAuth broker, replacement token store on the server, or
+resource-policy manager. The complete production Go implementation, including
+mobile, must stay below 5,000 physical lines. Tests and pristine dependencies
+are excluded; moving product logic to JavaScript to evade the limit is forbidden.
 
-Tor, Caddy and Authelia remain pristine source snapshots with exact release,
-tag, commit and tree records. Additional selected upstreams follow the same
-policy. Use stable releases, exact build pins and licenses, not moving branches.
-GOST supplies stock fixed forwarding over WebSocket with an explicitly
-configured Tor hop. The source-built binary passes the bounded TCP/Unix,
-TLS-verification and failed-proxy checks in `gost-proof-v2.md`. This does not
-prove the complete Tor/Caddy/Authelia/native-client chain. The remaining proofs
-below still gate deployment. If one fails, stop and resolve the design; do not
-install a second transport or quietly introduce a custom broker.
-
-The transport comparison must account for independent tunnel encryption.
-Chisel performs its own SSH handshake inside the WebSocket connection, using
-Go's SSH implementation. This encrypts every tunneled service, including plain
-HTTP APIs, between the Chisel client and server. With the Chisel server
-fingerprint verified, that encryption remains intact across Caddy's TLS
-termination. A tunneled OpenSSH connection adds its separate SSH layer inside
-Chisel's SSH layer. Chisel's transport is not an OpenSSH login server.
-
-The tested GOST `forward`/WSS configuration has no corresponding inner SSH
-encryption. Its TLS terminates at Caddy, which can read otherwise-plaintext
-service payloads. A carried OpenSSH connection still has its own end-to-end
-SSH encryption. These configurations are therefore not cryptographically
-equivalent, and Unix support alone does not establish GOST as the better choice.
-
-Chisel supports a SOCKS proxy; its current target implementation forwards
-TCP/UDP, so raw Unix stream targets would require another adapter. GOST directly
-supports both endpoint types. That tradeoff and the documented half-close limit
-remain part of the open transport decision. Chisel is an independent upstream
-with a Fedora-maintained package; Fedora packaging does not mean Fedora
-develops the tunnel protocol. Only one transport will be selected; there is no
-automatic substitution after a failure.
-
-One transport implementation does not require all services to share one
-network connection. The real Tor sample in `tor-concurrency-sample-v2.md`
-preserved checked data but showed a 10.49-second SSE arrival gap on a shared
-Chisel connection. Separate connections reduced that gap in the sample, with
-slower bulk completion; circuit variation was not isolated. Performance remains
-a measured acceptance requirement, not a consequence of byte preservation.
-
-## Connections and private controls
+## Transport
 
 ```text
-ordinary client -> client 127.0.0.1 port -> native tunnel connector
-  -> local Tor proxy -> onion service :443 -> Caddy HTTPS + device mTLS
-  -> Authelia authorization at tunnel establishment -> fixed upstream tunnel
-  -> configured server TCP or Unix stream endpoint
-
-host setup UI / host CLI -> private Unix admin socket -> preset/config editing
-authenticated client UI -> Caddy + Authelia -> service list and allowed actions
+service client -> held 127.0.0.1 listener -> one carrier per native connection
+ -> Chisel SSH inside WSS -> Tor SOCKS Unix socket -> onion:443
+ -> Caddy TLS/mTLS + Authelia bearer authorization
+ -> private tunnel socket -> fixed TCP loopback or Unix stream endpoint
 ```
 
-Caddy can already proxy HTTP and HTTP WebSockets to a Unix socket. A Unix socket
-is an endpoint type, not a protocol: that capability does not turn arbitrary
-SSH or other raw-stream traffic into WebSocket frames. GOST supplies that
-conversion for the uniform native-port tunnel. Caddy forwards its WebSocket
-envelope; it does not convert each inner service protocol. The native client
-creates local listeners; a second client
-Caddy is unnecessary. Only the authenticated gateway is onion-published.
-Component administration and host setup sockets have no remote route or service
-mapping. Remote lifecycle calls contain only an existing service ID and an
-allowed action, never a shell string, destination, path or replacement config.
+Stock Chisel cannot directly dial a raw Unix destination, return a held Auto
+listener to the app, or reject every UDP request through its destination ACL.
+The small adapter uses its pristine WebSocket connection, wire configuration,
+fingerprint and copy components plus Go SSH. It adds exact service-ID
+selection, Unix dialing, held local listeners and explicit protocol rejection.
+It does not patch vendor sources or invent a new wire protocol. A stock-Chisel
+interoperability test gates this boundary.
 
-Only onion port 443 exposes the gateway; service ports such as 8080 are not Tor
-port mappings or plain Caddy application routes. Possessing just an onion
-address and its Tor client-authorization key permits reaching the gateway, not
-using its services. Device mTLS, Authelia 2FA-session authorization and the
-selected transport's configured authentication still apply. Caddy authorizes
-the outer tunnel upgrade and control requests; it does not inspect encrypted
-inner API calls. Explicit revocation must close already-open tunnels.
+Each accepted native TCP connection gets a separate WSS/SSH carrier. It is not
+a fixed pool of four shared connections. Parallel native connections therefore
+do not share Chisel's ordered TCP carrier, though Tor circuits and network
+capacity still affect all traffic. No automatic replay or stream resumption is
+promised after a transport failure. HTTP/SSE/WebSocket/SSH payloads remain opaque.
 
-Use a separate login web context, first-party control UI context, and service
-view context. Arbitrary service pages have no native credential or host-control
-bridge. Host setup over Unix sockets can use a narrowly typed native bridge;
-WebKit is not assumed to support `http+unix` URLs directly.
+Only configured stream targets can be selected. The wire target is a service ID,
+not a caller-supplied address. UDP, SOCKS, reverse forwarding and multiple or
+arbitrary destination channels are rejected. Removal, endpoint replacement and
+revocation close active carriers, including handshakes. Authorization begun
+before revocation cannot establish a carrier afterward.
 
-The tunnel connector has one explicit Tor route. Missing Tor, failed proxy
-negotiation, failed TLS verification, missing/expired authentication, unknown
-service IDs and invalid configuration fail closed. No direct connection,
-alternative proxy, plaintext route or automatic transport substitution exists.
-Reconnect may establish a new authenticated connection on the same approved
-path; it never replays service commands or resumes a broken byte stream.
+## OAuth and credentials
 
-## Host-owned launch presets
+Authelia's public client uses pushed authorization requests, authorization code,
+PKCE S256, explicit consent, `form_post`, refresh tokens and the scopes
+`authelia.bearer.authz offline_access`. The bearer resource is the gateway URL.
+The device grant is not used because Authelia does not permit the required
+bearer authorization scope with that grant.
 
-A preset contains an ID, display name, availability, endpoint, and explicit
-lifecycle command argument arrays. Agents can author entries in the single
-versioned `services.json` file. The command box edits the launch command; it
-does not expose component configuration or remote arbitrary execution. A preset may call
-an existing systemd unit, Podman command, or user's launch script. The wrapper
-does not translate or override llama.cpp flags, CPU affinity, memory settings,
-GPU selection, container configuration or scheduling choices.
+The native form delegates password and TOTP verification to Authelia's supported
+factor endpoints through strict Tor/TLS/mTLS. Its short-lived cookie jar exists
+only during login/consent. It never authorizes a tunnel. The bounded OAuth form
+response is parsed, never executed, with exact callback, state and issuer checks.
+No HTTP callback listener or insecure WebKit certificate exception is needed.
 
-Example shape, with a user-provided `llama.service`:
+Caddy's protected routes use Authelia's Bearer-only authorization strategy. The
+private control/tunnel backend independently checks authorization. Tokens stay
+inside the native client and its age-encrypted profile, never in application
+payloads, JavaScript, URLs or command arguments. Each newly accepted native
+connection obtains a current token; refresh is serialized per profile.
 
-```json
-{
-  "version": 1,
-  "services": [{
-    "id": "llama",
-    "title": "Llama server",
-    "available": true,
-    "endpoint": {"network": "tcp", "address": "127.0.0.1:8080"},
-    "actions": {
-      "load": ["/usr/bin/systemctl", "--user", "start", "llama.service"],
-      "reload": ["/usr/bin/systemctl", "--user", "restart", "llama.service"],
-      "stop": ["/usr/bin/systemctl", "--user", "stop", "llama.service"]
-    }
-  }]
-}
+Manual revocation rotates the public OAuth client ID, removes the previous
+registration and restarts this host's dedicated Authelia instance. The SQLite
+store remains intact. This denies old access/refresh tokens and clears login
+cookies, while preserving Tor/device identity. The app also closes live carriers.
+The mTLS-protected `/api/info` returns only the current client ID/version so a
+client can perform a fresh 2FA login. Ordinary catalogue changes do not rotate
+OAuth registration; changes to SSH service boundaries do.
+
+## Host and UI boundary
+
+GTK loads only bundled HTML/CSS/JS at `torkitten://app`. A fixed Unix-socket
+bridge supplies exact Host/Origin values; external pages cannot obtain it.
+Host setup has no onion route. The remote API exposes only version/client-ID
+metadata, the authorized catalogue, fixed lifecycle actions and tunnel upgrades.
+
+There is one agent-editable `services.json` containing names, availability,
+SSH flags, explicit stream endpoints and lifecycle argument arrays. Local UI
+and file edits use the same validation. The app never chooses resource limits
+or rewrites launch arguments. Commands hand off to the user's independent
+launcher; unsupported/missing lifecycle actions remain unavailable.
+
+Live QR scanning uses the native camera permission and portable video/canvas
+UI. Frames go only to the local Go QR decoder through the private bridge; they
+are never sent to Tor or the remote server. Scanning returns the encrypted
+bundle to the password form. Capture stops when the scan closes or the app is
+hidden. Android camera permission/build behavior still needs device validation.
+
+An encrypted device export contains device credentials and public server trust,
+never server identity or CA private keys. Imported profiles are locked after
+restart. Identity replacement closes and removes the previous generation and
+requires new onboarding. An incomplete replacement stays closed; it never
+restores an old identity as a fallback. Missing prerequisites and component
+failure deny remote access. There is no alternate network or authentication path.
+
+## Verification
+
+`tools/test-local.sh` uses a pinned rootless Podman builder and external caches.
+It checks formatting, vet, security/concurrency unit tests, source integrity and
+size. Transport tests exercise binary TCP/Unix, HTTP uploads, SSE, application
+WebSockets, a nested native SSH session, half-close, independent carriers,
+strict TLS/mTLS/fingerprint/Bearer, held Auto ports and protocol denials.
+
+The opt-in OAuth proof runs actual Caddy and Authelia, including password/TOTP,
+PAR, PKCE, consent, refresh rotation, revocation and client-registration changes:
+
+```sh
+python3 tools/proof-oauth.py --help
 ```
 
-Unix endpoints use `{"network":"unix","address":"/absolute/service.sock"}`.
-Launch argument arrays can invoke the user's existing launcher/config directly.
-The launcher owns the service independently of the GTK window. Presets provide
-the actions their launch mechanism actually supports. Here the owner explicitly
-defines Reload to restart the unit; an omitted action is unavailable and never
-silently replaced. Commands run without
-an implicit shell, with bounded/redacted output and explicit exit status.
+The full-app proof starts separate app instances and uses only their private
+Unix UI API for identity, enrollment, login, mapping and control. It requires
+source-built upstream binaries, host `ssh`, `ssh-keygen` and `openssl`, and live
+Tor connectivity. Run with fresh external paths and the pinned build environment:
 
-Only host setup can add/edit/delete presets and set SSH availability. Remote
-users can load, reload or stop already approved presets. Their view
-does not expose the host command editor or secrets. Endpoint/command correctness
-and independent lifecycle are tested against the chosen preset, not guessed
-by the wrapper.
+```sh
+TORKITTEN_APP_PROOF=/absolute/external/proofs/app-new \
+TORKITTEN_APP_BIN=/absolute/external/artifacts/app/bin \
+  go test -count=1 -timeout 25m -run TestLiveApp ./internal/app
+```
 
-## Initial connection and login
+It covers encrypted file and QR import, wrong-password rejection, actual Tor,
+missing-device-certificate and Bearer denial, explicit OAuth login/consent,
+concurrent TCP/Unix/native SSH, lifecycle actions, service removal, global/SSH
+revocation, new 2FA, identity replacement and actual packaged host/client daemon restarts
+with persisted identity and encrypted profiles. It erases generated proof identity
+state on exit and retains sanitized results plus private component logs.
 
-1. Host setup creates a device connection bundle: schema version, onion
-   address, that device's Tor **client authorization** credential, public Caddy
-   trust anchor, and unique device mTLS credential. The Tor service identity
-   private key and all CA/server private keys stay on the server.
-2. Encrypt the bundle with the established age passphrase format using the
-   owner's chosen file password. Import asks for that password. A QR carries
-   the same encrypted bootstrap data, subject to an explicit payload limit;
-   oversized payloads are rejected for QR export and remain file-exportable.
-   Neither QR nor file carries a plaintext password or authenticated session.
-3. The native client installs trust and credentials only inside that connection
-   profile, then reaches the login portal through Tor with verified HTTPS.
-   Invalid password, bundle, certificate, address or unsupported format fails;
-   no compatibility guessing or TLS exception is allowed.
-4. Authelia performs login and 2FA. Its HttpOnly cookie stays in the isolated
-   login context. Native code can obtain the cookie via the supported native
-   cookie API for authenticated gateway requests; page JavaScript, logs and
-   process arguments never receive it.
-5. The client UI displays live services and permitted actions. Native tunnel
-   connections carry the Authelia session credential only to the trusted
-   gateway. Service applications never receive it. Each saved TorKitten server
-   has separate trust, cookies, device credentials and mappings.
-
-Authelia supports OIDC, but an OAuth token does not inherently include service
-configuration or track TorKitten's configuration changes. The minimal design
-uses Authelia's existing session token (the cookie); no OIDC broker or token
-distribution layer is needed for native localhost services.
-
-Use supported upstream certificate tools for device provisioning and Caddy's
-stock mTLS leaf verifier/allowlist; do not write an online device CA service.
-The source-built Caddy passes 32 local device-admission/reconnection checks with
-OpenSSL-generated self-signed client leaves, `require_and_verify`, an explicit
-trust pool, and the exact-leaf allowlist. It disables session tickets with mTLS.
-See `caddy-mtls-proof-v2.md`; GTK/GOST integration and profile trust packaging
-remain unproved.
-
-**Issue new identity** is a complete host-authorized replacement: close remote
-access and active tunnels, let Tor create a new onion identity, replace Caddy
-TLS trust and device mTLS credentials, and initialize replacement Authelia
-credentials and 2FA enrollment through its supported interfaces. Export only
-the new encrypted connection bundle. Old profiles and sessions stop working;
-clients must import the replacement and log in again. This is distinct from
-ordinary session revocation. A failed replacement remains closed; it does not
-silently reactivate the old identity. Private server keys never enter the file
-or QR.
-
-## SSH boundary and revocation
-
-The host explicitly enables a configured SSH endpoint. The client's native SSH
-tools then use its mapped localhost port and the expected SSH host identity.
-SSH credentials are per device. Prefer generating the private client key with
-OpenSSH on that client and provisioning only its public key through the
-host-authorized setup. No server SSH host private key is distributed. The
-selected host SSH configuration owns the account, permissions and key paths;
-TorKitten does not create an account-management subsystem.
-
-Enabling SSH grants the rights of that configured account/container. If it is
-the same host UID that owns the admin socket, it can reach that socket locally;
-the host preset must choose the intended account/container boundary.
-
-Routine service-list, name and status changes update the UI without logout.
-Removing/disabling a service closes its active streams on the server, including
-connections held by an uncooperative client. SSH boundary changes
-and the explicit **Revoke sessions** action require fresh Authelia 2FA:
-
-1. Stop remote acceptance and close the active tunnel connections. Close client
-   mappings on disconnect; cached service lists do not authorize access.
-2. Restart the dedicated Authelia memory-session instance, destroying its
-   sessions through its supported lifecycle. Apply changed SSH/device policy.
-3. Start the verified gateway configuration. Existing cookies cannot authorize
-   new connections; users must log in again. If any step fails, remote access
-   stays disabled. Never restore a weaker or guessed configuration.
-
-Stopping the tunnel endpoint, rather than merely changing a cookie, terminates
-active SSH/SSE/WebSocket access. A global revoke can restart the dedicated
-tunnel/Caddy processes to avoid custom per-connection session machinery. TLS
-resumption must not preserve revoked device access. All affected component
-state, including Authelia session loss on restart, is explicit in the UI.
-
-Ordinary cookie expiry is checked by Authelia for new requests/upgrades; an
-already-open tunnel is not magically reauthorized per inner packet. The
-explicit revoke operation closes it. Do not claim otherwise.
-
-## Proofs before application implementation
-
-Current transport evidence includes real SSH command execution and SFTP, but
-GOST's pinned copy helper imposes a ten-second read deadline after one direction
-reaches EOF. The immediate-response half-close test passes; indefinite
-half-close transparency is not established. Arbitrary-service support remains
-blocked on resolving that limitation. Do not hide it with retries, patch the
-pristine snapshot, or claim all byte-stream semantics are preserved.
-
-1. **Upstreams:** verify pristine latest stable snapshots, signatures/provenance,
-   pinned builds, and existing regression checks. See `upstream-refresh-v2.md`.
-2. **One transport:** prove fixed TCP and Unix forwarding, binary transparency,
-   SSH/SFTP, SSE, nested WebSockets, concurrent connections and half-close.
-   Break the Tor proxy and credentials and verify there is no direct dial or
-   client DNS bypass. No upstream target is contacted before authorization.
-3. **GTK login:** prove actual WebKit network-process private-CA trust, mTLS,
-   onion cookies, native cookie access, redirects and logout. Package a private
-   trust environment if supported. There is no verified public WebKit6
-   per-session CA-database setter; global TLS-ignore and per-certificate error
-   exceptions are not acceptable substitutes. Failure leaves the feature
-   unsupported, not downgraded.
-4. **Presets and controls:** prove a real user-supplied llama/ComfyUI/SSH preset
-   launches independently, reports status, and supports only declared actions.
-   Prove remote routes cannot edit presets or reach component/admin sockets.
-5. **Revocation:** while SSH and streaming connections are active, revoke
-   sessions or disable SSH. Connections terminate and old cookies cannot
-   reconnect. Still-approved devices may perform fresh 2FA; separately revoked
-   device credentials must fail, including through TLS session resumption.
-6. **Client UX:** encrypted file and bounded QR import, multiple isolated
-   connections, live service list, explicit/automatic local ports, and exact
-   error states. Exported bundles and persistent client secret stores are
-   encrypted. Upstream-required runtime credential files are private with
-   restrictive permissions. No secrets enter UI bridges, process arguments
-   or logs.
-
-Implement these in that order as small independently reviewable changes.
-Do not claim a secure native release until the real pinned components pass the
-proofs; unit tests alone do not establish browser or Tor compatibility.
-
-## Source references
-
-- [Tor client authorization](https://community.torproject.org/onion-services/advanced/client-auth/)
-- [Caddy TLS and client certificate verifiers](https://caddyserver.com/docs/caddyfile/directives/tls)
-- [Authelia proxy authorization](https://www.authelia.com/reference/guides/proxy-authorization/)
-- [Authelia session storage](https://www.authelia.com/overview/authorization/statelessness/)
-- [GOST fixed server forwarding](https://gost.run/en/tutorials/port-forwarding/#server-side-forwarding)
-- [GOST Unix transport](https://gost.run/en/tutorials/unix/)
-- [Chisel transport and packaging](https://github.com/jpillora/chisel)
-- [Chisel target dialing](https://github.com/jpillora/chisel/blob/master/share/tunnel/tunnel_out_ssh.go)
-- [Chisel v1.11.7 SSH handshake over WebSocket](https://github.com/jpillora/chisel/blob/v1.11.7/client/client_connect.go)
-- [age implementation](https://github.com/FiloSottile/age)
-- [WebKit NetworkSession API](https://github.com/WebKit/WebKit/blob/main/Source/WebKit/UIProcess/API/glib/WebKitNetworkSession.h.in)
+Native bridge, bundled UI and Android build scope are recorded in
+[native builds](native-builds-v2.md). Linux evidence must not be described as an
+Android or iOS compatibility result. Historical Tor benchmark samples measure
+their stated circuits/workloads and do not establish a bandwidth guarantee.

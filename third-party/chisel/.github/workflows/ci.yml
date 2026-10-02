@@ -1,0 +1,159 @@
+name: CI
+on:
+  pull_request: {}
+  push:
+    branches: [master]
+    tags: ["v*"]
+permissions:
+  contents: read
+jobs:
+  # ================
+  # SPELLING CHECK
+  # ================
+  codespell:
+    name: Spelling
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+      - name: codespell
+        uses: codespell-project/actions-codespell@v2
+  # ================
+  # BUILD AND TEST JOB
+  # ================
+  test:
+    name: Build & Test
+    strategy:
+      matrix:
+        go-version: ["stable"]
+        platform: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: ${{ matrix.go-version }}
+          check-latest: true
+      - name: Build
+        run: go build -v -o /dev/null .
+      - name: Test
+        run: go test -v ./...
+  # ================
+  # RELEASE STAGE 1 (on push "v*" tag, after merging to master)
+  # Builds and verifies the versioned archives without credentials, then
+  # creates a DRAFT GitHub release containing those exact archives and the
+  # packages built by the publishing run. It also pushes version-tagged
+  # multi-arch Docker images via GoReleaser. Floating Docker tags (latest /
+  # X / X.Y) are not touched here — publishing the draft release triggers
+  # promote.yml (stage 2) which retags them.
+  # ================
+  release:
+    name: Release
+    needs: test
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          # Do not leave the write-capable job token in Git configuration;
+          # the preflight must run without publication credentials.
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: stable
+          cache: true
+      - name: Build release archives without publishing
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          # v2.12.7 silently produced corrupt .gz archives (#610); v2.17.0
+          # verified clean — reproduce/verify with 3x snapshot A/B runs
+          # before changing this pin
+          version: v2.17.0
+          args: release --clean --config .github/goreleaser.yml --skip=publish,nfpm
+      - name: Verify and stage release archives
+        # Fail closed before credentials are used. The publishing run skips
+        # its archive pipe and uploads these exact files from outside dist.
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          archives=(dist/*.gz dist/*.zip)
+          if (( ${#archives[@]} == 0 )); then
+            echo "::error::GoReleaser produced no .gz or .zip archives"
+            exit 1
+          fi
+
+          bad=0
+          for archive in "${archives[@]}"; do
+            case "$archive" in
+              *.gz)  gzip -t "$archive" || { echo "CORRUPT: $archive"; bad=1; } ;;
+              *.zip) unzip -t "$archive" >/dev/null || { echo "CORRUPT: $archive"; bad=1; } ;;
+            esac
+          done
+          if (( bad != 0 )); then
+            exit "$bad"
+          fi
+
+          mkdir -p release/archives
+          mv -- "${archives[@]}" release/archives/
+          echo "verified and staged ${#archives[@]} release archives"
+      - name: Start local registry for ko base
+        run: |
+          docker run --detach --name chisel-ko-registry \
+            --publish 127.0.0.1:5000:5000 \
+            registry:2@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373
+      - name: Set up Docker Buildx for ko base
+        uses: docker/setup-buildx-action@v4
+        with:
+          driver-opts: network=host
+          buildkitd-config-inline: |
+            [registry."localhost:5000"]
+              http = true
+              insecure = true
+      - name: Build six-platform scratch + CA base for ko
+        run: |
+          docker buildx build \
+            --platform linux/amd64,linux/arm64,linux/ppc64le,linux/386,linux/arm/v7,linux/arm/v6 \
+            --provenance=false \
+            --sbom=false \
+            --tag localhost:5000/chisel-ko-base:local \
+            --file .github/ko-base.Dockerfile \
+            --push .github
+      - name: Login to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Login to Docker Hub
+        uses: docker/login-action@v4
+        with:
+          username: jpillora
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - name: Publish with GoReleaser
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          # v2.12.7 silently produced corrupt .gz archives (#610); v2.17.0
+          # verified clean — reproduce/verify with 3x snapshot A/B runs
+          # before changing this pin
+          version: v2.17.0
+          # GoReleaser OSS v2.17.0 cannot publish a previous dist directory.
+          # Rebuild binaries for packages/ko images, but preserve the verified
+          # archives by skipping this run's archive pipe.
+          # Stable 1.12 follows three release candidates, so an automatically
+          # generated changelog would only contain the final post-RC commits.
+          args: release --clean --config .github/goreleaser.yml --skip=archive --release-notes=.github/releases/1.12.0.md
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_ARCHIVES_GLOB: release/archives/*

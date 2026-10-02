@@ -1,0 +1,101 @@
+# https://github.com/FiloSottile/age/issues/57
+age -r age1xmwwc06ly3ee5rytxm9mflaz2u56jjj36s0mypdrwsvlul66mv4q47ryef -o test.age input
+! age -o test.out -d -i wrong.txt test.age
+! exists test.out
+! age -o test.out -d test.age
+! exists test.out
+! age -o test.out -d -i notexist test.age
+! exists test.out
+! age -o test.out -d -i wrong.txt notexist
+! exists test.out
+! age -o test.out -r BAD
+! exists test.out
+! age -o test.out -r age1xmwwc06ly3ee5rytxm9mflaz2u56jjj36s0mypdrwsvlul66mv4q47ryef notexist
+! exists test.out
+! age -o test.out -p notexist
+! exists test.out
+
+# https://github.com/FiloSottile/age/issues/555
+age -r age1xmwwc06ly3ee5rytxm9mflaz2u56jjj36s0mypdrwsvlul66mv4q47ryef -o empty.age empty
+exists empty.age
+age -d -i key.txt empty.age
+! stdout .
+! stderr .
+age -d -i key.txt -o new empty.age
+! stderr .
+cmp new empty
+
+# Don't create or truncate the output if the payload fails authentication.
+! age -o test.out -d -i key.txt corrupt.age
+stderr 'failed to decrypt and authenticate payload chunk'
+! exists test.out
+cp input existing
+! age -o existing -d -i key.txt corrupt.age
+stderr 'failed to decrypt and authenticate payload chunk'
+cmp existing input
+
+# Report output creation errors for an empty plaintext.
+! age -o missingdir/test.out -d -i key.txt empty.age
+stderr 'missingdir/test.out'
+! exists missingdir/test.out
+! age -o missingdir/test.out -d -i key.txt test.age
+stderr 'missingdir/test.out'
+
+# https://github.com/FiloSottile/age/issues/491
+cp input inputcopy
+! age -r age1xmwwc06ly3ee5rytxm9mflaz2u56jjj36s0mypdrwsvlul66mv4q47ryef -o inputcopy inputcopy
+stderr 'input and output file are the same'
+cmp inputcopy input
+! age -r age1xmwwc06ly3ee5rytxm9mflaz2u56jjj36s0mypdrwsvlul66mv4q47ryef -o ./inputcopy inputcopy
+stderr 'input and output file are the same'
+cmp inputcopy input
+mkdir foo
+! age -r age1xmwwc06ly3ee5rytxm9mflaz2u56jjj36s0mypdrwsvlul66mv4q47ryef -o inputcopy foo/../inputcopy
+stderr 'input and output file are the same'
+cmp inputcopy input
+cp key.txt keycopy
+age -e -i keycopy -o test.age input
+! age -d -i keycopy -o keycopy test.age
+stderr 'input and output file are the same'
+cmp key.txt keycopy
+
+[!linux] [!darwin] skip # no pty support
+
+ttyin terminal
+! age -p -o inputcopy inputcopy
+stderr 'input and output file are the same'
+cmp inputcopy input
+
+# https://github.com/FiloSottile/age/issues/159
+ttyin terminal
+age -p -a -o test.age input
+ttyin terminalwrong
+! age -o test.out -d test.age
+ttyout 'Enter passphrase'
+stderr 'incorrect passphrase'
+! exists test.out
+
+-- terminal --
+password
+password
+-- terminalwrong --
+wrong
+-- input --
+age
+-- empty --
+-- corrupt.age --
+-----BEGIN AGE ENCRYPTED FILE-----
+YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSBDMXYwVmsyU3dyc1NPdUF1
+S1ZKRXhVMXFKWDdyd2ZHajZyUkRDRHBad20wCk93WjZOS0tOZjBNSW5Ka2ErUFRz
+K0gzU1pzWEdqS3EvZWlmbUE1ZE95V1EKLS0tIEZBTW81V3RhWk1xVVhoMnA3UDRl
+YSs2QW5zeHp6ZFk4M1dSc0pmeld6VWcK2XikoRl4QMDKbFQRZXWCl/A6Z5nvCK3a
+RaZyUlKtXBnSTaVCMKRb
+-----END AGE ENCRYPTED FILE-----
+-- key.txt --
+# created: 2021-02-02T13:09:43+01:00
+# public key: age1xmwwc06ly3ee5rytxm9mflaz2u56jjj36s0mypdrwsvlul66mv4q47ryef
+AGE-SECRET-KEY-1EGTZVFFV20835NWYV6270LXYVK2VKNX2MMDKWYKLMGR48UAWX40Q2P2LM0
+-- wrong.txt --
+# created: 2024-06-16T12:14:00+02:00
+# public key: age10k7vsqmeg3sp8elfyq5ts55feg4huarpcaf9dmljn9umydg3gymsvx4dp9
+AGE-SECRET-KEY-1NPX08S4LELW9K68FKU0U05XXEKG6X7GT004TPNYLF86H3M00D3FQ3VQQNN

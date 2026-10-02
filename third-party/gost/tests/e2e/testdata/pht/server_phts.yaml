@@ -1,7 +1,0 @@
-services:
-- name: phts-server
-  addr: :8443
-  handler:
-    type: http
-  listener:
-    type: phts

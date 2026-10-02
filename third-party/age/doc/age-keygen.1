@@ -1,0 +1,71 @@
+.\" generated with Ronn-NG/v0.9.1
+.\" http://github.com/apjanke/ronn-ng/tree/0.9.1
+.TH "AGE\-KEYGEN" "1" "August 2026" ""
+.SH "NAME"
+\fBage\-keygen\fR \- generate age(1) key pairs
+.SH "SYNOPSIS"
+\fBage\-keygen\fR [\fB\-pq\fR] [\fB\-o\fR \fIOUTPUT\fR]
+.br
+\fBage\-keygen\fR \fB\-y\fR [\fB\-o\fR \fIOUTPUT\fR] [\fIINPUT\fR]
+.br
+.SH "DESCRIPTION"
+\fBage\-keygen\fR generates a new native age(1) key pair, and outputs the identity to standard output or to the \fIOUTPUT\fR file\. The output includes the public key and the current time as comments\.
+.P
+If the output is not going to a terminal, \fBage\-keygen\fR prints the public key to standard error\.
+.SH "OPTIONS"
+.TP
+\fB\-pq\fR
+Generate a post\-quantum hybrid ML\-KEM\-768 + X25519 key pair\.
+.IP
+In the future, this might become the default\.
+.TP
+\fB\-o\fR, \fB\-\-output\fR=\fIOUTPUT\fR
+Write the identity to \fIOUTPUT\fR instead of standard output\.
+.IP
+If \fIOUTPUT\fR already exists, it is not overwritten\.
+.TP
+\fB\-y\fR
+Read an identity file from \fIINPUT\fR or from standard input and output the corresponding recipient(s), one per line, with no comments\.
+.TP
+\fB\-\-version\fR
+Print the version and exit\.
+.SH "EXAMPLES"
+Generate a new post\-quantum identity:
+.IP "" 4
+.nf
+$ age\-keygen \-pq
+# created: 2025\-11\-17T13:39:06+01:00
+# public key: age1pq167[\|\.\|\.\|\. 1950 more characters \|\.\|\.\|\.]
+AGE\-SECRET\-KEY\-PQ\-1K30MYPZAHAXHR22YHH27EGDVLU0QNSUH3DSV7J7NR3X6D9LHXNWSDLTV4T
+.fi
+.IP "" 0
+.P
+Generate a new traditional identity:
+.IP "" 4
+.nf
+$ age\-keygen
+# created: 2021\-01\-02T15:30:45+01:00
+# public key: age1lvyvwawkr0mcnnnncaghunadrqkmuf9e6507x9y920xxpp866cnql7dp2z
+AGE\-SECRET\-KEY\-1N9JEPW6DWJ0ZQUDX63F5A03GX8QUW7PXDE39N8UYF82VZ9PC8UFS3M7XA9
+.fi
+.IP "" 0
+.P
+Write a new post\-quantum identity to \fBkey\.txt\fR:
+.IP "" 4
+.nf
+$ age\-keygen \-pq \-o key\.txt
+Public key: age1pq1cd[\|\.\|\.\|\. 1950 more characters \|\.\|\.\|\.]
+.fi
+.IP "" 0
+.P
+Convert an identity to a recipient:
+.IP "" 4
+.nf
+$ age\-keygen \-y key\.txt
+age1pq1cd[\|\.\|\.\|\. 1950 more characters \|\.\|\.\|\.]
+.fi
+.IP "" 0
+.SH "SEE ALSO"
+age(1), age\-inspect(1)
+.SH "AUTHORS"
+Filippo Valsorda \fIage@filippo\.io\fR

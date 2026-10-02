@@ -1,263 +1,163 @@
-# Torkitten
+# TorKitten v2
 
-> **`torkitten-v2` development branch:** the new direction is a minimal native
-> client/server application with encrypted connection import, Authelia 2FA,
-> transparent localhost tunnels, and user-authored launch presets. Read the
-> [v2 implementation plan](docs/v2-plan.md) and [upstream refresh record](docs/upstream-refresh-v2.md).
-> The existing executable and the documentation below still describe v1; the
-> v2 native application is not implemented yet. There are no automatic network,
-> authentication or TLS fallbacks in the v2 design.
+A small native app for sharing selected localhost TCP or Unix stream services
+through an authenticated Tor tunnel. The same app hosts services and connects
+to additional TorKitten servers. Existing SSH, HTTP API and browser clients use
+ordinary `127.0.0.1` ports on the client machine.
 
-Torkitten publishes deliberately selected applications from the immediate host
-loopback through one persistent v3 onion identity. It runs as one rootless OCI
-container containing a small Go control plane, C Tor, Caddy, and Authelia.
+This branch replaces the v1 container UI. The Linux app uses GTK4/WebKitGTK;
+its HTML/CSS/JavaScript and Go client core are shared with a thin Android shell.
+The Android packaging and device proof are not complete; see
+[native builds](docs/native-builds-v2.md).
 
-Each application gets a hostname prefix on the same identity:
+## Connection path
 
 ```text
-<service-id>.onion        protected application launcher
-<service-id>.onion/login  Authelia portal
-api.<service-id>.onion    a mapped host-loopback application
+ordinary application -> client 127.0.0.1:chosen-or-auto-port
+ -> independent Chisel WSS/SSH carrier -> local Tor SOCKS Unix socket
+ -> authenticated onion:443 -> Caddy TLS + device mTLS
+ -> Authelia OAuth bearer authorization -> private tunnel backend
+ -> host-configured TCP loopback or Unix stream service
 ```
 
-Tor provides onion identity and client authorization, Caddy provides private-CA
-HTTPS and reverse proxying, and Authelia provides the sole owner account, TOTP,
-onion sessions, and two-factor authorization. The administration console is
-available only at `http://localhost:12755`.
+Every accepted native TCP connection gets its own carrier. Services do not all
+share one multiplexed connection. Caddy forwards the outer WebSocket; it does
+not parse or rewrite the inner application traffic. SSH, HTTP, uploads, SSE and
+application WebSockets use the same byte-stream transport. Tor still determines
+latency and throughput; a broken connection is reported, not replayed.
 
-> **Development preview / client blocker:** the pinned-component and local
-> container paths are tested, but no remote browser is currently advertised as
-> supported. Desktop Tor Browser 15.0.21 rejects the private CA with its default
-> `security.nocertdb=true` policy. A technical test succeeded only after applying
-> Tor Project's development-only root-CA procedure, which explicitly reduces or
-> disables privacy protections. Torkitten does not ask users to weaken Tor
-> Browser this way. An [Android emulator experiment](docs/android-trust-test.md)
-> proved native Chrome trust and configured Firefox trust through Orbot, with
-> additional Firefox requirements and a cold-start retry limitation. Stock
-> Android Tor Browser was separately blocked at onion client authorization.
-> The physical-device matrix and reported Safari trust failure remain unresolved.
-> The [Apple trust investigation](docs/apple-trust-investigation.md) compares
-> Apple's profile example and certificate requirements with the running
-> service's public chain; it is not an iOS compatibility proof.
+Only the protected gateway is mapped to an onion virtual port. Host services
+and administration sockets are not additional onion listeners. Device Tor
+client authorization, pinned private-CA TLS, device mTLS, Authelia OAuth and the
+Chisel server fingerprint are all required. There is no direct-network,
+unencrypted, cookie-authenticated or alternate-transport path.
 
-## Security model
+## Build and launch
 
-Mapped host applications are trusted. Remote clients are untrusted. Every
-protected request must pass Tor client authorization, Caddy-managed TLS, and
-Authelia forward authorization before Caddy contacts an application. Unknown
-hosts fail closed.
-
-The browser and agents never receive component administration access, arbitrary
-proxy configuration, filesystem paths, or shell execution. Mapping input is
-limited to a lowercase hostname prefix, a numeric port, and `http`, `https`, or
-`h2c`. The destination is always the immediate host loopback.
-
-Local administration uses a separate host-only session because Authelia does not
-protect HTTP `localhost`. Torkitten sends factors to Authelia over a private Unix
-socket; it does not verify or store another password hash or TOTP secret.
-
-Host-local malware and users able to defeat the host loopback boundary are
-outside this security boundary.
-
-## Build
-
-Requirements:
-
-- rootless Podman with pasta networking;
-- Bash and normal core utilities; and
-- an external build directory with enough space for four upstream builds.
-
-The v2 branch defaults to `/run/media/user/Data/TorkittenV2Build`. Choose
-another location with `TORKITTEN_BUILD_ROOT`; it must not be inside this
-repository.
+Builds, caches and test state default to
+`/run/media/user/Data/TorkittenV2Build`, outside the checkout. Requirements are
+rootless Podman, Bash and normal core utilities. Exact source trees and build
+pins are checked before building.
 
 ```sh
-export TORKITTEN_BUILD_ROOT=/absolute/path/to/TorkittenV2Build
-./tools/build-local.sh all
-./tools/build-runtime.sh
-```
-
-The source build verifies the pristine pinned trees and builds Tor, Caddy,
-Authelia and GOST independently. The retained runtime build runs the Go checks
-and produces the existing v1 `localhost/torkitten:dev` image; it does not yet
-package a native v2 app. Current pins are Tor 0.4.9.13, Caddy 2.11.6, Authelia
-4.39.28, GOST 3.3.0, Ubuntu 24.04 build/runtime bases, and Go 1.27.1. Manifests under
-`third-party/*.upstream.toml` are authoritative.
-
-Artifacts and Podman storage remain outside the repository. Do not copy build
-outputs, credentials, or runtime state into Git. Keep the existing v1 build and
-runtime store separate from this branch's default store.
-
-## Run and set up
-
-```sh
-./tools/run-local.sh
-```
-
-Open <http://localhost:12755>. The responsive console has four views: Dashboard,
-Applications, Remote Devices, and Runtime. On first run:
-
-1. enter one owner username and password;
-2. scan the TOTP QR code and submit a current code;
-3. add an authorized device and import the one-time Tor client credential;
-4. acknowledge the credential only after import; and
-5. start publication.
-
-The only host-published socket is `127.0.0.1:12755`. Onion HTTP/HTTPS listeners,
-Tor control, Caddy administration, and Authelia remain private Unix sockets.
-Rootless pasta lets Caddy reach host-loopback ports created after the container
-starts; adding a mapping does not publish another container port or restart it.
-Stopping publication disables Tor networking immediately and remains disabled
-across restarts until the owner starts publication again.
-
-Use the repository wrapper for lifecycle and inspection commands because the
-development scripts keep Podman storage under the external build directory:
-
-```sh
-./tools/container.sh logs -f torkitten
-./tools/container.sh stop torkitten
-./tools/container.sh start torkitten
-```
-
-`tools/run-local.sh` refuses to replace an existing named container. This is
-intentional.
-
-## Mappings and onboarding
-
-A mapping such as `api` + `7777` + `http` publishes the host service listening
-on `127.0.0.1:7777` as `api.<service-id>.onion`. Caddy preserves methods, paths,
-queries, request bodies, responses, redirects, WebSockets, SSE, downloads,
-uploads, and application cookies without application-specific rewriting.
-
-Every device gets an independent Tor client-authorization credential. Its
-private half is offered as text, an `.auth_private` download, and an
-Orbot-compatible iOS/macOS QR code only during the bounded enrollment window;
-Android and desktop Tor import the file. It is erased after acknowledgement. A lost credential cannot be recovered; revoke it and
-create another. Publication cannot remain enabled with zero acknowledged
-devices.
-
-Remote HTTPS uses Caddy's persistent private CA. Caddy manages one 397-day
-base-host leaf and one 397-day wildcard leaf shared by every application prefix,
-so adding a mapping does not create another prefix-specific certificate. This
-[isolated compatibility trial](docs/caddy-intermediate-trial.md) signs those
-leaves through a Caddy-managed 730-day intermediate instead of directly with the
-root. Caddy owns generation and renewal; the persistent root and the public-root
-download/profile are unchanged. This is not a verified iOS fix. After authentication, the base
-onion launcher lists every enabled application and explains the initial private-
-certificate warning. Installing the CA is optional: the launcher offers the
-public PEM certificate and generates an Apple `.mobileconfig` containing only
-that public root. It never exports a private key. Apple still requires deliberate
-profile installation and trust approval. Permanent links and applications use
-HTTPS; onion HTTP has no application, login, or certificate route.
-
-Users must deliberately import the Tor credential and, if desired, the public
-CA. Devices whose normal policy forbids private CA installation may have to use
-a permitted manual warning exception; clients which permit neither are
-unsupported.
-In particular, current Tor Browser disables its local certificate database by
-default. Tor Project documents a root-CA workaround as development-only and
-warns that it reduces or disables privacy protections; Torkitten therefore does
-not support or recommend that workaround:
-<https://onionservices.torproject.org/apps/web/onionspray/guides/root-ca/>.
-
-The local console can transactionally rotate the onion identity after pending
-device enrollment is closed. Rotation stages a new
-Tor-owned identity, new key for every acknowledged device, Caddy certificates,
-and the new Authelia cookie domain before committing. It revokes all local and
-onion sessions and returns replacement client credentials once; save and import
-every credential before leaving the result page.
-
-Owner password and TOTP replacement also run only from the authenticated local
-console. Authelia verifies the current password and TOTP, performs the native
-password or staged TOTP update, and remains the sole credential store. A
-successful change revokes all localhost sessions and restarts Authelia to clear
-its memory-backed onion sessions. The prior TOTP remains active until a code
-from the replacement enrollment is accepted.
-
-## Local mapping API
-
-The Applications view can enable one-time CLI and agent access with mapping
-read/write scope. It exposes only copy-token and copy-agent-prompt actions.
-Tokens are shown once, rate limited, revocable, and persisted only as hashes.
-For example:
-
-```sh
-curl -H "Authorization: Bearer $TORKITTEN_TOKEN" \
-  http://localhost:12755/api/mappings
-curl -H "Authorization: Bearer $TORKITTEN_TOKEN" \
-  -H 'Content-Type: application/json' \
-  --data '{"prefix":"api","port":7777,"protocol":"http"}' \
-  http://localhost:12755/api/mappings/create
-```
-
-The API is still reachable only through the host-loopback publication. Default
-agent authority cannot rotate identity, issue devices, retrieve the CA,
-administer sessions, change the owner, or control processes.
-
-## State and deletion warning
-
-All durable state lives in `/var/lib/torkitten` in the existing container's
-ordinary writable layer. It includes the Tor identity, Caddy CA, Authelia owner
-and factors, mappings, acknowledged devices, and hashed local/API sessions.
-Stopping and starting the same container, including across a host reboot,
-retains this state.
-
-**Removing the container permanently removes its Torkitten identity and state.**
-There is no named volume, bind mount, host keyring, or automatic migration in
-this preview. Do not run `podman rm`, `tools/container.sh rm`, or recreate the
-container unless erasure is intended.
-
-Authelia intentionally uses its memory session provider. Routine remote idle
-and absolute expiry are set to ten years, effectively disabling Torkitten's
-short session timeout; a browser may still impose its own cookie lifetime.
-Restarting Authelia or the container preserves credentials but destroys onion
-sessions, so remote clients must authenticate again. Torkitten localhost
-sessions persist until expiry or revocation.
-
-## Owner lockout recovery
-
-Recovery belongs to the rootless user who owns the stopped container. It is not
-an unauthenticated browser route. Stop the container, stage a reset, restart it,
-and repeat first-run owner/TOTP enrollment:
-
-```sh
-./tools/container.sh stop torkitten
-./tools/owner-reset.sh
-./tools/container.sh start torkitten
-```
-
-The reset disables publication and revokes localhost sessions and agent tokens.
-It retains the onion identity, Caddy CA, mappings, and device records. Do not
-interrupt it or run it against a running container.
-
-## Verification
-
-Run formatting, vet, race tests, schema checks, and Go line budgets with:
-
-```sh
+./tools/build-app.sh
 ./tools/test-local.sh
+./tools/run-local.sh --state /run/media/user/Data/TorkittenV2Build/app-state
 ```
 
-Verify the pristine pinned upstream trees separately with:
+The bundle is under `artifacts/app` in that build directory. Linux runtime
+packages and an explicit direct launch command are documented in
+[native builds](docs/native-builds-v2.md). Closing the window leaves the Linux
+daemon running. Run it again to reopen the same private administration socket.
+The daemon must be started again after a reboot; imported connections begin
+locked and require their file password. Local mappings are selected again.
+
+Tor, Caddy, Authelia, Chisel, age and the QR reader are pristine vendored sources.
+The [upstream refresh record](docs/upstream-refresh-v2.md) and
+`third-party/*.upstream.toml` contain authoritative versions and tree hashes.
+No generated identities, credentials, binaries or runtime state belong in Git.
+The existing v1 runtime store is independent and is not migrated or modified.
+
+## Host setup
+
+1. Open **This host → Issue new identity**. Save the generated Authelia password
+   and scan its TOTP enrollment QR. They are shown once.
+2. Add services, their names and explicit TCP loopback addresses or Unix sockets.
+   Enable **Available** for services to share. Mark SSH capability only here.
+3. Choose **Share connection**, name the device, and choose a file password of
+   at least 12 characters. Download the age-encrypted file or display the QR for the other device to scan.
+4. Transfer the encrypted file or scan the desktop QR, and share its password
+   through your chosen channel.
+   Provide the Authelia login separately. Each device should receive a fresh export.
+
+An export contains the onion address, that device's Tor authorization key,
+public server CA, device certificate/private key and tunnel fingerprint. It
+never contains the host's onion identity key or Caddy CA private keys. The host
+retains only device public material. QR is the same encrypted content and is
+available only when the bundle fits QR capacity.
+
+**Issue new identity** replaces the onion identity, TLS trust, device access and
+Authelia credentials together. Old connections close and new onboarding is
+required. **Revoke sessions** closes live tunnels, revokes the current OAuth
+client registration, clears Authelia's login sessions and requires fresh 2FA.
+It preserves the onion address and existing device files.
+
+## Client use
+
+Under **Connections → Add connection**, use **Scan desktop QR with camera**
+or select a saved QR image or encrypted file. The QR carries that same complete
+encrypted bundle; no separate file is needed. Enter
+its file password, then
+complete Authelia password/TOTP login and explicit OAuth consent. The service
+list updates while connected. Toggle **Route locally**, choose a port or leave
+it on **Auto**, and use the displayed address with a normal client:
 
 ```sh
-./tools/verify-vendor.sh
+curl http://127.0.0.1:43127/v1/models
+ssh -p 43128 user@127.0.0.1
 ```
 
-Pinned integration tests are opt-in and require the corresponding external
-binary paths. The build scripts place those binaries under
-`$TORKITTEN_BUILD_ROOT/artifacts/third-party/`.
+Those example ports belong to different mapped services. Ordinary SSH still
+uses the target SSH server's host-key verification and user authentication.
+The tunnel's OAuth login does not replace the SSH account or distribute its
+private login key. TLS on the outer tunnel does not change a local service's
+HTTP/SSH protocol.
 
-Torkitten is licensed under Apache-2.0. Runtime images include the Torkitten,
-Go, barcode, Tor, Caddy, and Authelia license texts under
-`/usr/share/doc/torkitten`.
+Access and refresh tokens are stored only inside the password-encrypted local
+profile. They are never supplied to service clients or browser JavaScript.
+Authelia checks tokens when a carrier opens; token expiry does not interrupt an
+already authorized long stream. Explicit revocation, SSH-boundary changes and
+identity replacement close active carriers. Removing or disabling an ordinary
+service closes that service without logging out the whole connection.
 
-The project does not claim supported-client compatibility. Live desktop Tor
-Browser 15.0.21 testing proved client authorization, private-CA TLS, Authelia TOTP, the
-cross-prefix cookie, and a mapped request only in Tor Project's explicitly
-privacy-reduced development configuration; the default browser correctly
-rejected the private CA. The [Android trust experiment](docs/android-trust-test.md)
-records native Chrome and configured Firefox results, CA-removal negative
-controls, and the remaining limitations. Physical Android and iOS verification
-is still required. Container success, direct Unix-socket tests, BrowserOS, and a
-modified Tor Browser are not substitutes for a supported-client matrix.
+The app tunnels the chosen connection, not the entire machine. A web UI's
+external URLs retain the browser's normal network behavior. Other local
+processes can use ports you choose to map on `127.0.0.1`.
+
+## One services file
+
+The host UI and agents edit the same private `services.json`:
+
+```json
+{
+  "version": 2,
+  "services": [
+    {
+      "id": "llama",
+      "title": "Llama server",
+      "available": true,
+      "ssh": false,
+      "endpoint": {"network": "tcp", "address": "127.0.0.1:5090"},
+      "actions": {
+        "load": ["/usr/bin/systemctl", "--user", "start", "my-llama.service"],
+        "reload": ["/usr/bin/systemctl", "--user", "restart", "my-llama.service"],
+        "stop": ["/usr/bin/systemctl", "--user", "stop", "my-llama.service"]
+      }
+    }
+  ]
+}
+```
+
+Use your existing service unit, Podman command or launcher script. These are
+explicit lifecycle commands that hand off to an independent launcher, not
+foreground model-server commands. Each control action waits up to 45 seconds
+for its launcher command; this is not a lifetime limit on the independently
+launched service. No shell is inserted, and no CPU, memory, swap, scheduling or
+restart settings are invented. Omit actions you do not need. Endpoints are
+explicit; the wrapper does not scan or guess ports. A Unix endpoint uses
+`{"network":"unix","address":"/absolute/path/service.sock"}`.
+
+The file must remain mode `0600`. Valid edits are loaded automatically; an
+invalid desired configuration closes remote access until corrected. Remote
+controls can request only an existing service ID and Load/Reload/Stop, never
+commands, addresses or host setup. Unix descriptor passing and datagrams, UDP,
+SOCKS endpoints, reverse forwarding and arbitrary destinations are rejected.
+
+## Verification and design
+
+See [v2 design](docs/v2-plan.md) for the protocol boundaries and reproducible
+proof commands, and [native builds](docs/native-builds-v2.md) for platform scope.
+Production Go, including the mobile adapter, stays below 5,000 physical lines;
+`tools/check.sh` enforces the limit, formatting, vet and tests; build scripts verify vendor integrity.
+Historical v1 investigation documents describe that older product and are not
+v2 compatibility claims.
