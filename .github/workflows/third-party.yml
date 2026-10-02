@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       rebuild_third_party:
-        description: Rebuild Tor, Caddy, and Authelia even when their caches exist
+        description: Rebuild Tor, Caddy, Authelia, and GOST even when their caches exist
         required: false
         type: boolean
         default: false
@@ -23,6 +23,7 @@ jobs:
           - tor
           - caddy
           - authelia
+          - gost
     env:
       TORKITTEN_SOURCE_ROOT: ${{ github.workspace }}
 
@@ -127,7 +128,7 @@ jobs:
     needs: build
     runs-on: ubuntu-24.04
     steps:
-      - name: Download this run's Tor, Caddy, and Authelia bundles
+      - name: Download this run's Tor, Caddy, Authelia, and GOST bundles
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           pattern: third-party-*
@@ -136,7 +137,7 @@ jobs:
       - name: Verify downstream inputs
         run: |
           mapfile -t metadata < <(find "$RUNNER_TEMP/third-party" -name BUILD-METADATA -type f | sort)
-          test "${#metadata[@]}" -eq 3
+          test "${#metadata[@]}" -eq 4
           components=()
           for metadata_file in "${metadata[@]}"; do
             component=$(sed -n 's/^component=//p' "$metadata_file")
@@ -146,4 +147,4 @@ jobs:
             test "$(sha256sum "$bundle_dir/usr/bin/$component" | cut -d ' ' -f 1)" = "$binary_sha"
             sed -n '/^component=/p; /^release=/p; /^source_commit=/p; /^binary_sha256=/p' "$metadata_file"
           done
-          test "$(printf '%s\n' "${components[@]}" | sort | tr '\n' ' ')" = "authelia caddy tor "
+          test "$(printf '%s\n' "${components[@]}" | sort | tr '\n' ' ')" = "authelia caddy gost tor "

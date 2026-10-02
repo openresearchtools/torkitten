@@ -2,7 +2,7 @@
 set -euo pipefail
 
 if [[ $# -ne 2 ]]; then
-    echo "usage: $0 <tor|caddy|authelia> <release-tag>" >&2
+    echo "usage: $0 <tor|caddy|authelia|gost> <release-tag>" >&2
     exit 2
 fi
 
@@ -19,6 +19,9 @@ case "$component" in
     authelia)
         upstream=https://github.com/authelia/authelia.git
         ;;
+    gost)
+        upstream=https://github.com/go-gost/gost.git
+        ;;
     *)
         echo "unknown component: $component" >&2
         exit 2
@@ -26,7 +29,7 @@ case "$component" in
 esac
 
 repo_root=$(git rev-parse --show-toplevel)
-build_root=${TORKITTEN_BUILD_ROOT:-/run/media/user/Data/TorkittenBuild}
+build_root=${TORKITTEN_BUILD_ROOT:-/run/media/user/Data/TorkittenV2Build}
 mkdir -p "$build_root/vendor/mirrors" "$build_root/vendor/staging"
 
 repo_real=$(realpath "$repo_root")
@@ -52,6 +55,7 @@ fi
 
 tag_object=$(git --git-dir="$mirror" rev-parse "refs/tags/$release")
 commit=$(git --git-dir="$mirror" rev-parse "$release^{commit}")
+committed_at=$(git --git-dir="$mirror" log -1 --format=%cI "$commit")
 tree=$(git --git-dir="$mirror" rev-parse "$release^{tree}")
 stage=$(mktemp -d "$build_real/vendor/staging/$component.XXXXXX")
 trap 'rm -rf -- "$stage"' EXIT
@@ -73,6 +77,7 @@ release = "$release"
 upstream = "$upstream"
 tag_object = "$tag_object"
 commit = "$commit"
+committed_at = "$committed_at"
 tree = "$tree"
 
 Then run:

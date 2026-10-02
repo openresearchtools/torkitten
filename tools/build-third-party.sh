@@ -14,13 +14,17 @@ case "$requested_component" in
     authelia)
         exec "$script_dir/build/authelia.sh"
         ;;
+    gost)
+        exec "$script_dir/build/gost.sh"
+        ;;
     all)
         "$script_dir/build/tor.sh"
         "$script_dir/build/caddy.sh"
-        exec "$script_dir/build/authelia.sh"
+        "$script_dir/build/authelia.sh"
+        exec "$script_dir/build/gost.sh"
         ;;
     *)
-        echo "usage: $0 [tor|caddy|authelia|all]" >&2
+        echo "usage: $0 [tor|caddy|authelia|gost|all]" >&2
         exit 2
         ;;
 esac
