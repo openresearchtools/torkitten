@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 Authelia
+//
+// SPDX-License-Identifier: Apache-2.0
+
 package storage
 
 import (
@@ -228,6 +232,11 @@ type Provider interface {
 	// RevokeOAuth2Session marks an OAuth2.0 session as revoked in the storage provider.
 	RevokeOAuth2Session(ctx context.Context, sessionType OAuth2SessionType, signature string) (err error)
 
+	// LoadOAuth2RefreshTokenSessionAccessSignature loads the signature of the access token issued alongside the
+	// refresh token with the given signature. The signature is empty when the refresh token was issued without an
+	// access token, and for a session stored before the access token signature was recorded.
+	LoadOAuth2RefreshTokenSessionAccessSignature(ctx context.Context, signature string) (accessSignature string, err error)
+
 	// RevokeOAuth2SessionByRequestID marks an OAuth2.0 session as revoked in the storage provider.
 	RevokeOAuth2SessionByRequestID(ctx context.Context, sessionType OAuth2SessionType, requestID string) (err error)
 
@@ -268,17 +277,17 @@ type Provider interface {
 		Implementation for OAuth2.0 PAR Contexts.
 	*/
 
-	// SaveOAuth2PARContext save an OAuth2.0 PAR context to the storage provider.
-	SaveOAuth2PARContext(ctx context.Context, par model.OAuth2PARContext) (err error)
+	// SaveOAuth2PushedAuthorizationSession save an OAuth2.0 PAR session to the storage provider.
+	SaveOAuth2PushedAuthorizationSession(ctx context.Context, par model.OAuth2PushedAuthorizationSession) (err error)
 
-	// LoadOAuth2PARContext loads an OAuth2.0 PAR context from the storage provider.
-	LoadOAuth2PARContext(ctx context.Context, signature string) (par *model.OAuth2PARContext, err error)
+	// LoadOAuth2PushedAuthorizationSession loads an OAuth2.0 PAR session from the storage provider.
+	LoadOAuth2PushedAuthorizationSession(ctx context.Context, signature string) (par *model.OAuth2PushedAuthorizationSession, err error)
 
-	// RevokeOAuth2PARContext marks an OAuth2.0 PAR context as revoked in the storage provider.
-	RevokeOAuth2PARContext(ctx context.Context, signature string) (err error)
+	// RevokeOAuth2PushedAuthorizationSession marks an OAuth2.0 PAR session as revoked in the storage provider.
+	RevokeOAuth2PushedAuthorizationSession(ctx context.Context, signature string) (err error)
 
-	// UpdateOAuth2PARContext updates an existing OAuth2.0 PAR context in the storage provider.
-	UpdateOAuth2PARContext(ctx context.Context, par model.OAuth2PARContext) (err error)
+	// UpdateOAuth2PushedAuthorizationSession updates an existing OAuth2.0 PAR session in the storage provider.
+	UpdateOAuth2PushedAuthorizationSession(ctx context.Context, par model.OAuth2PushedAuthorizationSession) (err error)
 
 	/*
 		Implementation for OAuth2.0 Blacklisted JTI's.
@@ -333,6 +342,7 @@ type Provider interface {
 	CachedDataProvider
 }
 
+// CachedDataProvider is the storage provider interface for cached data.
 type CachedDataProvider interface {
 	// LoadCachedData loads cached data from the database.
 	LoadCachedData(ctx context.Context, name string) (data *model.CachedData, err error)

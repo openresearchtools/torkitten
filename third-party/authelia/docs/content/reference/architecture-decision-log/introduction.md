@@ -1,4 +1,8 @@
 ---
+# SPDX-FileCopyrightText: 2026 Authelia
+#
+# SPDX-License-Identifier: Apache-2.0
+
 title: "Architecture Decision Log"
 description: "The Authelia Architecture Decision Log"
 summary: "This section contains Architecture Decision Records for Authelia."
@@ -39,7 +43,7 @@ Secondarily:
 Each ADR has several key sections.
 
 |      Name       |                             Description                              |
-|:---------------:|:--------------------------------------------------------------------:|
+| :-------------: | :------------------------------------------------------------------: |
 |     Status      |                    The current status of the ADR                     |
 |     Context     | The context surrounding why the ADR is necessary and what it's about |
 | Proposed Design |           The proposed design or designs for consideration           |

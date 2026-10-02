@@ -16,6 +16,8 @@ fi
 release=$(lock_value authelia release)
 tree=$(lock_value authelia tree)
 commit=$(lock_value authelia commit)
+build_date=$(lock_value authelia committed_at)
+: "${build_date:?Authelia manifest must record committed_at}"
 tag_object=$(lock_value authelia tag_object)
 recipe_hash=$(component_recipe_hash authelia)
 work_dir=$COMPONENT_WORK_DIR
@@ -37,8 +39,6 @@ cp -a "$source_real/third-party/authelia" "$work_dir/source"
 rm -rf -- "$work_dir/source/internal/server/public_html/api"
 cp -a "$work_dir/source/api" "$work_dir/source/internal/server/public_html/api"
 
-build_date=$(git --git-dir="$build_real/vendor/mirrors/authelia.git" \
-    log -1 --format=%cD "$commit" 2>/dev/null || printf 'Tue, 26 May 2026 10:09:21 +0000')
 ldflags="-linkmode=external -s -w"
 ldflags+=" -X github.com/authelia/authelia/v4/internal/utils.BuildBranch=release"
 ldflags+=" -X github.com/authelia/authelia/v4/internal/utils.BuildTag=$release"

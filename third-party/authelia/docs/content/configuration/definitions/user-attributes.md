@@ -1,4 +1,8 @@
 ---
+# SPDX-FileCopyrightText: 2026 Authelia
+#
+# SPDX-License-Identifier: Apache-2.0
+
 title: "User Attributes"
 description: "User Attributes Definitions Configuration"
 summary: "Authelia allows configuring reusable user attribute definitions."
@@ -83,7 +87,7 @@ compromised clients).
 
 The following attributes are available for use in expressions depending on the context:
 
-|           Attribute           |                     Description                      |                  Context                  |
-|:-----------------------------:|:----------------------------------------------------:|:-----------------------------------------:|
-| `openid_authreq_claim_value`  | The `value` property of the relevant claims request  | OpenID Connect 1.0 Authorization Request  |
-| `openid_authreq_claim_values` | The `values` property of the relevant claims request | OpenID Connect 1.0 Authorization Request  |
+|           Attribute           |                     Description                      |                 Context                  |
+| :---------------------------: | :--------------------------------------------------: | :--------------------------------------: |
+| `openid_authreq_claim_value`  | The `value` property of the relevant claims request  | OpenID Connect 1.0 Authorization Request |
+| `openid_authreq_claim_values` | The `values` property of the relevant claims request | OpenID Connect 1.0 Authorization Request |

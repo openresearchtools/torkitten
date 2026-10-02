@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 Authelia
+//
+// SPDX-License-Identifier: Apache-2.0
+
 package storage_test
 
 import (
@@ -13,6 +17,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.uber.org/mock/gomock"
 
+	"github.com/authelia/authelia/v4/internal/configuration/schema"
 	"github.com/authelia/authelia/v4/internal/mocks"
 	"github.com/authelia/authelia/v4/internal/model"
 	"github.com/authelia/authelia/v4/internal/storage"
@@ -343,7 +348,7 @@ func TestSQLProviderSimpleExecErrors(t *testing.T) {
 				db.EXPECT().ExecContext(gomock.Any(), gomock.Any(), "sig").Return(nil, errors.New("boom"))
 			},
 			invoke: func(p *storage.SQLProvider) error {
-				return p.RevokeOAuth2PARContext(context.Background(), "sig")
+				return p.RevokeOAuth2PushedAuthorizationSession(context.Background(), "sig")
 			},
 			expectErr: "error revoking oauth2 pushed authorization request session with signature 'sig': boom",
 		},
@@ -773,10 +778,10 @@ func TestSQLProviderLoadErrors(t *testing.T) {
 				db.EXPECT().GetContext(gomock.Any(), gomock.Any(), gomock.Any(), "sig").Return(errors.New("boom"))
 			},
 			invoke: func(p *storage.SQLProvider) error {
-				_, err := p.LoadOAuth2PARContext(context.Background(), "sig")
+				_, err := p.LoadOAuth2PushedAuthorizationSession(context.Background(), "sig")
 				return err
 			},
-			expectErr: "error selecting oauth2 pushed authorization request context with signature 'sig': boom",
+			expectErr: "error selecting oauth2 pushed authorization request session with signature 'sig': boom",
 		},
 		{
 			name: "ShouldReturnErrLoadOAuth2BlacklistedJTI",
@@ -1204,9 +1209,9 @@ func TestSQLProviderUpdateOAuth2PARContextZeroID(t *testing.T) {
 		db := mocks.NewMockSQLXDB(ctrl)
 		p := storage.NewSQLProviderForTesting(db)
 
-		err := p.UpdateOAuth2PARContext(context.Background(), model.OAuth2PARContext{Signature: "sig", RequestID: "req"})
+		err := p.UpdateOAuth2PushedAuthorizationSession(context.Background(), model.OAuth2PushedAuthorizationSession{Signature: "sig", RequestID: "req"})
 
-		assert.EqualError(t, err, "error updating oauth2 pushed authorization request context data with signature 'sig' and request id 'req': the id was a zero value")
+		assert.EqualError(t, err, "error updating oauth2 pushed authorization request session data with signature 'sig' and request id 'req': the id was a zero value")
 	})
 }
 
@@ -1236,7 +1241,7 @@ func TestSQLProviderConsumeRevokeOneTimeCodeRowsAffected(t *testing.T) {
 			invoke: func(p *storage.SQLProvider) error {
 				return p.ConsumeOneTimeCode(context.Background(), &model.OneTimeCode{Signature: "sig"})
 			},
-			expectErr: "error consuming one-time code: ra-err",
+			expectErr: "error consuming one-time code: error occurred determining the number of affected rows: ra-err",
 		},
 		{
 			name: "ShouldErrConsumeWhenNoRowsAffected",
@@ -1338,6 +1343,125 @@ func TestSQLProviderConsumeRevokeOneTimeCodeRowsAffected(t *testing.T) {
 	}
 }
 
+func TestSQLProviderConsumeRevokeIdentityVerificationRowsAffected(t *testing.T) {
+	testCases := []struct {
+		name      string
+		setup     func(db *mocks.MockSQLXDB, result *mocks.MockSQLResult)
+		invoke    func(p *storage.SQLProvider) error
+		expectErr string
+	}{
+		{
+			name: "ShouldErrConsumeWhenRowsAffectedErrors",
+			setup: func(db *mocks.MockSQLXDB, result *mocks.MockSQLResult) {
+				result.EXPECT().RowsAffected().Return(int64(0), errors.New("ra-err"))
+				db.EXPECT().ExecContext(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), "jti").Return(result, nil)
+			},
+			invoke: func(p *storage.SQLProvider) error {
+				return p.ConsumeIdentityVerification(context.Background(), "jti", model.NullIP{})
+			},
+			expectErr: "error occurred determining the number of affected rows: ra-err",
+		},
+		{
+			name: "ShouldErrConsumeWhenNoRowsAffected",
+			setup: func(db *mocks.MockSQLXDB, result *mocks.MockSQLResult) {
+				result.EXPECT().RowsAffected().Return(int64(0), nil)
+				db.EXPECT().ExecContext(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), "jti").Return(result, nil)
+			},
+			invoke: func(p *storage.SQLProvider) error {
+				return p.ConsumeIdentityVerification(context.Background(), "jti", model.NullIP{})
+			},
+			expectErr: "no rows affected",
+		},
+		{
+			name: "ShouldErrConsumeWhenMultipleRowsAffected",
+			setup: func(db *mocks.MockSQLXDB, result *mocks.MockSQLResult) {
+				result.EXPECT().RowsAffected().Return(int64(2), nil)
+				db.EXPECT().ExecContext(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), "jti").Return(result, nil)
+			},
+			invoke: func(p *storage.SQLProvider) error {
+				return p.ConsumeIdentityVerification(context.Background(), "jti", model.NullIP{})
+			},
+			expectErr: "multiple rows affected",
+		},
+		{
+			name: "ShouldSucceedConsumeIdentityVerification",
+			setup: func(db *mocks.MockSQLXDB, result *mocks.MockSQLResult) {
+				result.EXPECT().RowsAffected().Return(int64(1), nil)
+				db.EXPECT().ExecContext(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), "jti").Return(result, nil)
+			},
+			invoke: func(p *storage.SQLProvider) error {
+				return p.ConsumeIdentityVerification(context.Background(), "jti", model.NullIP{})
+			},
+		},
+		{
+			name: "ShouldErrRevokeWhenRowsAffectedErrors",
+			setup: func(db *mocks.MockSQLXDB, result *mocks.MockSQLResult) {
+				result.EXPECT().RowsAffected().Return(int64(0), errors.New("ra-err"))
+				db.EXPECT().ExecContext(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), "jti").Return(result, nil)
+			},
+			invoke: func(p *storage.SQLProvider) error {
+				return p.RevokeIdentityVerification(context.Background(), "jti", model.NullIP{})
+			},
+			expectErr: "error occurred determining the number of affected rows: ra-err",
+		},
+		{
+			name: "ShouldErrRevokeWhenNoRowsAffected",
+			setup: func(db *mocks.MockSQLXDB, result *mocks.MockSQLResult) {
+				result.EXPECT().RowsAffected().Return(int64(0), nil)
+				db.EXPECT().ExecContext(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), "jti").Return(result, nil)
+			},
+			invoke: func(p *storage.SQLProvider) error {
+				return p.RevokeIdentityVerification(context.Background(), "jti", model.NullIP{})
+			},
+			expectErr: "no rows affected",
+		},
+		{
+			name: "ShouldErrRevokeWhenMultipleRowsAffected",
+			setup: func(db *mocks.MockSQLXDB, result *mocks.MockSQLResult) {
+				result.EXPECT().RowsAffected().Return(int64(2), nil)
+				db.EXPECT().ExecContext(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), "jti").Return(result, nil)
+			},
+			invoke: func(p *storage.SQLProvider) error {
+				return p.RevokeIdentityVerification(context.Background(), "jti", model.NullIP{})
+			},
+			expectErr: "multiple rows affected",
+		},
+		{
+			name: "ShouldSucceedRevokeIdentityVerification",
+			setup: func(db *mocks.MockSQLXDB, result *mocks.MockSQLResult) {
+				result.EXPECT().RowsAffected().Return(int64(1), nil)
+				db.EXPECT().ExecContext(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), "jti").Return(result, nil)
+			},
+			invoke: func(p *storage.SQLProvider) error {
+				return p.RevokeIdentityVerification(context.Background(), "jti", model.NullIP{})
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctrl := gomock.NewController(t)
+			defer ctrl.Finish()
+
+			db := mocks.NewMockSQLXDB(ctrl)
+			result := mocks.NewMockSQLResult(ctrl)
+			p := storage.NewSQLProviderForTesting(db)
+
+			if tc.setup != nil {
+				tc.setup(db, result)
+			}
+
+			err := tc.invoke(p)
+
+			if tc.expectErr == "" {
+				assert.NoError(t, err)
+			} else {
+				assert.EqualError(t, err, tc.expectErr)
+			}
+		})
+	}
+}
+
 func TestSQLProviderUpdateWebAuthnCredentialSignInUsesConn(t *testing.T) {
 	t.Run("ShouldUseConnectionFromContext", func(t *testing.T) {
 		ctrl := gomock.NewController(t)
@@ -1349,7 +1473,8 @@ func TestSQLProviderUpdateWebAuthnCredentialSignInUsesConn(t *testing.T) {
 		conn.EXPECT().ExecContext(gomock.Any(), gomock.Any(),
 			gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(),
 			gomock.Any(), gomock.Any(), gomock.Any(),
-			gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return(nil, errors.New("boom"))
+			gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(),
+			gomock.Any(), gomock.Any()).Return(nil, errors.New("boom"))
 
 		p := storage.NewSQLProviderForTesting(db)
 
@@ -1536,7 +1661,8 @@ func TestSQLProviderRemainingExecErrors(t *testing.T) {
 					gomock.Any(), gomock.Any(),
 					gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(),
 					gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(),
-					gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(),
+					gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(),
+					gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(),
 				).Return(nil, errors.New("boom"))
 			},
 			invoke: func(p *storage.SQLProvider) error {
@@ -1553,7 +1679,7 @@ func TestSQLProviderRemainingExecErrors(t *testing.T) {
 				db.EXPECT().ExecContext(
 					gomock.Any(), gomock.Any(),
 					gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(),
-					gomock.Any(), gomock.Any(), 5,
+					gomock.Any(), gomock.Any(), gomock.Any(), 5,
 				).Return(nil, errors.New("boom"))
 			},
 			invoke: func(p *storage.SQLProvider) error {
@@ -1570,13 +1696,13 @@ func TestSQLProviderRemainingExecErrors(t *testing.T) {
 				db.EXPECT().ExecContext(
 					gomock.Any(), gomock.Any(),
 					"sig", "req", gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(),
-					gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(),
+					gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(),
 				).Return(nil, errors.New("boom"))
 			},
 			invoke: func(p *storage.SQLProvider) error {
-				return p.SaveOAuth2PARContext(context.Background(), model.OAuth2PARContext{Signature: "sig", RequestID: "req"})
+				return p.SaveOAuth2PushedAuthorizationSession(context.Background(), model.OAuth2PushedAuthorizationSession{Signature: "sig", RequestID: "req"})
 			},
-			expectErr: "error inserting oauth2 pushed authorization request context data for with signature 'sig' and request id 'req': boom",
+			expectErr: "error inserting oauth2 pushed authorization request session data for with signature 'sig' and request id 'req': boom",
 		},
 		{
 			name: "ShouldReturnErrUpdateOAuth2PARContext",
@@ -1584,13 +1710,13 @@ func TestSQLProviderRemainingExecErrors(t *testing.T) {
 				db.EXPECT().ExecContext(
 					gomock.Any(), gomock.Any(),
 					"sig", "req", gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(),
-					gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), 9,
+					gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), 9,
 				).Return(nil, errors.New("boom"))
 			},
 			invoke: func(p *storage.SQLProvider) error {
-				return p.UpdateOAuth2PARContext(context.Background(), model.OAuth2PARContext{ID: 9, Signature: "sig", RequestID: "req"})
+				return p.UpdateOAuth2PushedAuthorizationSession(context.Background(), model.OAuth2PushedAuthorizationSession{ID: 9, Signature: "sig", RequestID: "req"})
 			},
-			expectErr: "error updating oauth2 pushed authorization request context data with id '9' and signature 'sig' and request id 'req': boom",
+			expectErr: "error updating oauth2 pushed authorization request session data with id '9' and signature 'sig' and request id 'req': boom",
 		},
 		{
 			name: "ShouldReturnErrSaveOAuth2DeviceCodeSession",
@@ -1599,6 +1725,7 @@ func TestSQLProviderRemainingExecErrors(t *testing.T) {
 					gomock.Any(), gomock.Any(),
 					gomock.Any(), "req", gomock.Any(), "sig", gomock.Any(),
 					gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(),
+					gomock.Any(), gomock.Any(),
 					gomock.Any(), gomock.Any(),
 					gomock.Any(), gomock.Any(),
 					gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(),
@@ -1615,7 +1742,8 @@ func TestSQLProviderRemainingExecErrors(t *testing.T) {
 				db.EXPECT().ExecContext(
 					gomock.Any(), gomock.Any(),
 					gomock.Any(), "req", gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(),
-					gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(),
+					gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(),
+					gomock.Any(), gomock.Any(), gomock.Any(),
 					gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), "sig",
 				).Return(nil, errors.New("boom"))
 			},
@@ -1630,7 +1758,8 @@ func TestSQLProviderRemainingExecErrors(t *testing.T) {
 				db.EXPECT().ExecContext(
 					gomock.Any(), gomock.Any(),
 					gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(),
-					gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(),
+					gomock.Any(), gomock.Any(), gomock.Any(),
+					gomock.Any(), gomock.Any(), gomock.Any(),
 					gomock.Any(), gomock.Any(), "sig",
 				).Return(nil, errors.New("boom"))
 			},
@@ -1699,7 +1828,7 @@ func TestSQLProviderRemainingExecErrors(t *testing.T) {
 					gomock.Any(), gomock.Any(),
 					gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(),
 					gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(),
-					gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(),
+					gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(),
 					gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(),
 				).Return(nil, errors.New("boom"))
 			},
@@ -1820,7 +1949,7 @@ func TestSQLProviderRemainingExecErrors(t *testing.T) {
 				db.EXPECT().ExecContext(
 					gomock.Any(), gomock.Any(),
 					"client", uuid.Nil, gomock.Any(), gomock.Any(),
-					gomock.Any(), gomock.Any(), gomock.Any(),
+					gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(),
 					gomock.Any(), gomock.Any(), gomock.Any(),
 				).Return(nil, errors.New("boom"))
 			},
@@ -2059,7 +2188,7 @@ func TestSQLProviderRevokeOneTimeCodeRowsAffectedError(t *testing.T) {
 
 		err := p.RevokeOneTimeCode(context.Background(), uuid.Nil, model.NewIP(net.ParseIP("1.2.3.4")))
 
-		assert.EqualError(t, err, "error revoking one-time code: ra-err")
+		assert.EqualError(t, err, "error revoking one-time code: error occurred determining the number of affected rows: ra-err")
 	})
 }
 
@@ -2203,13 +2332,14 @@ func TestSQLProviderDecryptErrorPaths(t *testing.T) {
 		{
 			name: "ShouldErrLoadWebAuthnCredentialByIDDecryptAttestation",
 			setup: func(db *mocks.MockSQLXDB) {
-				validPK, err := encryptForTesting([]byte("public-key"))
+				validPK, err := encryptForTesting([]byte("public-key"), []byte("authelia:storage:webauthn_credentials:public_key::example.com"))
 				require.NoError(t, err)
 
 				db.EXPECT().GetContext(gomock.Any(), gomock.Any(), gomock.Any(), 7).DoAndReturn(
 					func(_ context.Context, dest any, _ string, _ ...any) error {
 						c := dest.(*model.WebAuthnCredential)
 						c.ID = 7
+						c.RPID = "example.com"
 						c.Username = "john"
 						c.PublicKey = validPK
 						c.Attestation = invalidCipher
@@ -2245,13 +2375,13 @@ func TestSQLProviderDecryptErrorPaths(t *testing.T) {
 		{
 			name: "ShouldErrLoadWebAuthnCredentialsDecryptAttestation",
 			setup: func(db *mocks.MockSQLXDB) {
-				validPK, err := encryptForTesting([]byte("public-key"))
+				validPK, err := encryptForTesting([]byte("public-key"), []byte("authelia:storage:webauthn_credentials:public_key::example.com"))
 				require.NoError(t, err)
 
 				db.EXPECT().SelectContext(gomock.Any(), gomock.Any(), gomock.Any(), 10, 0).DoAndReturn(
 					func(_ context.Context, dest any, _ string, _ ...any) error {
 						creds := dest.(*[]model.WebAuthnCredential)
-						*creds = []model.WebAuthnCredential{{ID: 9, Username: "john", PublicKey: validPK, Attestation: invalidCipher}}
+						*creds = []model.WebAuthnCredential{{ID: 9, RPID: "example.com", Username: "john", PublicKey: validPK, Attestation: invalidCipher}}
 
 						return nil
 					},
@@ -2284,13 +2414,13 @@ func TestSQLProviderDecryptErrorPaths(t *testing.T) {
 		{
 			name: "ShouldErrLoadWebAuthnCredentialsByUsernameDecryptAttestation",
 			setup: func(db *mocks.MockSQLXDB) {
-				validPK, err := encryptForTesting([]byte("public-key"))
+				validPK, err := encryptForTesting([]byte("public-key"), []byte("authelia:storage:webauthn_credentials:public_key::example.com"))
 				require.NoError(t, err)
 
 				db.EXPECT().SelectContext(gomock.Any(), gomock.Any(), gomock.Any(), "example.com", "john", false).DoAndReturn(
 					func(_ context.Context, dest any, _ string, _ ...any) error {
 						creds := dest.(*[]model.WebAuthnCredential)
-						*creds = []model.WebAuthnCredential{{ID: 9, Username: "john", PublicKey: validPK, Attestation: invalidCipher}}
+						*creds = []model.WebAuthnCredential{{ID: 9, RPID: "example.com", Username: "john", PublicKey: validPK, Attestation: invalidCipher}}
 
 						return nil
 					},
@@ -2323,13 +2453,13 @@ func TestSQLProviderDecryptErrorPaths(t *testing.T) {
 		{
 			name: "ShouldErrLoadWebAuthnPasskeyCredentialsByUsernameDecryptAttestation",
 			setup: func(db *mocks.MockSQLXDB) {
-				validPK, err := encryptForTesting([]byte("public-key"))
+				validPK, err := encryptForTesting([]byte("public-key"), []byte("authelia:storage:webauthn_credentials:public_key::example.com"))
 				require.NoError(t, err)
 
 				db.EXPECT().SelectContext(gomock.Any(), gomock.Any(), gomock.Any(), "example.com", "john", true).DoAndReturn(
 					func(_ context.Context, dest any, _ string, _ ...any) error {
 						creds := dest.(*[]model.WebAuthnCredential)
-						*creds = []model.WebAuthnCredential{{ID: 9, Username: "john", PublicKey: validPK, Attestation: invalidCipher}}
+						*creds = []model.WebAuthnCredential{{ID: 9, RPID: "example.com", Username: "john", PublicKey: validPK, Attestation: invalidCipher}}
 
 						return nil
 					},
@@ -2374,7 +2504,7 @@ func TestSQLProviderSaveWebAuthnCredentialAttestation(t *testing.T) {
 			gomock.Any(), gomock.Any(),
 			gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(),
 			gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(),
-			gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(),
+			gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(),
 			gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(),
 		).Return(nil, errors.New("boom"))
 
@@ -2391,20 +2521,123 @@ func TestSQLProviderSaveWebAuthnCredentialAttestation(t *testing.T) {
 	})
 }
 
-func TestSQLProviderStartupCheckOpenErr(t *testing.T) {
+func TestNewSQLProviderShouldReturnOpenError(t *testing.T) {
 	t.Run("ShouldReturnErrorWhenDBOpenFailed", func(t *testing.T) {
-		ctrl := gomock.NewController(t)
-		defer ctrl.Finish()
+		config := &schema.Configuration{
+			Storage: schema.Storage{
+				EncryptionKey: "authelia-test-key-not-a-secret-authelia-test-key-not-a-secret",
+			},
+		}
 
-		db := mocks.NewMockSQLXDB(ctrl)
-		p := storage.NewSQLProviderForTesting(db).WithOpenErr(errors.New("dsn invalid"))
+		_, err := storage.NewSQLProvider(config, "test", "not-a-real-driver", "dsn")
 
-		err := p.StartupCheck()
-
-		assert.EqualError(t, err, "error opening database: dsn invalid")
+		assert.EqualError(t, err, `error opening database: sql: unknown driver "not-a-real-driver" (forgotten import?)`)
 	})
 }
 
-func encryptForTesting(clearText []byte) ([]byte, error) {
-	return storage.NewSQLProviderForTesting(nil).Encrypt(clearText)
+func TestSQLProviderSchemaMigrateApplySpecialMySQLTransaction(t *testing.T) {
+	testCases := []struct {
+		name      string
+		migration model.SchemaMigration
+		setup     func(db *mocks.MockSQLXDB, tx *mocks.MockSQLXTx)
+		err       string
+	}{
+		{
+			name:      "ShouldReturnErrorWhenBeginFails",
+			migration: model.SchemaMigration{Version: 2, Up: true},
+			setup: func(db *mocks.MockSQLXDB, tx *mocks.MockSQLXTx) {
+				db.EXPECT().BeginTxx(gomock.Any(), gomock.Nil()).Return(nil, errors.New("begin failed"))
+			},
+			err: "failed to begin transaction: begin failed",
+		},
+		{
+			name:      "ShouldCommitAndFinalizeWhenSpecialMigrationsSucceed",
+			migration: model.SchemaMigration{Version: 2, Up: true},
+			setup: func(db *mocks.MockSQLXDB, tx *mocks.MockSQLXTx) {
+				db.EXPECT().BeginTxx(gomock.Any(), gomock.Nil()).Return(tx, nil)
+				tx.EXPECT().Commit().Return(nil)
+				db.EXPECT().ExecContext(gomock.Any(), "INSERT INTO migrations", gomock.Any(), 1, 2, gomock.Any()).Return(nil, nil)
+			},
+		},
+		{
+			name:      "ShouldRollbackAndReturnErrorWhenSpecialMigrationFails",
+			migration: model.SchemaMigration{Version: 26, Up: true},
+			setup: func(db *mocks.MockSQLXDB, tx *mocks.MockSQLXTx) {
+				db.EXPECT().BeginTxx(gomock.Any(), gomock.Nil()).Return(tx, nil)
+				tx.EXPECT().GetContext(gomock.Any(), gomock.Any(), gomock.Any()).Return(errors.New("select failed"))
+				tx.EXPECT().Rollback().Return(nil)
+			},
+			err: "select failed",
+		},
+		{
+			name:      "ShouldReturnErrorWhenCommitFailsAndRollbackSucceeds",
+			migration: model.SchemaMigration{Version: 2, Up: true},
+			setup: func(db *mocks.MockSQLXDB, tx *mocks.MockSQLXTx) {
+				db.EXPECT().BeginTxx(gomock.Any(), gomock.Nil()).Return(tx, nil)
+				tx.EXPECT().Commit().Return(errors.New("commit failed"))
+				tx.EXPECT().Rollback().Return(nil)
+			},
+			err: "failed to commit the transaction but it has been rolled back: commit error: commit failed",
+		},
+		{
+			name:      "ShouldReturnErrorWhenCommitFailsAndRollbackFails",
+			migration: model.SchemaMigration{Version: 2, Up: true},
+			setup: func(db *mocks.MockSQLXDB, tx *mocks.MockSQLXTx) {
+				db.EXPECT().BeginTxx(gomock.Any(), gomock.Nil()).Return(tx, nil)
+				tx.EXPECT().Commit().Return(errors.New("commit failed"))
+				tx.EXPECT().Rollback().Return(errors.New("rollback failed"))
+			},
+			err: "failed to commit the transaction with: commit error: commit failed, rollback error: rollback failed",
+		},
+		{
+			name:      "ShouldReturnErrorWhenFinalizeFailsAfterCommit",
+			migration: model.SchemaMigration{Version: 2, Up: true},
+			setup: func(db *mocks.MockSQLXDB, tx *mocks.MockSQLXTx) {
+				db.EXPECT().BeginTxx(gomock.Any(), gomock.Nil()).Return(tx, nil)
+				tx.EXPECT().Commit().Return(nil)
+				db.EXPECT().ExecContext(gomock.Any(), "INSERT INTO migrations", gomock.Any(), 1, 2, gomock.Any()).Return(nil, errors.New("insert failed"))
+			},
+			err: "failed inserting migration record: insert failed",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctrl := gomock.NewController(t)
+			defer ctrl.Finish()
+
+			db := mocks.NewMockSQLXDB(ctrl)
+			tx := mocks.NewMockSQLXTx(ctrl)
+			p := storage.NewSQLProviderForTestingWithName(db, storage.ProviderMySQL)
+
+			tc.setup(db, tx)
+
+			err := p.SchemaMigrateApply(context.Background(), db, tc.migration, 0, 26)
+
+			if tc.err == "" {
+				assert.NoError(t, err)
+			} else {
+				assert.EqualError(t, err, tc.err)
+			}
+		})
+	}
+}
+
+func TestSQLProviderSchemaMigrateApplySpecialWithoutMySQLUsesConn(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	db := mocks.NewMockSQLXDB(ctrl)
+	conn := mocks.NewMockSQLXConnection(ctrl)
+	p := storage.NewSQLProviderForTesting(db)
+
+	conn.EXPECT().GetContext(gomock.Any(), gomock.Any(), gomock.Any()).Return(errors.New("select failed"))
+
+	err := p.SchemaMigrateApply(context.Background(), conn, model.SchemaMigration{Version: 26, Up: true}, 0, 26)
+
+	assert.EqualError(t, err, "select failed")
+}
+
+func encryptForTesting(clearText, aad []byte) ([]byte, error) {
+	return storage.NewSQLProviderForTesting(nil).Encrypt(clearText, aad)
 }

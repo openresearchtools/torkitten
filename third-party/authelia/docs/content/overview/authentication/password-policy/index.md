@@ -1,4 +1,8 @@
 ---
+# SPDX-FileCopyrightText: 2026 Authelia
+#
+# SPDX-License-Identifier: Apache-2.0
+
 title: "Password Policy"
 description: "Authelia implements a password policy feature."
 summary: "Authelia implements a password policy feature."
@@ -27,11 +31,11 @@ password.
 
 The available options are:
 
-* Minimum password length
-* Require Uppercase
-* Require Lowercase
-* Require Numbers
-* Require Special characters
+- Minimum password length
+- Require Uppercase
+- Require Lowercase
+- Require Numbers
+- Require Special characters
 
 {{< figure src="password-policy-classic-1.png" caption="Classic Password Policy" alt="Classic Password Policy" sizes="50dvh" >}}
 

@@ -1,4 +1,8 @@
 ---
+# SPDX-FileCopyrightText: 2026 Authelia
+#
+# SPDX-License-Identifier: Apache-2.0
+
 title: "First Factor"
 description: "Authelia utilizes the standard username and password combination for first factor authentication."
 summary: "Authelia utilizes the standard username and password combination for first factor authentication."
@@ -18,9 +22,9 @@ seo:
 
 {{< figure src="1FA.png" caption="An example of the first factor sign in portal" alt="First Factor Authentication View" sizes="10vh" class="center" >}}
 
-*__IMPORTANT:__ This is currently the only method available for first factor authentication.*
+_**IMPORTANT:** This is currently the only method available for first factor authentication._
 
 Authelia supports several kind of user databases:
 
-* An LDAP server like OpenLDAP, OpenAM, Active Directory etc.
-* A YAML file
+- An LDAP server like OpenLDAP, OpenAM, Active Directory etc.
+- A YAML file

@@ -1,4 +1,8 @@
 ---
+# SPDX-FileCopyrightText: 2026 Authelia
+#
+# SPDX-License-Identifier: Apache-2.0
+
 title: "About"
 description: "About Authelia and the Authelia Team"
 summary: ""
@@ -90,7 +94,7 @@ The following section contains various compliance related information.
 
 There is no key individual who if they were incapacitated or unavailable would prevent future operations of the project.
 
-All of the following areas can be reset or are otherwise accessible to all of the members of the [Core Team](#core-team):
+All of the following areas can be reset or are otherwise accessible to all of the members of the [Core Team](../policies/governance.md#core-team):
 
 - Private Keys
 - Access Rights

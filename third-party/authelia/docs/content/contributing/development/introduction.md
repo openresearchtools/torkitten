@@ -1,4 +1,8 @@
 ---
+# SPDX-FileCopyrightText: 2026 Authelia
+#
+# SPDX-License-Identifier: Apache-2.0
+
 title: "Development"
 description: "An introduction into contributing to the Authelia project via development."
 summary: "An introduction into contributing to the Authelia project via development."
@@ -28,7 +32,7 @@ As the main Authelia repository and all supporting Authelia repositories are hos
 users are explicitly making all contributions under the license agreement included with the repository. This is a
 commonly accepted practice in Open Source and it is also explicitly expressed here and in the
 [GitHub Terms of Service](https://docs.github.com/en/site-policy/github-terms/github-terms-of-service#6-contributions-under-repository-license)
- which users must have agreed to in order to attempt a contribution.
+which users must have agreed to in order to attempt a contribution.
 
 ## Dependencies
 

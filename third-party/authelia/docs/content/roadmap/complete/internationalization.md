@@ -1,4 +1,8 @@
 ---
+# SPDX-FileCopyrightText: 2026 Authelia
+#
+# SPDX-License-Identifier: Apache-2.0
+
 title: "Internationalization"
 description: "Authelia Internationalization Implementation"
 summary: "Implementation of internationalization will make Authelia more accessible to more people."
@@ -36,8 +40,8 @@ This stage will add the ability to easily translate the web interface in all vie
 
 This stage will configure the Authelia repository to be easily translatable via a crowdsourced translation platform.
 
-*__Implemented:__ You can now help translate __Authelia__ by checking out the
-[Translations Contributing Guide](../../contributing/prologue/translations.md).*
+_**Implemented:** You can now help translate **Authelia** by checking out the
+[Translations Contributing Guide](../../contributing/prologue/translations.md)._
 
 ### Picker
 

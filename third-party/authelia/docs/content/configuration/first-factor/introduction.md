@@ -1,4 +1,8 @@
 ---
+# SPDX-FileCopyrightText: 2026 Authelia
+#
+# SPDX-License-Identifier: Apache-2.0
+
 title: "First Factor"
 name: "test"
 description: "Configuring Authelia First Factor Authentication."
@@ -18,11 +22,11 @@ seo:
   noindex: false # false (default) or true
 ---
 
-There are two ways to integrate *Authelia* with an authentication backend:
+There are two ways to integrate _Authelia_ with an authentication backend:
 
-* [LDAP](ldap.md): users are stored in remote servers like [OpenLDAP], [OpenDJ], [FreeIPA], or
+- [LDAP](ldap.md): users are stored in remote servers like [OpenLDAP], [OpenDJ], [FreeIPA], or
   [Microsoft Active Directory].
-* [File](file.md): users are stored in [YAML] file with a hashed version of their password.
+- [File](file.md): users are stored in [YAML] file with a hashed version of their password.
 
 ## Configuration
 
@@ -80,7 +84,6 @@ this is configured to anything other than nothing or an empty string.
 {{< confkey type="boolean" default="false" required="no" >}}
 
 This setting controls if users can change their password from the web frontend or not.
-
 
 ### file
 

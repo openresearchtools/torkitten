@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 Authelia
+//
+// SPDX-License-Identifier: Apache-2.0
+
 package handlers
 
 import (
@@ -178,8 +182,10 @@ type HeaderAuthnStrategy struct {
 	basic BasicAuthHandler
 }
 
-// BasicAuthHandler is a function signature that handles basic authentication. This is used to implement caching.
-type BasicAuthHandler func(ctx AuthzContext, authorization *model.Authorization) (valid, cached bool, err error)
+// BasicAuthHandler is a function signature that handles basic authentication. This is used to implement caching. The
+// username must be the canonical username as resolved by the authentication backend rather than the raw value parsed
+// from the header, otherwise multiple representations of the same user occupy distinct cache entries.
+type BasicAuthHandler func(ctx AuthzContext, username, password string) (valid, cached bool, err error)
 
 // NewBasicAuthHandler creates a new BasicAuthHandler depending on the lifespan.
 func NewBasicAuthHandler(lifespan time.Duration) BasicAuthHandler {
@@ -191,8 +197,8 @@ func NewBasicAuthHandler(lifespan time.Duration) BasicAuthHandler {
 }
 
 // DefaultBasicAuthHandler is a BasicAuthHandler that just checks the username and password directly.
-func DefaultBasicAuthHandler(ctx AuthzContext, authorization *model.Authorization) (valid, cached bool, err error) {
-	valid, err = ctx.GetUserProvider().CheckUserPassword(authorization.Basic())
+func DefaultBasicAuthHandler(ctx AuthzContext, username, password string) (valid, cached bool, err error) {
+	valid, err = ctx.GetUserProvider().CheckUserPassword(username, password)
 
 	return valid, false, err
 }
@@ -202,9 +208,7 @@ func DefaultBasicAuthHandler(ctx AuthzContext, authorization *model.Authorizatio
 func NewCachedBasicAuthHandler(lifespan time.Duration) BasicAuthHandler {
 	cache := authentication.NewCredentialCacheHMAC(sha256.New, lifespan)
 
-	return func(ctx AuthzContext, authorization *model.Authorization) (valid, cached bool, err error) {
-		username, password := authorization.Basic()
-
+	return func(ctx AuthzContext, username, password string) (valid, cached bool, err error) {
 		return cache.Check(ctx, username, password)
 	}
 }
@@ -373,19 +377,7 @@ func (s *HeaderLegacyAuthnStrategy) Get(ctx AuthzContext, _ session.Manager, obj
 		level   authentication.Level
 	)
 
-	validate := func(ctx AuthzContext, authz *model.Authorization) (valid, cached bool, err error) {
-		username, password := authn.Header.Authorization.Basic()
-
-		if username == "" || password == "" {
-			return false, false, fmt.Errorf("failed to validate parsed credentials of %s header for user '%s'", header, username)
-		}
-
-		valid, err = ctx.GetUserProvider().CheckUserPassword(username, password)
-
-		return valid, false, err
-	}
-
-	if details, level, err = handleGetBasic(ctx, s.delay, authn, object, header, validate); err != nil {
+	if details, level, err = handleGetBasic(ctx, s.delay, authn, object, header, DefaultBasicAuthHandler); err != nil {
 		return authn, fmt.Errorf("failed to validate %s header with %s scheme: %w", header, scheme, err)
 	}
 
@@ -423,14 +415,26 @@ func handleGetBasic(ctx AuthzContext, delayer middlewares.Delayer, authn *Authn,
 
 	defer delayer.CachedDelay(ctx, started, &cached, &valid)
 
-	username := authn.Header.Authorization.BasicUsername()
+	username, password := authn.Header.Authorization.Basic()
+
+	if len(username) == 0 || len(password) == 0 {
+		return nil, authentication.NotAuthenticated, fmt.Errorf("failed to validate parsed credentials of %s header: the username or password was empty", header)
+	}
 
 	if details, err = ctx.GetUserProvider().GetDetails(username); err != nil {
 		if errors.Is(err, authentication.ErrUserNotFound) {
+			doMarkAuthenticationAttemptWithRequest(ctx, false, regulation.NewBan(regulation.BanTypeUnknown, "", nil), regulation.AuthType1FA, object.String(), object.Method, err)
+
 			ctx.GetLogger().WithField("username", username).Error("Error occurred while attempting to get user details for user: the user was not found indicating they were deleted, disabled, or otherwise no longer authorized to login")
 		}
 
 		return nil, authentication.NotAuthenticated, fmt.Errorf("failed to retrieve user details for user %s: %w", username, err)
+	} else if details == nil {
+		doMarkAuthenticationAttemptWithRequest(ctx, false, regulation.NewBan(regulation.BanTypeUnknown, "", nil), regulation.AuthType1FA, object.String(), object.Method, err)
+
+		ctx.GetLogger().WithField("username", username).Error("Error occurred while attempting to get user details for user: the user was not found indicating they were deleted, disabled, or otherwise no longer authorized to login")
+
+		return nil, authentication.NotAuthenticated, fmt.Errorf("failed to retrieve user details for user %s: no user details were returned", username)
 	}
 
 	if ban, value, expires, err = ctx.GetProviders().Regulator.BanCheck(ctx, details.Username); err != nil {
@@ -445,9 +449,9 @@ func handleGetBasic(ctx AuthzContext, delayer middlewares.Delayer, authn *Authn,
 		return nil, authentication.NotAuthenticated, fmt.Errorf("failed to check the regulation status of user '%s' during an attempt to authenticate using the %s header: %w", details.Username, header, err)
 	}
 
-	if valid, cached, err = validate(ctx, authn.Header.Authorization); err != nil {
+	if valid, cached, err = validate(ctx, details.Username, password); err != nil {
 		if isRegulatorSkippedErr(err) {
-			ctx.GetLogger().WithError(err).Errorf("Unsuccessful %s authentication attempt by user '%s'", regulation.AuthType1FA, authn.Header.Authorization.BasicUsername())
+			ctx.GetLogger().WithError(err).Errorf("Unsuccessful %s authentication attempt by user '%s'", regulation.AuthType1FA, details.Username)
 		} else {
 			doMarkAuthenticationAttemptWithRequest(ctx, false, regulation.NewBan(regulation.BanTypeNone, details.Username, nil), regulation.AuthType1FA, object.String(), object.Method, err)
 		}
@@ -596,9 +600,6 @@ func handleVerifyGETAuthorizationBearer(ctx AuthzContext, authn *Authn, object *
 	return handleVerifyGETAuthorizationBearerResolveUser(ctx, username, clientID, ccs, level)
 }
 
-// handleVerifyGETAuthorizationBearerResolveUser turns the result of bearer-token introspection into the final return
-// values for handleVerifyGETAuthorizationBearer. For client-credentials grants (ccs=true) there is no associated user
-// so GetDetails is skipped and the clientID is propagated; for user-bound tokens GetDetails canonicalises the username.
 func handleVerifyGETAuthorizationBearerResolveUser(ctx AuthzContext, username, clientID string, ccs bool, level authentication.Level) (details *authentication.UserDetails, clientIDOut string, ccsOut bool, levelOut authentication.Level, err error) {
 	if ccs {
 		return nil, clientID, ccs, level, nil
@@ -636,10 +637,9 @@ func handleVerifyGETAuthorizationBearerIntrospection(ctx context.Context, provid
 	}
 
 	audience := []string{object.URL.String()}
-	strategy := provider.GetAudienceStrategy(ctx)
 
-	if err = strategy(requester.GetGrantedAudience(), audience); err != nil {
-		return "", "", false, authentication.NotAuthenticated, fmt.Errorf("token does not contain a valid audience for the url '%s' with the error: %w", audience[0], err)
+	if !oidc.AudienceMatchesRequester(provider.GetAudienceStrategy(ctx), provider.GetResourceStrategy(ctx), requester, audience) {
+		return "", "", false, authentication.NotAuthenticated, fmt.Errorf("the granted audience and resource does not match the request to '%s'", audience[0])
 	}
 
 	fsession := requester.GetSession()
@@ -662,8 +662,8 @@ func handleVerifyGETAuthorizationBearerIntrospection(ctx context.Context, provid
 		return "", "", false, authentication.NotAuthenticated, fmt.Errorf("client id '%s' is registered but does not permit the '%s' scope", osession.ClientID, oidc.ScopeAutheliaBearerAuthz)
 	}
 
-	if err = strategy(client.GetAudience(), audience); err != nil {
-		return "", "", false, authentication.NotAuthenticated, fmt.Errorf("client id '%s' is registered but does not permit an audience for the url '%s' with the error: %w", osession.ClientID, audience[0], err)
+	if !oidc.AudienceMatchesGrantedAudienceOrResource(provider.GetAudienceStrategy(ctx), client.GetAudience(), provider.GetResourceStrategy(ctx), client.GetAudience(), audience) {
+		return "", "", false, authentication.NotAuthenticated, fmt.Errorf("client id '%s' is registered but does not permit an audience for the url '%s'", osession.ClientID, audience[0])
 	}
 
 	if osession.DefaultSession == nil || osession.Claims == nil {

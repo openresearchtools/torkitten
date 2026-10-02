@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 Authelia
+//
+// SPDX-License-Identifier: Apache-2.0
+
 package validator
 
 import (
@@ -92,7 +96,7 @@ func validateTOTPValueSetDigits(config *schema.Configuration, validator *schema.
 
 	for _, digits := range config.TOTP.AllowedDigits {
 		if digits != 6 && digits != 8 {
-			validator.Push(fmt.Errorf(errFmtTOTPInvalidAllowedDigit, config.TOTP.DefaultDigits))
+			validator.Push(fmt.Errorf(errFmtTOTPInvalidAllowedDigit, digits))
 		}
 
 		if digits == config.TOTP.DefaultDigits {

@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 Authelia
+//
+// SPDX-License-Identifier: Apache-2.0
+
 package commands
 
 import (
@@ -773,7 +777,6 @@ func newStorageSchemaInfoCmd(ctx *CmdCtx) (cmd *cobra.Command) {
 	return cmd
 }
 
-// newStorageMigrateCmd returns a new Migration Cmd.
 func newStorageMigrateCmd(ctx *CmdCtx) (cmd *cobra.Command) {
 	cmd = &cobra.Command{
 		Use:     "migrate",

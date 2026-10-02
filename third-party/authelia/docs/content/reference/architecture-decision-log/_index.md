@@ -1,4 +1,8 @@
 ---
+# SPDX-FileCopyrightText: 2026 Authelia
+#
+# SPDX-License-Identifier: Apache-2.0
+
 title: "Architecture Decision Log"
 description: "Architecture Decision Log Prologue"
 summary: ""
@@ -9,4 +13,3 @@ weight: 1000
 sidebar:
   collapsed: true
 ---
-

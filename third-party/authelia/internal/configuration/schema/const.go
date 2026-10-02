@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 Authelia
+//
+// SPDX-License-Identifier: Apache-2.0
+
 package schema
 
 import (
@@ -11,6 +15,7 @@ const (
 	argon2id = "argon2id"
 )
 
+// Lower case hash algorithm name strings.
 const (
 	SHA1Lower   = "sha1"
 	SHA224Lower = "sha224"

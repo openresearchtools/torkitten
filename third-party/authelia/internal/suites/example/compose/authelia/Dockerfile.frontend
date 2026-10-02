@@ -1,14 +1,26 @@
-FROM node:25-alpine@sha256:bdf2cca6fe3dabd014ea60163eca3f0f7015fbd5c7ee1b0e9ccb4ced6eb02ef4
+# SPDX-FileCopyrightText: 2026 Authelia
+#
+# SPDX-License-Identifier: Apache-2.0
+
+FROM node:26-alpine@sha256:ef24c5053d50fdc3e4e56eb4e7ddb7861874ab0fdc797046ba897581deb8e868
 
 ARG USER_ID
 ARG GROUP_ID
 
-RUN yarn global add pnpm && \
+ENV \
+    SHELL="/bin/sh" \
+    PNPM_HOME="/usr/local"
+
+RUN wget -qO /tmp/pnpm-install.sh https://get.pnpm.io/install.sh && \
+    echo '44dfbba11a70a9751090894a07f8d64c9f7954cb782dfe39a1f2b2753e1d5eea /tmp/pnpm-install.sh' | sha256sum -c - && \
+    ENV="/root/.profile" sh /tmp/pnpm-install.sh && \
     deluser node && \
     if getent group ${GROUP_ID} >/dev/null; then delgroup "$(getent group ${GROUP_ID} | cut -d: -f1)"; fi && \
     if getent passwd ${USER_ID} >/dev/null; then deluser "$(getent passwd ${USER_ID} | cut -d: -f1)"; fi && \
     addgroup --gid ${GROUP_ID} dev && \
-    adduser --uid ${USER_ID} -G dev -D dev
+    adduser --uid ${USER_ID} -G dev -D dev && \
+    mkdir -p /app/node_modules && \
+    chown ${USER_ID}:${GROUP_ID} /app/node_modules
 
 USER dev
 

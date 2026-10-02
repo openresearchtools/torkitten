@@ -1,4 +1,8 @@
 ---
+# SPDX-FileCopyrightText: 2026 Authelia
+#
+# SPDX-License-Identifier: Apache-2.0
+
 title: "Server"
 description: "Configuring the Server Settings."
 summary: "Authelia runs an internal web server. This section describes how to configure and tune this."
@@ -150,6 +154,8 @@ or intermediate certificates. If no item is provided mutual TLS is disabled.
 
 ### headers
 
+#### csp_template
+
 {{< callout context="danger" title="Security Notice" icon="outline/alert-octagon" >}}
 This header is a security critical header which protects you from malicious parties and should almost never be
 configured. This is an advanced option to customize, and at minimum you should do sufficient research about how browsers
@@ -181,8 +187,8 @@ Configures the server timeouts.
 {{< confkey type="boolean" default="false" required="no" >}}
 
 {{< callout context="danger" title="Security Note" icon="outline/alert-octagon" >}}
-This is a developer endpoint. __DO NOT__ enable it unless you know why you're enabling it.
-__DO NOT__ enable this in production.
+This is a developer endpoint. **DO NOT** enable it unless you know why you're enabling it.
+**DO NOT** enable this in production.
 {{< /callout >}}
 
 Enables the go [pprof](https://pkg.go.dev/net/http/pprof) endpoints.
@@ -192,21 +198,21 @@ Enables the go [pprof](https://pkg.go.dev/net/http/pprof) endpoints.
 {{< confkey type="boolean" default="false" required="no" >}}
 
 {{< callout context="danger" title="Security Note" icon="outline/alert-octagon" >}}
-This is a developer endpoint. __DO NOT__ enable it unless you know why you're enabling it.
-__DO NOT__ enable this in production.
+This is a developer endpoint. **DO NOT** enable it unless you know why you're enabling it.
+**DO NOT** enable this in production.
 {{< /callout >}}
 
 Enables the go [expvar](https://pkg.go.dev/expvar) endpoints.
 
 #### authz
 
-This is an *__advanced__* option allowing configuration of the authorization endpoints and has its own section.
+This is an _**advanced**_ option allowing configuration of the authorization endpoints and has its own section.
 Generally this does not need to be configured for most use cases. See the
 [Server Authz Endpoints](./server-endpoints-authz.md) configuration guide for more information.
 
 #### rate_limits
 
-This is an *__advanced__* option allowing configuration of the endpoint rate limits and has its own section.
+This is an _**advanced**_ option allowing configuration of the endpoint rate limits and has its own section.
 Generally this does not need to be configured for most use cases. See the
 [Server Endpoint Rate Limits](./server-endpoint-rate-limits.md) configuration guide for more information.
 

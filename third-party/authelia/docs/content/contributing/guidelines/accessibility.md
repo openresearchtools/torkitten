@@ -1,4 +1,8 @@
 ---
+# SPDX-FileCopyrightText: 2026 Authelia
+#
+# SPDX-License-Identifier: Apache-2.0
+
 title: "Accessibility"
 description: "Authelia Development Accessibility Guidelines"
 summary: "This section covers the accessibility guidelines we aim to respect during development."
@@ -18,7 +22,6 @@ seo:
 
 There are no specific guidelines for backend accessibility other than ensuring there are reasonable logging and this is
 extremely subjective.
-
 
 ## Frontend
 

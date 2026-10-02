@@ -1,4 +1,8 @@
 ---
+# SPDX-FileCopyrightText: 2026 Authelia
+#
+# SPDX-License-Identifier: Apache-2.0
+
 title: "Time-based One-Time Password"
 description: "Configuring the Time-based One-Time Password Second Factor Method."
 summary: "Authelia supports utilizing Time-based One-Time Passwords as a 2FA method."
@@ -17,7 +21,7 @@ seo:
   noindex: false # false (default) or true
 ---
 
-The OTP method *Authelia* uses is the Time-Based One-Time Password Algorithm (TOTP) [RFC6238] which is an extension of
+The OTP method _Authelia_ uses is the Time-Based One-Time Password Algorithm (TOTP) [RFC6238] which is an extension of
 HMAC-Based One-Time Password Algorithm (HOTP) [RFC4226].
 
 You have the option to tune the settings of the TOTP generation, and you can see a full example of TOTP configuration
@@ -85,9 +89,9 @@ The algorithm used for the TOTP key.
 
 Possible Values (case-insensitive):
 
-* `sha1`
-* `sha256`
-* `sha512`
+- `sha1`
+- `sha256`
+- `sha512`
 
 Changing this value only affects newly registered TOTP keys. See the [Registration](#registration) section for more
 information.

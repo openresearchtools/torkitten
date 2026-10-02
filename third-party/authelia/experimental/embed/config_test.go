@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 Authelia
+//
+// SPDX-License-Identifier: Apache-2.0
+
 package embed
 
 import (
@@ -32,6 +36,7 @@ func TestNewConfiguration(t *testing.T) {
 				"server.endpoints.rate_limits.reset_password_finish.enable",
 				"server.endpoints.rate_limits.reset_password_start.enable",
 				"server.endpoints.rate_limits.second_factor_duo.enable",
+				"server.endpoints.rate_limits.second_factor_password.enable",
 				"server.endpoints.rate_limits.second_factor_totp.enable",
 				"server.endpoints.rate_limits.session_elevation_finish.enable",
 				"server.endpoints.rate_limits.session_elevation_start.enable",
@@ -108,6 +113,7 @@ func TestNewConfiguration(t *testing.T) {
 				"server.endpoints.rate_limits.reset_password_finish.enable",
 				"server.endpoints.rate_limits.reset_password_start.enable",
 				"server.endpoints.rate_limits.second_factor_duo.enable",
+				"server.endpoints.rate_limits.second_factor_password.enable",
 				"server.endpoints.rate_limits.second_factor_totp.enable",
 				"server.endpoints.rate_limits.session_elevation_finish.enable",
 				"server.endpoints.rate_limits.session_elevation_start.enable",

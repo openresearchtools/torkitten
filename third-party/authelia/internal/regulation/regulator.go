@@ -1,7 +1,12 @@
+// SPDX-FileCopyrightText: 2026 Authelia
+//
+// SPDX-License-Identifier: Apache-2.0
+
 package regulation
 
 import (
 	"database/sql"
+	"strings"
 	"time"
 
 	"github.com/authelia/authelia/v4/internal/clock"
@@ -22,6 +27,7 @@ func NewRegulator(config schema.Regulation, store storage.RegulatorProvider, clo
 	}
 }
 
+// HandleAttempt records an authentication attempt and applies the relevant bans.
 func (r *Regulator) HandleAttempt(ctx Context, successful bool, ban *Ban, requestURI, requestMethod, authType string) {
 	if ban.Type() == BanTypeUnknown {
 		ban.ban, _, _, _ = r.banCheckIP(ctx)
@@ -29,6 +35,8 @@ func (r *Regulator) HandleAttempt(ctx Context, successful bool, ban *Ban, reques
 
 	banned := ban.IsBanned()
 	username := ban.Value()
+
+	ctx.RecordAuthn(successful, banned, strings.ToLower(authType))
 
 	attempt := model.AuthenticationAttempt{
 		Time:          r.clock.Now(),
@@ -154,6 +162,7 @@ func (r *Regulator) banCheckIP(ctx Context) (ban BanType, value string, expires 
 	return BanTypeNone, "", nil, nil
 }
 
+// BanCheck returns the ban in effect for the request IP or the given username.
 func (r *Regulator) BanCheck(ctx Context, username string) (ban BanType, value string, expires *time.Time, err error) {
 	if ban, value, expires, err = r.banCheckIP(ctx); err != nil || ban != BanTypeNone {
 		return ban, value, expires, err

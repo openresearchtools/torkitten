@@ -1,8 +1,11 @@
+// SPDX-FileCopyrightText: 2026 Authelia
+//
+// SPDX-License-Identifier: Apache-2.0
+
 import { Fragment, ReactNode, lazy, useCallback, useEffect, useState } from "react";
 
-import { Box } from "@mui/material";
 import { useTranslation } from "react-i18next";
-import { Route, Routes, useLocation } from "react-router-dom";
+import { Route, Routes, useLocation } from "react-router";
 
 import {
     AuthenticatedRoute,
@@ -235,9 +238,9 @@ interface ComponentOrLoadingProps {
 function ComponentOrLoading(props: ComponentOrLoadingProps) {
     return (
         <Fragment>
-            <Box className={props.ready ? "hidden" : ""}>
+            <div className={props.ready ? "hidden" : ""}>
                 <LoadingPage />
-            </Box>
+            </div>
             {props.ready ? props.children : null}
         </Fragment>
     );

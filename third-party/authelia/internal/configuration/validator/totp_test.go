@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 Authelia
+//
+// SPDX-License-Identifier: Apache-2.0
+
 package validator
 
 import (
@@ -117,7 +121,19 @@ func TestValidateTOTP(t *testing.T) {
 			errs: []string{
 				"totp: option 'allowed_algorithm' must be one of 'SHA1', 'SHA256', or 'SHA512' but one of the values is 'SHA3'",
 				"totp: option 'allowed_periods' option must be 15 or more but one of the values is '5'",
-				"totp: option 'allowed_digits' must only have the values 6 or 8 but one of the values is '6'",
+				"totp: option 'allowed_digits' must only have the values 6 or 8 but one of the values is '20'",
+			},
+		},
+		{
+			desc: "ShouldReportOffendingAllowedDigitsValueNotDefault",
+			have: schema.TOTP{
+				Skew:          schema.DefaultTOTPConfiguration.Skew,
+				Issuer:        "abc",
+				DefaultDigits: 8,
+				AllowedDigits: []int{20},
+			},
+			errs: []string{
+				"totp: option 'allowed_digits' must only have the values 6 or 8 but one of the values is '20'",
 			},
 		},
 	}
