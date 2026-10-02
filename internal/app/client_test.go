@@ -65,7 +65,7 @@ func clientFixture(t *testing.T) (*App, *Profile) {
 		t.Fatal(err)
 	}
 	keyDER, _ := x509.MarshalPKCS8PrivateKey(deviceKey)
-	b := Bundle{Version: 2, ID: strings.Repeat("a", 48), Name: "Test gateway", Onion: clientTestOnion, TorPrivate: base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(make([]byte, 32)), RootCA: string(rootPEM), Certificate: string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: leafDER})), PrivateKey: string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER})), Fingerprint: base64.StdEncoding.EncodeToString(make([]byte, 32))}
+	b := Bundle{Version: 2, ID: strings.Repeat("a", 48), Name: "Test gateway", Owner: "owner-test", Onion: clientTestOnion, TorPrivate: base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(make([]byte, 32)), RootCA: string(rootPEM), Certificate: string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: leafDER})), PrivateKey: string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER})), Fingerprint: base64.StdEncoding.EncodeToString(make([]byte, 32))}
 	p := &Profile{app: a, id: b.ID, name: b.Name, password: clientTestPassword, cache: encryptedProfile{Version: 2, Bundle: b}, mappings: map[string]*tunnel.Mapping{}}
 	if err = p.prepare(); err != nil {
 		t.Fatal(err)

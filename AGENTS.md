@@ -10,17 +10,20 @@ this session supersede earlier v1 container/browser constraints. Read the
 - One small native app has host and client modes and independent connection
   profiles for additional TorKitten servers. GTK embeds portable HTML/CSS/JS;
   Android reuses the client core and assets. Claim only tested platform support.
-- Keep the UI to the requested controls: client mapping checkbox, chosen/Auto
-  port and assigned port, Load/Reload/Stop; host name, lifecycle command,
-  endpoint, availability, SSH capability, the same actions, encrypted file/QR,
-  Issue new identity and Revoke sessions. No additional dashboards.
-- One agent-editable `services.json` is the host model. Lifecycle commands are
-  explicit argument arrays for the user's independent launcher. Preserve them;
-  do not add CPU, memory, swap, task-limit, container, scheduling or restart
-  policy. Do not insert a shell or guess a command, stop action or endpoint.
+- Keep the UI to Connections Add/Remove and automatic QR-password/Authelia
+  login; service mapping checkbox, Auto/chosen port, assigned port and
+  Load/Reload/Stop. Host controls are name, one launch command, endpoint,
+  availability, a separate host SSH switch, encrypted QR, New identity and
+  Revoke sessions. One owner; no user/device management dashboard.
+- One agent-editable `services.json` is the host model. Each service supplies
+  one direct launch command. Use upstream systemd user transient units for
+  independent process ownership; Stop stops that unit, Reload stops then loads.
+  Do not add CPU, memory, swap, task-limit, scheduling or restart policies.
+  Parse literal quoted arguments without a shell; never guess an endpoint.
 - Map configured TCP loopback and Unix stream endpoints onto client loopback
-  ports without altering payloads. Ordinary SSH retains its native host-key
-  and account authentication. Do not pretend OAuth replaces that authentication.
+  ports without altering payloads. Bundled stock OpenSSH retains native host-key and account authentication.
+  The authorized native client receives its per-identity SSH credentials; OAuth
+  does not replace the SSH protocol’s own key verification.
 - Remote requests can select an existing service and allowed action. They
   cannot supply destination addresses, launch commands, host configuration,
   or SSH capability. Host setup exists only on the private Unix UI API.
@@ -46,10 +49,12 @@ this session supersede earlier v1 container/browser constraints. Read the
 - SSH-boundary changes and explicit revocation close active carriers and require
   fresh 2FA. Authorization started before revocation cannot open a carrier or
   dispatch a lifecycle action afterward. Preserve these concurrency checks.
-- Issue new identity replaces Tor identity, TLS/mTLS and Authelia credentials
-  together. Old access closes and new onboarding is required. Never restore
-  an old identity as a recovery fallback.
-- Export age-password-encrypted device credentials and public server trust,
+- New identity immediately closes access and replaces Tor, TLS/mTLS, Chisel,
+  host SSH and Authelia/OAuth credentials, preserving service settings. Show
+  generated owner credentials and TOTP QR locally; confirm 2FA on the host
+  before publishing remote access. Never restore an old identity as fallback.
+- Import only camera-scanned or saved QR images. Export an age-password-
+  encrypted QR containing device credentials and public server trust,
   never server onion identity or CA private keys. Persist client tokens only
   inside encrypted profiles. Imported profiles start locked after restart.
 - GTK loads only the bundled trusted origin through a fixed private Unix bridge.
@@ -71,11 +76,13 @@ this session supersede earlier v1 container/browser constraints. Read the
 - Keep upstream snapshots pristine under `third-party/` and pin release/tag,
   commit and tree. Pin build-tool/container versions and digests. Integration
   changes belong outside vendor trees; no fabricated build metadata.
-- Use upstream release APIs/configuration and the host's normal independent
-  launcher. Do not implement another service supervisor or PKI framework.
+- Use upstream release APIs/configuration and systemd user service ownership.
+  Do not implement another service supervisor or PKI framework.
 - Use private directories, `0600` state, strict bounded schemas, atomic writes
   and fsync. Do not put secrets in argv, URLs, logs or test evidence. Disable
-  component reporting and metrics explicitly; isolate component environment.
+  component reporting and metrics; isolate component environment. Tor metrics
+  require no MetricsPort directive (0 opens an ephemeral listener), plus an
+  explicit empty defaults-torrc so system configuration cannot add listeners.
 - Build and test in rootless Podman. All generated outputs, caches, proof state
   and binaries go under `/run/media/user/Data/TorkittenV2Build`, outside Git.
   Never disturb `/run/media/user/Data/TorkittenBuild` or existing v1 containers.

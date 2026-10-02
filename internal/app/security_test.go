@@ -25,14 +25,14 @@ func securityFixture(t *testing.T, authorize http.HandlerFunc) (*App, string) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { os.RemoveAll(dir) })
-	a := &App{ctx: context.Background(), root: filepath.Join(dir, "state"), run: filepath.Join(dir, "run"), host: HostState{Version: 2, Onion: clientTestOnion, OAuthClient: "epoch-a"}, profiles: map[string]*Profile{}, processes: map[string]*process{}}
+	a := &App{ctx: context.Background(), root: filepath.Join(dir, "state"), run: filepath.Join(dir, "run"), host: HostState{Version: 2, Enrolled: true, Onion: clientTestOnion, OAuthClient: "epoch-a"}, profiles: map[string]*Profile{}, processes: map[string]*process{}}
 	for _, p := range []string{a.root, a.run} {
 		if err = privateDir(p); err != nil {
 			t.Fatal(err)
 		}
 	}
 	marker := filepath.Join(dir, "launched")
-	a.services = Services{Version: 2, Services: []Service{{ID: "service", Title: "Test", Available: true, Endpoint: Endpoint{Network: "tcp", Address: "127.0.0.1:12345"}, Actions: map[string][]string{"load": {"/usr/bin/touch", marker}}}}}
+	a.services = Services{Version: 2, Services: []Service{{ID: "service", Title: "Test", Available: true, Endpoint: Endpoint{Network: "tcp", Address: "127.0.0.1:12345"}, Command: "/usr/bin/touch " + marker}}}
 	ln, err := net.Listen("unix", a.socket("authelia"))
 	if err != nil {
 		t.Fatal(err)
@@ -133,16 +133,8 @@ func TestSecurityEpochCheckedAfterAuthorizationResponse(t *testing.T) {
 }
 
 func TestSecurityAuthorizedActionAndRemoteAdminBoundary(t *testing.T) {
-	a, marker := securityFixture(t, func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) })
-	response := httptest.NewRecorder()
-	a.remoteHandler(response, securityActionRequest(strings.NewReader(`{"id":"service","action":"load"}`)))
-	if response.Code != 200 {
-		t.Fatal("authorized predefined action rejected")
-	}
-	if _, err := os.Stat(marker); err != nil {
-		t.Fatal("configured executable was not launched")
-	}
-	for _, path := range []string{"/api/identity", "/api/config", "/api/revoke", "/api/enroll", "/api/host-action"} {
+	a, _ := securityFixture(t, func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) })
+	for _, path := range []string{"/api/identity", "/api/config", "/api/revoke", "/api/identity-confirm", "/api/qr", "/api/host-action"} {
 		r := httptest.NewRequest("POST", "https://"+clientTestOnion+path, strings.NewReader(`{"confirm":true,"username":"attacker"}`))
 		r.Header.Set("Authorization", "Bearer authelia_at_owner")
 		r.Header.Set("Content-Type", "application/json")
@@ -182,7 +174,7 @@ func TestSecurityHostOriginAndPrivateSockets(t *testing.T) {
 		t.Fatal("trusted native origin rejected")
 	}
 	for _, path := range []string{a.path("admin.sock"), a.socket("authelia"), a.socket("caddy"), a.socket("remote"), a.socket("socks")} {
-		s := Services{Version: 2, Services: []Service{{ID: "bad", Title: "Bad", Endpoint: Endpoint{Network: "unix", Address: path}}}}
+		s := Services{Version: 2, Services: []Service{{ID: "bad", Title: "Bad", Command: "/usr/bin/true", Endpoint: Endpoint{Network: "unix", Address: path}}}}
 		if err := a.validateServices(s); err == nil {
 			t.Fatal("control socket accepted as a user service")
 		}
@@ -193,7 +185,7 @@ func TestSecurityHostOriginAndPrivateSockets(t *testing.T) {
 	if _, err := os.Stat(a.path("services.json")); !os.IsNotExist(err) {
 		t.Fatal("invalid config wrote the service document")
 	}
-	valid := Services{Version: 2, Services: []Service{{ID: "app", Title: "App", Endpoint: Endpoint{Network: "unix", Address: filepath.Join(filepath.Dir(a.root), "application.sock")}}}}
+	valid := Services{Version: 2, Services: []Service{{ID: "app", Title: "App", Command: "/usr/bin/true", Endpoint: Endpoint{Network: "unix", Address: filepath.Join(filepath.Dir(a.root), "application.sock")}}}}
 	if err := a.validateServices(valid); err != nil {
 		t.Fatal("ordinary host Unix service rejected")
 	}

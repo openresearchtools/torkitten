@@ -16,7 +16,7 @@ are in [native builds](native-builds-v2.md); usage is in the [README](../README.
 | SSH-encrypted WebSocket carrier | Pristine Chisel wire components and Go SSH |
 | File encryption | Pristine age scrypt recipient |
 | QR reading/writing | Pristine gozxing and barcode |
-| Service lifecycle and launch options | Explicit user-authored launcher commands |
+| Service lifecycle and launch options | User launch command; upstream systemd user units |
 | Local model, configuration, component coordination, UI bridge | Small Go/GTK wrapper |
 
 Replaced v1 runtime packages are removed. There is no second transport, custom
@@ -46,7 +46,8 @@ Each accepted native TCP connection gets a separate WSS/SSH carrier. It is not
 a fixed pool of four shared connections. Parallel native connections therefore
 do not share Chisel's ordered TCP carrier, though Tor circuits and network
 capacity still affect all traffic. No automatic replay or stream resumption is
-promised after a transport failure. HTTP/SSE/WebSocket/SSH payloads remain opaque.
+promised after a transport failure. Tor uses an explicit empty defaults file;
+metrics are unconfigured because `MetricsPort 0` opens an ephemeral listener. HTTP/SSE/WebSocket/SSH payloads remain opaque.
 
 Only configured stream targets can be selected. The wire target is a service ID,
 not a caller-supplied address. UDP, SOCKS, reverse forwarding and multiple or
@@ -87,24 +88,29 @@ OAuth registration; changes to SSH service boundaries do.
 GTK loads only bundled HTML/CSS/JS at `torkitten://app`. A fixed Unix-socket
 bridge supplies exact Host/Origin values; external pages cannot obtain it.
 Host setup has no onion route. The remote API exposes only version/client-ID
-metadata, the authorized catalogue, fixed lifecycle actions and tunnel upgrades.
+metadata, the authorized catalogue, fixed lifecycle actions, session-authorized host SSH credentials and tunnel upgrades.
 
 There is one agent-editable `services.json` containing names, availability,
-SSH flags, explicit stream endpoints and lifecycle argument arrays. Local UI
-and file edits use the same validation. The app never chooses resource limits
-or rewrites launch arguments. Commands hand off to the user's independent
-launcher; unsupported/missing lifecycle actions remain unavailable.
+one host SSH switch, explicit stream endpoints and one direct launch command
+per service. Local UI and file edits use the same validation. The app never
+chooses resource limits or expands shell expressions. Systemd owns independent
+service units; Stop stops the unit and Reload stops then starts it.
 
 Live QR scanning uses the native camera permission and portable video/canvas
 UI. Frames go only to the local Go QR decoder through the private bridge; they
-are never sent to Tor or the remote server. Scanning returns the encrypted
-bundle to the password form. Capture stops when the scan closes or the app is
+are never sent to Tor or the remote server. Scanning returns only a found flag; the local UI submits the same captured
+image with the password for import. Capture stops when the scan closes or the app is
 hidden. Android camera permission/build behavior still needs device validation.
 
 An encrypted device export contains device credentials and public server trust,
 never server identity or CA private keys. Imported profiles are locked after
-restart. Identity replacement closes and removes the previous generation and
-requires new onboarding. An incomplete replacement stays closed; it never
+restart. Identity replacement immediately closes and removes the previous generation,
+retains service settings and requires host-local password/TOTP setup before
+remote publication and new QR onboarding. Successful confirmation starts the
+server Tor process afresh with publication enabled; it preserves that identity’s
+keys and directory cache. This avoids carrying an unpublished descriptor’s
+later upload timer across a config reload. A single owner is generated; there
+is no additional account management UI. An incomplete replacement stays closed; it never
 restores an old identity as a fallback. Missing prerequisites and component
 failure deny remote access. There is no alternate network or authentication path.
 
@@ -125,16 +131,16 @@ python3 tools/proof-oauth.py --help
 
 The full-app proof starts separate app instances and uses only their private
 Unix UI API for identity, enrollment, login, mapping and control. It requires
-source-built upstream binaries, host `ssh`, `ssh-keygen` and `openssl`, and live
+source-built upstream binaries, host `ssh`, `ssh-keygen`, `openssl` and a working systemd user manager, and live
 Tor connectivity. Run with fresh external paths and the pinned build environment:
 
 ```sh
-TORKITTEN_APP_PROOF=/absolute/external/proofs/app-new \
-TORKITTEN_APP_BIN=/absolute/external/artifacts/app/bin \
-  go test -count=1 -timeout 25m -run TestLiveApp ./internal/app
+TORKITTEN_APP_PROOF=/run/media/user/Data/TorkittenV2Build/proofs/app-new \
+TORKITTEN_APP_BIN=/run/media/user/Data/TorkittenV2Build/artifacts/app/bin \
+  go test -count=1 -timeout 35m -run TestLiveApp ./internal/app
 ```
 
-It covers encrypted file and QR import, wrong-password rejection, actual Tor,
+It covers QR image import, wrong-password rejection, actual Tor,
 missing-device-certificate and Bearer denial, explicit OAuth login/consent,
 concurrent TCP/Unix/native SSH, lifecycle actions, service removal, global/SSH
 revocation, new 2FA, identity replacement and actual packaged host/client daemon restarts

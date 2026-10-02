@@ -22,11 +22,13 @@ import (
 
 func quote(s string) string { return strconv.Quote(s) }
 func torCommon(dir string) string {
-	return "DataDirectory " + quote(dir) + "\nClientOnly 1\nRunAsDaemon 0\nSafeLogging 1\nAvoidDiskWrites 1\nHeartbeatPeriod 0\nHiddenServiceStatistics 0\nMetricsPort 0\nLog notice stdout\n"
+	// MetricsPort must be absent: Tor interprets 0 as an ephemeral listener.
+	// Both Tor processes use an empty defaults-torrc and this generated config.
+	return "DataDirectory " + quote(dir) + "\nClientOnly 1\nRunAsDaemon 0\nSafeLogging 1\nAvoidDiskWrites 1\nHeartbeatPeriod 0\nHiddenServiceStatistics 0\nLog notice stdout\n"
 }
 func (a *App) torServerConfig() string {
 	publish := 0
-	if len(a.host.Devices) > 0 {
+	if a.host.Enrolled && len(a.host.Devices) > 0 {
 		publish = 1
 	}
 	return torCommon(a.gen("tor")) + fmt.Sprintf("SocksPort 0\nPublishHidServDescriptors %d\nHiddenServiceDir %s\nHiddenServiceVersion 3\nHiddenServiceAllowUnknownPorts 0\nHiddenServicePort 443 unix:%s\n", publish, quote(a.gen("onion")), a.socket("gateway"))
@@ -40,7 +42,7 @@ func (a *App) startServerTor() error {
 	if err := atomicWrite(a.gen("torrc"), []byte(a.torServerConfig())); err != nil {
 		return err
 	}
-	p, err := startProcess(a.ctx, filepath.Join(a.bin, "tor"), a.gen("tor.log"), "-f", a.gen("torrc"))
+	p, err := startProcess(a.ctx, filepath.Join(a.bin, "tor"), a.gen("tor.log"), "--defaults-torrc", "/dev/null", "-f", a.gen("torrc"))
 	if err != nil {
 		return err
 	}
@@ -108,6 +110,9 @@ func (a *App) startHost() error {
 		return err
 	}
 	a.hostError = ""
+	if !a.host.Enrolled {
+		a.hostError = "Complete two-factor setup on this host before connecting remotely"
+	}
 	return nil
 }
 func (a *App) writeCaddy() error {
@@ -218,7 +223,7 @@ func (a *App) reloadCaddy() error {
 func (a *App) authorizeBearer(ctx context.Context, token string) error {
 	// This endpoint is also private; Caddy is not the only enforcement point.
 	a.mu.Lock()
-	host, bad := a.host.Onion, a.hostError != ""
+	host, bad := a.host.Onion, a.hostError != "" || !a.host.Enrolled
 	a.mu.Unlock()
 	if bad || !strings.HasPrefix(token, "authelia_at_") || strings.ContainsAny(token, "\r\n") {
 		return errors.New("OAuth login required")

@@ -16,12 +16,15 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"golang.org/x/crypto/ssh"
 	"golang.org/x/net/proxy"
 	"torkitten/internal/oauth"
 	"torkitten/internal/tunnel"
@@ -48,9 +51,10 @@ type ProfileStatus struct {
 }
 type ClientService struct {
 	ViewService
-	Mapped bool   `json:"mapped"`
-	Port   int    `json:"port"`
-	Error  string `json:"error,omitempty"`
+	Mapped     bool   `json:"mapped"`
+	Port       int    `json:"port"`
+	Error      string `json:"error,omitempty"`
+	SSHCommand string `json:"ssh_command,omitempty"`
 }
 type Profile struct {
 	mu                 sync.Mutex
@@ -64,6 +68,7 @@ type Profile struct {
 	pending            *oauth.Consent
 	mappings           map[string]*tunnel.Mapping
 	lastError          string
+	removed            bool
 }
 
 func validProfileName(s string) bool {
@@ -133,7 +138,7 @@ func (a *App) saveProfileIndex(extra *Profile) error {
 }
 func (a *App) ImportBundle(ctx context.Context, data []byte, password, name string) (string, error) {
 	if len(password) < 12 || len(password) > 256 {
-		return "", errors.New("invalid file password length")
+		return "", errors.New("invalid QR password length")
 	}
 	var bundle Bundle
 	if err := decrypt(data, password, &bundle); err != nil {
@@ -193,7 +198,7 @@ func (a *App) activateProfile(p *Profile) error {
 }
 func (a *App) UnlockProfile(ctx context.Context, id, password string) error {
 	if len(password) < 12 || len(password) > 256 {
-		return errors.New("invalid file password length")
+		return errors.New("invalid QR password length")
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -203,6 +208,9 @@ func (a *App) UnlockProfile(ctx context.Context, id, password string) error {
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if p.removed {
+		return errors.New("connection removed")
+	}
 	if p.HTTP != nil {
 		return errors.New("profile is already unlocked")
 	}
@@ -239,7 +247,7 @@ func (a *App) UnlockProfile(ctx context.Context, id, password string) error {
 // destination passed to SOCKS is this profile's onion:443 (no local DNS).
 func (p *Profile) prepare() error {
 	b := p.cache.Bundle
-	if b.Version != 2 || !profileID.MatchString(b.ID) || !validProfileName(b.Name) || !onionName.MatchString(b.Onion) {
+	if b.Version != 2 || !profileID.MatchString(b.ID) || !validProfileName(b.Name) || !ownerName.MatchString(b.Owner) || !onionName.MatchString(b.Onion) {
 		return errors.New("invalid connection bundle")
 	}
 	key, err := base32.StdEncoding.WithPadding(base32.NoPadding).DecodeString(b.TorPrivate)
@@ -320,6 +328,9 @@ func validCredential(s string) bool {
 }
 
 func (p *Profile) saveToken(token oauth.Token) error {
+	if p.removed {
+		return errors.New("connection removed")
+	}
 	next := p.cache
 	next.Token = token
 	data, err := encrypt(next, p.password)
@@ -340,6 +351,7 @@ func (p *Profile) configureOAuth(clientID string) error {
 	return err
 }
 func (p *Profile) clearAccess() error {
+	os.RemoveAll(p.sshDirectory())
 	for id, m := range p.mappings {
 		m.Close()
 		delete(p.mappings, id)
@@ -357,6 +369,11 @@ func (p *Profile) clearAccess() error {
 func (p *Profile) Close() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	p.close()
+	os.Remove(p.app.path("client-auth", p.id+".auth_private"))
+}
+func (p *Profile) close() {
+	os.RemoveAll(p.sshDirectory())
 	for _, m := range p.mappings {
 		m.Close()
 	}
@@ -373,7 +390,6 @@ func (p *Profile) Close() {
 	p.oauth = nil
 	p.password = ""
 	p.cache = encryptedProfile{}
-	os.Remove(p.app.path("client-auth", p.id+".auth_private"))
 }
 func (p *Profile) token(ctx context.Context) (string, error) {
 	if p.HTTP == nil || p.cache.Token.AccessToken == "" {
@@ -411,6 +427,10 @@ func (a *App) LoginProfile(ctx context.Context, id, username, password, totp str
 	if p.HTTP == nil {
 		return oauth.ConsentDetails{}, errors.New("unlock the connection profile first")
 	}
+	if username != "" && username != p.cache.Bundle.Owner {
+		return oauth.ConsentDetails{}, errors.New("login must use the connection owner")
+	}
+	username = p.cache.Bundle.Owner
 	if err = p.clearAccess(); err != nil {
 		return oauth.ConsentDetails{}, err
 	}
@@ -525,13 +545,13 @@ func (p *Profile) services(ctx context.Context) ([]ClientService, error) {
 	if err := p.call(ctx, "GET", "/api/services", nil, true, &result); err != nil {
 		return nil, err
 	}
-	if len(result.Services) > 64 {
+	if len(result.Services) > 65 {
 		return nil, errors.New("invalid service catalogue")
 	}
 	seen := map[string]bool{}
 	out := make([]ClientService, 0, len(result.Services))
 	for _, s := range result.Services {
-		if !identifier.MatchString(s.ID) || seen[s.ID] || !validProfileName(s.Title) || len(s.Actions) > 3 {
+		if !identifier.MatchString(s.ID) || seen[s.ID] || !validProfileName(s.Title) || len(s.Actions) > 3 || s.SSH != (s.ID == "host-ssh") {
 			return nil, errors.New("invalid service catalogue")
 		}
 		for _, action := range s.Actions {
@@ -547,6 +567,9 @@ func (p *Profile) services(ctx context.Context) ([]ClientService, error) {
 			if m.Status() != nil {
 				entry.Error = "tunnel connection failed"
 			}
+			if s.ID == "host-ssh" {
+				entry.SSHCommand = "ssh -F '" + strings.ReplaceAll(filepath.Join(p.sshDirectory(), "config"), "'", "'\\''") + "' torkitten"
+			}
 		}
 		out = append(out, entry)
 	}
@@ -554,6 +577,9 @@ func (p *Profile) services(ctx context.Context) ([]ClientService, error) {
 		if !seen[id] {
 			m.Close()
 			delete(p.mappings, id)
+			if id == "host-ssh" {
+				os.RemoveAll(p.sshDirectory())
+			}
 		}
 	}
 	return out, nil
@@ -569,6 +595,9 @@ func (a *App) MapProfile(ctx context.Context, id, service string, enabled bool, 
 		if m := p.mappings[service]; m != nil {
 			m.Close()
 			delete(p.mappings, service)
+		}
+		if service == "host-ssh" {
+			os.RemoveAll(p.sshDirectory())
 		}
 		return 0, nil
 	}
@@ -592,11 +621,57 @@ func (a *App) MapProfile(ctx context.Context, id, service string, enabled bool, 
 	if err != nil {
 		return 0, err
 	}
+	if service == "host-ssh" {
+		if err = p.configureSSH(ctx, m.Addr().(*net.TCPAddr).Port); err != nil {
+			m.Close()
+			os.RemoveAll(p.sshDirectory())
+			if old != nil {
+				old.Close()
+				delete(p.mappings, service)
+			}
+			return 0, err
+		}
+	}
 	if old != nil {
 		old.Close()
 	}
 	p.mappings[service] = m
 	return m.Addr().(*net.TCPAddr).Port, nil
+}
+func (p *Profile) sshDirectory() string { return filepath.Join(p.app.run, "ssh-"+p.id) }
+func (p *Profile) configureSSH(ctx context.Context, port int) error {
+	var credentials struct {
+		User    string `json:"user"`
+		Key     string `json:"key"`
+		HostKey string `json:"host_key"`
+	}
+	if err := p.call(ctx, "GET", "/api/ssh-config", nil, true, &credentials); err != nil {
+		return err
+	}
+	if len(credentials.User) == 0 || len(credentials.User) > 256 || strings.ContainsAny(credentials.User, "\x00\r\n") {
+		return errors.New("invalid SSH account")
+	}
+	signer, err := ssh.ParsePrivateKey([]byte(credentials.Key))
+	if err != nil || signer.PublicKey().Type() != ssh.KeyAlgoED25519 {
+		return errors.New("invalid SSH client key")
+	}
+	hostKey, _, _, rest, err := ssh.ParseAuthorizedKey([]byte(credentials.HostKey))
+	if err != nil || len(rest) != 0 || hostKey.Type() != ssh.KeyAlgoED25519 {
+		return errors.New("invalid SSH host key")
+	}
+	dir := p.sshDirectory()
+	if err = privateDir(dir); err != nil {
+		return err
+	}
+	if err = atomicWrite(filepath.Join(dir, "key"), []byte(credentials.Key)); err != nil {
+		return err
+	}
+	alias := "torkitten-" + p.id
+	if err = atomicWrite(filepath.Join(dir, "known_hosts"), append([]byte(alias+" "), ssh.MarshalAuthorizedKey(hostKey)...)); err != nil {
+		return err
+	}
+	config := "Host torkitten\n HostName 127.0.0.1\n Port " + strconv.Itoa(port) + "\n User " + strconv.Quote(credentials.User) + "\n IdentityFile " + strconv.Quote(filepath.Join(dir, "key")) + "\n UserKnownHostsFile " + strconv.Quote(filepath.Join(dir, "known_hosts")) + "\n HostKeyAlias " + alias + "\n IdentitiesOnly yes\n StrictHostKeyChecking yes\n BatchMode yes\n PasswordAuthentication no\n KbdInteractiveAuthentication no\n"
+	return atomicWrite(filepath.Join(dir, "config"), []byte(config))
 }
 func (a *App) ProfileAction(ctx context.Context, id, service, action string) error {
 	if !identifier.MatchString(service) || (action != "load" && action != "reload" && action != "stop") {
@@ -631,6 +706,46 @@ func (a *App) DisconnectProfile(ctx context.Context, id string) error {
 	}
 	return nil
 }
+func (a *App) RemoveProfile(ctx context.Context, id string) error {
+	p, err := a.profile(id)
+	if err != nil {
+		return err
+	}
+	p.mu.Lock()
+	if p.removed {
+		p.mu.Unlock()
+		return errors.New("connection already removed")
+	}
+	token := p.cache.Token
+	var revokeErr error
+	if token.AccessToken != "" && p.oauth == nil {
+		revokeErr = p.configureOAuth(token.ClientID)
+	}
+	client := p.oauth
+	p.removed = true
+	p.close()
+	p.mu.Unlock()
+	// Close local access first. Attempt remote revocation while Tor still has
+	// this connection's authorization, then erase local state even if offline.
+	if token.AccessToken != "" && client != nil && revokeErr == nil {
+		revokeErr = client.Revoke(ctx, token)
+	}
+	a.mu.Lock()
+	delete(a.profiles, id)
+	indexErr := a.saveProfileIndex(nil)
+	var removeErr error
+	for _, path := range []string{a.path("profiles", id+".age"), a.path("client-auth", id+".auth_private")} {
+		if e := os.Remove(path); e != nil && !errors.Is(e, os.ErrNotExist) {
+			removeErr = errors.Join(removeErr, e)
+		}
+	}
+	reloadErr := a.processes["client-tor"].reload()
+	a.mu.Unlock()
+	if revokeErr != nil {
+		revokeErr = errors.New("connection removed; remote token revocation could not be confirmed")
+	}
+	return errors.Join(indexErr, removeErr, reloadErr, revokeErr)
+}
 func (a *App) PublicProfiles() []ProfileStatus {
 	a.mu.Lock()
 	list := make([]*Profile, 0, len(a.profiles))
@@ -641,7 +756,9 @@ func (a *App) PublicProfiles() []ProfileStatus {
 	out := make([]ProfileStatus, 0, len(list))
 	for _, p := range list {
 		p.mu.Lock()
-		out = append(out, ProfileStatus{ID: p.id, Name: p.name, Onion: p.cache.Bundle.Onion, Locked: p.HTTP == nil, Authenticated: p.cache.Token.AccessToken != "", Error: p.lastError})
+		if !p.removed {
+			out = append(out, ProfileStatus{ID: p.id, Name: p.name, Onion: p.cache.Bundle.Onion, Locked: p.HTTP == nil, Authenticated: p.cache.Token.AccessToken != "", Error: p.lastError})
+		}
 		p.mu.Unlock()
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })

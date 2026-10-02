@@ -105,14 +105,14 @@ public final class MainActivity extends Activity {
     private static WebResourceResponse denied(){return response(403,"text/plain",new byte[0]);}
     private final class Bridge {
         @JavascriptInterface public void save(String name,String encoded){
-            if(encoded.length()>1400000 || !name.matches("[A-Za-z0-9_.-]{1,80}\\.age"))return;
+            if(encoded.length()>2097152 || !"TorKitten-connection.png".equals(name))return;
             final byte[] bytes;
             try{bytes=Base64.decode(encoded,Base64.DEFAULT);}catch(IllegalArgumentException e){return;}
-            if(!new String(bytes,0,Math.min(bytes.length,23),StandardCharsets.US_ASCII).startsWith("age-encryption.org/v1\n"))return;
+            if(!Arrays.equals(Arrays.copyOf(bytes,8),new byte[]{(byte)137,80,78,71,13,10,26,10}))return;
             runOnUiThread(()->{
                 if(stopped || pendingSave!=null)return;
                 pendingSave=bytes;
-                Intent create=new Intent(Intent.ACTION_CREATE_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE).setType("application/octet-stream").putExtra(Intent.EXTRA_TITLE,name);
+                Intent create=new Intent(Intent.ACTION_CREATE_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE).setType("image/png").putExtra(Intent.EXTRA_TITLE,name);
                 startActivityForResult(create,2);
             });
         }
@@ -131,7 +131,7 @@ public final class MainActivity extends Activity {
             byte[] bytes=pendingSave;pendingSave=null;
             if(result==RESULT_OK && data!=null && data.getData()!=null){
                 Uri destination=data.getData();
-                executor.execute(()->{try(OutputStream stream=getContentResolver().openOutputStream(destination,"wt")){if(stream==null)throw new java.io.IOException();stream.write(bytes);}catch(Exception e){runOnUiThread(()->Toast.makeText(this,"Encrypted file could not be saved",Toast.LENGTH_LONG).show());}finally{Arrays.fill(bytes,(byte)0);}});
+                executor.execute(()->{try(OutputStream stream=getContentResolver().openOutputStream(destination,"wt")){if(stream==null)throw new java.io.IOException();stream.write(bytes);}catch(Exception e){runOnUiThread(()->Toast.makeText(this,"Encrypted QR image could not be saved",Toast.LENGTH_LONG).show());}finally{Arrays.fill(bytes,(byte)0);}});
             }else Arrays.fill(bytes,(byte)0);
         }
         if(request==1 && files!=null){files.onReceiveValue(WebChromeClient.FileChooserParams.parseResult(result,data));files=null;}

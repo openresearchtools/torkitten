@@ -6,10 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"io"
 	"net"
-	"os/exec"
-	"reflect"
 	"sort"
 	"strings"
 	"sync"
@@ -31,31 +28,33 @@ func (a *App) applyServices(next Services) error {
 	for _, v := range a.services.Services {
 		old[v.ID] = v
 	}
-	boundary := false
-	for _, v := range next.Services {
-		prior, ok := old[v.ID]
-		if (v.SSH || prior.SSH) && (!ok || !reflect.DeepEqual(prior, v)) {
-			boundary = true
-		}
-		delete(old, v.ID)
-	}
-	for _, v := range old {
-		if v.SSH {
-			boundary = true
-		}
-	}
-	if boundary && a.host.Initialized && a.relay != nil {
+	boundary := next.SSH != a.services.SSH
+	if boundary && a.host.Initialized && a.host.Enrolled && a.relay != nil {
 		if err := a.revokeSessions(); err != nil {
 			return err
 		}
 	}
 	if a.relay != nil {
+		for _, v := range next.Services {
+			prior, ok := old[v.ID]
+			if !v.Available || (ok && (prior.Endpoint != v.Endpoint || prior.Command != v.Command)) {
+				a.relay.RemoveService(v.ID)
+			}
+			delete(old, v.ID)
+		}
 		for id := range old {
 			a.relay.RemoveService(id)
 		}
+	}
+	if err := a.reconcileManaged(next); err != nil {
+		return err
+	}
+	if a.relay != nil {
+		if err := a.syncHostSSH(next.SSH); err != nil {
+			return err
+		}
 		for _, v := range next.Services {
 			if !v.Available {
-				a.relay.RemoveService(v.ID)
 				continue
 			}
 			if err := a.relay.SetService(v.ID, tunnel.Endpoint{Network: v.Endpoint.Network, Address: v.Endpoint.Address}); err != nil {
@@ -84,7 +83,7 @@ func (a *App) saveServices(next Services) error {
 		}
 		return err
 	}
-	if strings.HasPrefix(a.hostError, "services.json rejected:") {
+	if strings.HasPrefix(a.hostError, "services.json rejected:") || a.hostError == "service update failed; remote access closed" {
 		a.hostError = ""
 	}
 	b, _ := json.MarshalIndent(next, "", "  ")
@@ -105,11 +104,7 @@ func (a *App) serviceList() []ViewService {
 		wg.Add(1)
 		go func(v Service) {
 			defer wg.Done()
-			view := ViewService{ID: v.ID, Title: v.Title, SSH: v.SSH, Actions: []string{}}
-			for action := range v.Actions {
-				view.Actions = append(view.Actions, action)
-			}
-			sort.Strings(view.Actions)
+			view := ViewService{ID: v.ID, Title: v.Title, Running: a.managedRunning(v), Actions: []string{"load", "reload", "stop"}}
 			c, err := net.DialTimeout(v.Endpoint.Network, v.Endpoint.Address, 300*time.Millisecond)
 			if err == nil {
 				view.Reachable = true
@@ -121,6 +116,9 @@ func (a *App) serviceList() []ViewService {
 		}(v)
 	}
 	wg.Wait()
+	if ssh := a.hostSSHView(); ssh != nil {
+		result = append(result, *ssh)
+	}
 	sort.Slice(result, func(i, j int) bool { return result[i].ID < result[j].ID })
 	if result == nil {
 		result = []ViewService{}
@@ -129,36 +127,16 @@ func (a *App) serviceList() []ViewService {
 }
 func (a *App) action(ctx context.Context, id, action, epoch string) error {
 	a.mu.Lock()
+	defer a.mu.Unlock()
 	if epoch != "" && (epoch != a.host.OAuthClient || a.hostError != "") {
-		a.mu.Unlock()
 		return errors.New("OAuth login required")
 	}
-	var argv []string
-	for _, v := range a.services.Services {
-		if v.ID == id && (epoch == "" || v.Available) {
-			argv = append([]string(nil), v.Actions[action]...)
+	for _, service := range a.services.Services {
+		if service.ID == id && (epoch == "" || service.Available) {
+			return a.managedAction(ctx, service, action)
 		}
 	}
-	if len(argv) == 0 {
-		a.mu.Unlock()
-		return errors.New("service action is unavailable")
-	}
-	ctx, cancel := context.WithTimeout(ctx, 45*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
-	cmd.Stdout = io.Discard
-	cmd.Stderr = io.Discard
-	// The host preset invokes its chosen independent launcher. We add no shell,
-	// resource limits, scheduling flags, restart policy, or inferred stop command.
-	err := cmd.Start()
-	a.mu.Unlock()
-	if err == nil {
-		err = cmd.Wait()
-	}
-	if err != nil {
-		return errors.New("preset action failed")
-	}
-	return nil
+	return errors.New("service action is unavailable")
 }
 func bearer(header string) string {
 	if !strings.HasPrefix(header, "Bearer ") {

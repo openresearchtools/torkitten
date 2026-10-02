@@ -14,6 +14,7 @@ import (
 	_ "image/png"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 	"torkitten/internal/ui"
 )
@@ -58,7 +59,7 @@ func (a *App) Handler() http.Handler {
 			a.localAPI(w, r)
 			return
 		}
-		if r.Method != "GET" || r.URL.Path != "/" && r.URL.Path != "/app.js" && r.URL.Path != "/app.css" {
+		if r.Method != "GET" || r.URL.Path != "/" && r.URL.Path != "/app.js" && r.URL.Path != "/app.css" && r.URL.Path != "/logo.svg" {
 			http.NotFound(w, r)
 			return
 		}
@@ -113,15 +114,25 @@ func (a *App) localAPI(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 		a.mu.Lock()
-		result, err = a.issueIdentity(r.Context(), req.Username)
+		result, err = a.issueIdentity(r.Context(), req.Password)
 		a.mu.Unlock()
 	case "/api/revoke":
 		a.mu.Lock()
 		err = a.revokeSessions()
 		a.mu.Unlock()
-	case "/api/enroll":
+	case "/api/identity-confirm":
 		a.mu.Lock()
-		result, err = a.enroll(r.Context(), req.Name, req.Password)
+		result, err = a.ConfirmIdentity(r.Context(), req.TOTP)
+		a.mu.Unlock()
+	case "/api/qr":
+		a.mu.Lock()
+		if !a.host.Enrolled {
+			err = errors.New("complete local two-factor setup first")
+		} else {
+			var b []byte
+			b, err = os.ReadFile(a.gen("connection.png"))
+			result = map[string]string{"qr": base64.StdEncoding.EncodeToString(b)}
+		}
 		a.mu.Unlock()
 	case "/api/config":
 		if req.Services == nil {
@@ -140,12 +151,12 @@ func (a *App) localAPI(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, ErrQRNotFound) {
 			result, err = map[string]bool{"found": false}, nil
 		} else if err == nil {
-			result = map[string]any{"found": true, "data": base64.StdEncoding.EncodeToString(data)}
+			result = map[string]any{"found": true}
 		}
-	case "/api/import", "/api/import-qr":
+	case "/api/import-qr":
 		var data []byte
 		data, err = base64.StdEncoding.DecodeString(req.Data)
-		if err == nil && r.URL.Path == "/api/import-qr" {
+		if err == nil {
 			data, err = decodeQR(data)
 		}
 		if err == nil {
@@ -165,8 +176,8 @@ func (a *App) localAPI(w http.ResponseWriter, r *http.Request) {
 		result = map[string]int{"port": port}
 	case "/api/action":
 		err = a.ProfileAction(r.Context(), req.ID, req.Service, req.Action)
-	case "/api/disconnect":
-		err = a.DisconnectProfile(r.Context(), req.ID)
+	case "/api/remove":
+		err = a.RemoveProfile(r.Context(), req.ID)
 	default:
 		http.NotFound(w, r)
 		return
@@ -248,6 +259,17 @@ func (a *App) remoteHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	switch {
+	case r.Method == "GET" && r.URL.Path == "/api/ssh-config":
+		a.mu.Lock()
+		if epoch != a.host.OAuthClient || !a.host.Enrolled || !a.services.SSH || a.hostError != "" {
+			a.mu.Unlock()
+			http.Error(w, "SSH access unavailable", 403)
+			return
+		}
+		credentials, err := a.sshCredentials()
+		a.mu.Unlock()
+		respond(w, credentials, err)
+
 	case r.Method == "GET" && r.URL.Path == "/api/services":
 		respond(w, map[string]any{"services": a.serviceList()}, nil)
 	case r.Method == "POST" && r.URL.Path == "/api/actions":

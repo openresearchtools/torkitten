@@ -1,12 +1,12 @@
 # Vendored upstream sources
 
-`tor/`, `caddy/`, `authelia/`, `chisel/`, `age/`, and `gozxing/` are complete, normal Git-tracked snapshots. They are not
+`tor/`, `caddy/`, `authelia/`, `chisel/`, `age/`, `gozxing/`, and `openssh/` are complete, normal Git-tracked snapshots. They are not
 submodules, so GitHub builds never depend on GitLab or another source host.
 Each adjacent `*.upstream.toml` records the release tag, tag object, commit,
 and Git tree imported from the official repository.
 
 Chisel supplies the selected v2 stream transport; age supplies passphrase
-encryption. Gozxing decodes QR images. Their complete source snapshots and Go dependency lockfiles remain
+encryption. Gozxing decodes QR images. OpenSSH provides the stock host SSH daemon and its two helpers. Their complete source snapshots and Go dependency lockfiles remain
 intact. Integration belongs outside this directory. The root Go module uses
 local replacements so builds consume these verified snapshots. Unsigned upstream
 tags and commits are explicitly recorded as unsigned.
@@ -33,6 +33,7 @@ tools/update-vendor.sh authelia vX.Y.Z
 tools/update-vendor.sh chisel vX.Y.Z
 tools/update-vendor.sh age vX.Y.Z
 tools/update-vendor.sh gozxing vX.Y.Z
+tools/update-vendor.sh openssh V_X_Y_PZ
 ```
 
 The updater uses `TORKITTEN_BUILD_ROOT` (default

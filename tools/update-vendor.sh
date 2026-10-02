@@ -2,7 +2,7 @@
 set -euo pipefail
 
 if [[ $# -ne 2 ]]; then
-    echo "usage: $0 <tor|caddy|authelia|chisel|age|gozxing> <release-tag>" >&2
+    echo "usage: $0 <tor|caddy|authelia|chisel|age|gozxing|openssh> <release-tag>" >&2
     exit 2
 fi
 
@@ -24,6 +24,9 @@ case "$component" in
         ;;
     age)
         upstream=https://github.com/FiloSottile/age.git
+        ;;
+    openssh)
+        upstream=https://github.com/openssh/openssh-portable.git
         ;;
     gozxing)
         upstream=https://github.com/makiuchi-d/gozxing.git

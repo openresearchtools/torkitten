@@ -23,6 +23,8 @@ type App struct {
 	cancel         context.CancelFunc
 	root, bin, run string
 	host           HostState
+	pendingSetup   *pendingSetup
+	hostSSH        *hostSSH
 	services       Services
 	serviceBytes   string
 	hostError      string
@@ -139,6 +141,8 @@ func (a *App) Close() error {
 		}
 		a.mu.Lock()
 		defer a.mu.Unlock()
+		a.clearPendingSetup()
+		a.stopHostSSH()
 		for _, p := range a.profiles {
 			p.Close()
 		}
@@ -173,7 +177,7 @@ func (a *App) startClientTor() error {
 	if runtime.GOOS == "android" {
 		name = "libtor.so"
 	}
-	p, err := startProcess(a.ctx, filepath.Join(a.bin, name), a.path("client-tor.log"), "-f", a.path("client-torrc"))
+	p, err := startProcess(a.ctx, filepath.Join(a.bin, name), a.path("client-tor.log"), "--defaults-torrc", "/dev/null", "-f", a.path("client-torrc"))
 	if err != nil {
 		return err
 	}

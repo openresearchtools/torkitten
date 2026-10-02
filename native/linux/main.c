@@ -167,7 +167,12 @@ static void saved(GObject *dialog, GAsyncResult *result, gpointer data) {
 
 static gboolean destination(WebKitDownload *download, const char *suggested, gpointer unused) {
     (void)unused;
-    if (!g_str_has_suffix(suggested, ".age")) { webkit_download_cancel(download); return TRUE; }
+    WebKitURIResponse *response = webkit_download_get_response(download);
+    if (g_strcmp0(suggested, "TorKitten-connection.png") || !response ||
+        g_strcmp0(webkit_uri_response_get_mime_type(response), "image/png") ||
+        webkit_uri_response_get_content_length(response) < 8 || webkit_uri_response_get_content_length(response) > 2 * 1024 * 1024) {
+        webkit_download_cancel(download); return TRUE;
+    }
     GtkFileDialog *dialog = gtk_file_dialog_new();
     char *name = g_path_get_basename(suggested);
     gtk_file_dialog_set_initial_name(dialog, name);
@@ -175,11 +180,17 @@ static gboolean destination(WebKitDownload *download, const char *suggested, gpo
     g_free(name); g_object_unref(dialog); return TRUE;
 }
 
+static void received(WebKitDownload *download, guint64 size, gpointer unused) {
+    (void)size; (void)unused;
+    if (webkit_download_get_received_data_length(download) > 2 * 1024 * 1024) webkit_download_cancel(download);
+}
+
 static void download_started(WebKitNetworkSession *session, WebKitDownload *download, gpointer unused) {
     (void)session; (void)unused;
     const char *uri = webkit_uri_request_get_uri(webkit_download_get_request(download));
     if (webkit_download_get_web_view(download) != view || !g_str_has_prefix(uri, "blob:torkitten://app/")) { webkit_download_cancel(download); return; }
     g_signal_connect(download, "decide-destination", G_CALLBACK(destination), NULL);
+    g_signal_connect(download, "received-data", G_CALLBACK(received), NULL);
 }
 
 static void activate(GtkApplication *app, gpointer unused) {

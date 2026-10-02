@@ -48,15 +48,15 @@ type Endpoint struct {
 	Address string `json:"address"`
 }
 type Service struct {
-	ID        string              `json:"id"`
-	Title     string              `json:"title"`
-	Available bool                `json:"available"`
-	SSH       bool                `json:"ssh"`
-	Endpoint  Endpoint            `json:"endpoint"`
-	Actions   map[string][]string `json:"actions"`
+	ID        string   `json:"id"`
+	Title     string   `json:"title"`
+	Available bool     `json:"available"`
+	Endpoint  Endpoint `json:"endpoint"`
+	Command   string   `json:"command"`
 }
 type Services struct {
 	Version  int       `json:"version"`
+	SSH      bool      `json:"ssh"`
 	Services []Service `json:"services"`
 }
 type Device struct {
@@ -69,12 +69,14 @@ type HostState struct {
 	Version     int      `json:"version"`
 	Generation  string   `json:"generation"`
 	Initialized bool     `json:"initialized"`
+	Enrolled    bool     `json:"enrolled"`
 	Onion       string   `json:"onion"`
 	OAuthClient string   `json:"oauth_client"`
 	Owner       string   `json:"owner"`
 	Devices     []Device `json:"devices"`
 }
 type Bundle struct {
+	Owner       string `json:"owner"`
 	Version     int    `json:"version"`
 	ID          string `json:"id"`
 	Name        string `json:"name"`
@@ -91,6 +93,7 @@ type ViewService struct {
 	SSH       bool     `json:"ssh"`
 	Actions   []string `json:"actions"`
 	Reachable bool     `json:"reachable"`
+	Running   bool     `json:"running"`
 }
 
 func (e Endpoint) Validate() error {
@@ -119,7 +122,7 @@ func (s Services) Validate(privateRoot string) error {
 	}
 	seen := map[string]bool{}
 	for _, v := range s.Services {
-		if !identifier.MatchString(v.ID) || seen[v.ID] || len(v.Title) < 1 || len(v.Title) > 80 {
+		if !identifier.MatchString(v.ID) || v.ID == "host-ssh" || seen[v.ID] || len(v.Title) < 1 || len(v.Title) > 80 {
 			return errors.New("invalid or duplicate service")
 		}
 		seen[v.ID] = true
@@ -129,19 +132,10 @@ func (s Services) Validate(privateRoot string) error {
 		if v.Endpoint.Network == "unix" && (v.Endpoint.Address == privateRoot || strings.HasPrefix(v.Endpoint.Address, privateRoot+string(os.PathSeparator))) {
 			return errors.New("application control sockets cannot be shared")
 		}
-		for action, argv := range v.Actions {
-			if action != "load" && action != "reload" && action != "stop" {
-				return errors.New("unknown lifecycle action")
-			}
-			if len(argv) < 1 || len(argv) > 256 || !filepath.IsAbs(argv[0]) {
-				return errors.New("actions require an absolute executable and argument array")
-			}
-			for _, arg := range argv {
-				if len(arg) > 16384 || strings.IndexByte(arg, 0) >= 0 {
-					return errors.New("invalid action argument")
-				}
-			}
+		if _, err := commandArgs(v.Command); err != nil {
+			return err
 		}
+
 	}
 	return nil
 }

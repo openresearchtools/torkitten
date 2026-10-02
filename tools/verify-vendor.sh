@@ -6,7 +6,7 @@ cd "$repo_root"
 
 index_tree=$(git write-tree)
 
-for component in tor caddy authelia chisel age gozxing; do
+for component in tor caddy authelia chisel age gozxing openssh; do
     source_path="third-party/$component"
     manifest="third-party/$component.upstream.toml"
     expected_tree=$(sed -n 's/^tree = "\([0-9a-f]\{40\}\)"$/\1/p' "$manifest")

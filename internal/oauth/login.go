@@ -44,7 +44,7 @@ type Consent struct {
 // Login delegates password and TOTP verification to the documented portal APIs
 // of pinned Authelia. Cookies stay in this short-lived native jar. No credentials
 // or remote HTML are passed to a WebView, and no token is issued before Accept.
-func (c *Client) Login(ctx context.Context, username, password, totp string) (*Consent, error) {
+func (c *Client) authenticate(ctx context.Context, username, password, totp string) (*Consent, error) {
 	if username == "" || len(username) > 256 || password == "" || len(password) > 4096 || len(totp) != 6 {
 		return nil, ErrLoginRequired
 	}
@@ -77,7 +77,33 @@ func (c *Client) Login(ctx context.Context, username, password, totp string) (*C
 	if err := p.json(requestCtx, http.MethodPost, "/api/secondfactor/totp", map[string]string{"token": totp}, nil); err != nil {
 		return nil, err
 	}
-	var err error
+	success = true
+	return p, nil
+}
+
+// VerifyFactors confirms setup using the same upstream verification as Login,
+// without requesting OAuth authorization or issuing credentials.
+func (c *Client) VerifyFactors(ctx context.Context, username, password, totp string) error {
+	p, err := c.authenticate(ctx, username, password, totp)
+	if p != nil {
+		p.Close()
+	}
+	return err
+}
+
+func (c *Client) Login(ctx context.Context, username, password, totp string) (*Consent, error) {
+	p, err := c.authenticate(ctx, username, password, totp)
+	if err != nil {
+		return nil, err
+	}
+	success := false
+	defer func() {
+		if !success {
+			p.Close()
+		}
+	}()
+	requestCtx, cancel := p.requestContext(ctx)
+	defer cancel()
 	if p.state, err = randomValue(); err != nil {
 		return nil, err
 	}

@@ -4,10 +4,10 @@ The shared UI is embedded by the Go app. Linux uses GTK4/WebKitGTK 6.0 and
 libsoup3. The native shell loads only `torkitten://app/`; requests go through a
 fixed private Unix HTTP connection with Host `app` and Origin
 `torkitten://app`. It forwards method, bounded body, status and content type.
-The GTK save chooser handles only `.age` downloads from the trusted page's Blob
-origin. The byte path passed a real WebKit download test with the save chooser
-substituted by a fixed temporary path in a test-only binary. The production GTK
-chooser itself still requires an interactive save choice.
+The GTK save chooser accepts only `TorKitten-connection.png`, MIME `image/png`,
+at most 2 MiB, from the trusted page’s Blob origin. The production chooser
+requires an interactive save choice. The actual download callback passed exact
+PNG bytes in `proofs/native-png-001`; only the chooser destination was substituted.
 
 No native JavaScript object, remote page, service UI, public HTTP listener, or
 TLS exception is used. A restrictive CSP and navigation policy keep external
@@ -21,15 +21,15 @@ tools/build-app.sh
 
 The bundle is `/run/media/user/Data/TorkittenV2Build/artifacts/app` by default.
 `TORKITTEN_BUILD_ROOT` may select another external build directory. The bundle
-contains `bin/torkitten`, `bin/torkitten-native`, Tor, Caddy and Authelia; Chisel,
+contains `bin/torkitten`, `bin/torkitten-native`, Tor, Caddy, Authelia and stock OpenSSH server/helpers; Chisel,
 age and gozxing are compiled into the Go app. Component build metadata,
 licenses and binary SHA256 sums accompany the binaries. The host needs GTK4
 (4.10+), WebKitGTK 6.0, libsoup3, Tor's shared-library dependencies, `openssl`,
-and `/usr/bin/ssh-keygen`. A missing prerequisite is an error. On Ubuntu 24.04
+`/usr/bin/ssh-keygen`, `/usr/bin/cat`, and a working systemd user manager for hosting. A missing prerequisite is an error. On Ubuntu 24.04
 or newer, install the runtime packages explicitly:
 
 ```sh
-sudo apt-get install libgtk-4-1 libwebkitgtk-6.0-4 libsoup-3.0-0 libevent-2.1-7t64 libssl3t64 liblzma5 libzstd1 libcap2 libsystemd0 libseccomp2 openssl openssh-client
+sudo apt-get install libgtk-4-1 libwebkitgtk-6.0-4 libsoup-3.0-0 libevent-2.1-7t64 libssl3t64 liblzma5 libzstd1 libcap2 libsystemd0 libseccomp2 libcrypt1 zlib1g coreutils openssl openssh-client
 ```
 
 These system packages receive security updates through the host package manager;
@@ -50,7 +50,7 @@ Closing the Linux window leaves the Go daemon running. The native shell can
 also attach to an existing private `admin.sock`. The existing v1 state and
 containers are independent. The complete bundled UI passed GTK rendering,
 import dialog open/cancel/reset, host tab switching and actual service-form
-persistence in isolated `proofs/ui-app-001` state. Its test-only harness does
+persistence in isolated `proofs/ui-app-002` state. Its test-only harness does
 not ship in the app.
 
 To repeat the native bridge test on a desktop session, choose a fresh output
@@ -62,6 +62,22 @@ python3 tools/proof-native-ui.py \
   --work-dir /run/media/user/Data/TorkittenV2Build/proofs/native-ui-new
 ```
 
+## Managed host SSH
+
+The host SSH switch launches bundled OpenSSH 10.5p1 in its standard inetd mode
+for each accepted private Unix stream. It uses the current unprivileged OS
+account, per-identity Ed25519 host/login keys and fixed helper paths. The sole
+key source is the fixed private public-key file read by stock OpenSSH’s
+`AuthorizedKeysCommand` through `/usr/bin/cat`; `StrictModes` stays enabled.
+Password, PAM, root, alternate users and SSH forwarding are disabled. Normal
+exec, shell/PTY and internal SFTP remain available with the account’s permissions.
+The native client receives credentials only after OAuth and writes a private
+ordinary SSH configuration; JavaScript never receives these keys. Disabling
+the switch closes existing SSH connections, and New identity replaces both keys.
+No system-wide `sshd` configuration, service, package installation or TCP SSH
+listener is needed. The opt-in `TestHostSSHRealCommandSFTPAndRevocation` test
+runs as the actual host user with `TORKITTEN_SSH_BIN` set to the bundled bin path.
+
 ## Live QR camera permissions
 
 The bundled scanner requests video only and decodes frames through the private
@@ -70,8 +86,7 @@ asks with a native GTK dialog whose default is Deny. Only the trusted
 `torkitten://app` WebView may request camera capture. Microphone, display capture,
 other permission types and other origins are denied. Closing the native window
 cancels a pending prompt and disables camera capture. The shared UI stops tracks
-on successful recognition, Cancel and page hiding. Saved QR images and encrypted
-files remain available through the file chooser.
+on successful recognition, Cancel and page hiding. Saved QR images remain available through the file chooser.
 
 The shell compiled with warnings as errors. Under
 `TorkittenV2Build/proofs/camera-native-001`, a real WebKit mock-camera stream passed
@@ -79,9 +94,10 @@ video-only permission, stop, audio-only denial and mixed audio/video denial; the
 native permission-dialog response was substituted only in the test binary.
 Eight mocked denial cases cover untrusted/missing origins, other WebViews,
 unknown permission types, audio, display and window closing. The actual shared
-scanner UI passed synthetic canvas video → real local QR decoder → exact age
-ciphertext → password form, plus track cleanup on success and Cancel, under
-`proofs/scanner-ui-003`. No hardware camera capture or optical scanning was tested.
+scanner UI passed synthetic canvas video → real local QR decoder → found-only
+response → password form with the captured image retained locally, plus track
+cleanup on success and Cancel, under
+`proofs/scanner-ui-004`. No hardware camera capture or optical scanning was tested.
 Its temporary app state was removed; retained frames contain only an encrypted
 dummy payload with no server credentials.
 
@@ -90,7 +106,7 @@ dummy payload with no server credentials.
 `mobile/mobile.go` delegates the same private HTTP handler to a thin Java
 WebView shell. The shell accepts only its bundled asset origin, blocks network
 loads, exposes a narrow request bridge only there, and uses the OS file chooser
-for configuration/QR images. Camera access uses Android's OS runtime permission
+for saved QR images. Camera access uses Android's OS runtime permission
 prompt and grants only `RESOURCE_VIDEO_CAPTURE` for exactly
 `https://appassets.androidplatform.net`. Other origins, microphone and unknown
 resources are denied. `onStop` cancels pending camera requests and invokes the
@@ -100,7 +116,7 @@ and destroys the WebView, ending its grants and capture. The OS-level permission
 remains controlled by Android and the user. This follows the Android
 [permission-request API](https://developer.android.com/reference/android/webkit/PermissionRequest)
 and [runtime-permission flow](https://developer.android.com/training/permissions/requesting).
-Encrypted exports pass bounded age bytes through
+Encrypted connection QR exports pass bounded PNG bytes through
 `Native.save` to an OS create-document picker; no download URL is fetched. It never hosts service content. No loopback TCP
 administration listener is introduced. The native adapter supplies the same
 Host/Origin to the Go handler.

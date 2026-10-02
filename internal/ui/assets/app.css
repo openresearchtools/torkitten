@@ -2,3 +2,4 @@
 
 #scan-video{display:block;width:100%;max-height:55vh;background:#18251a;border-radius:5px;object-fit:contain}#qr-scanned:empty{display:none}
 #enroll-result{max-width:800px}#connection-qr{width:min(70vw,65vh,720px);image-rendering:pixelated}
+.brand{display:flex;gap:12px;align-items:center}.brand img{width:42px;height:42px;margin:0}.brand h2{margin:0}.dialog-status:empty{display:none}.dialog-status{margin:0}#host-services{margin-top:18px}.edit-grid label.check{flex-direction:row;align-items:center}#profiles{max-width:100%;min-width:240px}#qr-dialog{max-width:800px}.ssh-command{display:block;overflow-wrap:anywhere;margin-top:14px;font-size:13px}#host-status{overflow-wrap:anywhere}input,select{min-width:0}.edit-grid input{width:100%}.edit-grid input[type=checkbox]{width:18px}body[aria-busy=true] button{pointer-events:none;opacity:.6}

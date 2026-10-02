@@ -29,8 +29,8 @@ latency and throughput; a broken connection is reported, not replayed.
 Only the protected gateway is mapped to an onion virtual port. Host services
 and administration sockets are not additional onion listeners. Device Tor
 client authorization, pinned private-CA TLS, device mTLS, Authelia OAuth and the
-Chisel server fingerprint are all required. There is no direct-network,
-unencrypted, cookie-authenticated or alternate-transport path.
+Chisel server fingerprint are all required. The intermachine tunnel has no
+direct-network, unencrypted or alternate-transport path; cookies cannot authorize it.
 
 ## Build and launch
 
@@ -50,9 +50,9 @@ packages and an explicit direct launch command are documented in
 [native builds](docs/native-builds-v2.md). Closing the window leaves the Linux
 daemon running. Run it again to reopen the same private administration socket.
 The daemon must be started again after a reboot; imported connections begin
-locked and require their file password. Local mappings are selected again.
+locked and require their QR password. Local mappings are selected again.
 
-Tor, Caddy, Authelia, Chisel, age and the QR reader are pristine vendored sources.
+Tor, Caddy, Authelia, Chisel, OpenSSH, age and the QR reader are pristine vendored sources.
 The [upstream refresh record](docs/upstream-refresh-v2.md) and
 `third-party/*.upstream.toml` contain authoritative versions and tree hashes.
 No generated identities, credentials, binaries or runtime state belong in Git.
@@ -60,48 +60,57 @@ The existing v1 runtime store is independent and is not migrated or modified.
 
 ## Host setup
 
-1. Open **This host → Issue new identity**. Save the generated Authelia password
-   and scan its TOTP enrollment QR. They are shown once.
-2. Add services, their names and explicit TCP loopback addresses or Unix sockets.
-   Enable **Available** for services to share. Mark SSH capability only here.
-3. Choose **Share connection**, name the device, and choose a file password of
-   at least 12 characters. Download the age-encrypted file or display the QR for the other device to scan.
-4. Transfer the encrypted file or scan the desktop QR, and share its password
-   through your chosen channel.
-   Provide the Authelia login separately. Each device should receive a fresh export.
+1. Open **This host → New identity** and choose a QR password (12–256 characters).
+2. Save the generated single-owner Authelia username/password. Scan the
+   authenticator QR, then enter a valid 2FA code **on this host** to enable remote
+   access. Setup expires after ten minutes; unfinished setup stays closed.
+3. Add a service name, one launch command and its explicit loopback address or
+   Unix socket. Enable **Available** and save. Use Load/Reload/Stop to control it.
+4. Optionally enable the separate **Allow SSH to this host** switch and save.
+5. Display **Connection QR** for another device’s camera, or save its PNG image.
+   The receiving device needs the QR password and Authelia login.
 
-An export contains the onion address, that device's Tor authorization key,
-public server CA, device certificate/private key and tunnel fingerprint. It
-never contains the host's onion identity key or Caddy CA private keys. The host
-retains only device public material. QR is the same encrypted content and is
-available only when the bundle fits QR capacity.
+The password-encrypted QR contains the onion address, Tor client authorization
+key, public server CA, device certificate/private key, tunnel fingerprint and
+owner name. It never contains the host’s onion identity or CA private keys.
+Import is exclusively by QR camera scan or QR image; there is no separate
+connection-file import. The host keeps the encrypted QR for sharing again.
 
-**Issue new identity** replaces the onion identity, TLS trust, device access and
-Authelia credentials together. Old connections close and new onboarding is
-required. **Revoke sessions** closes live tunnels, revokes the current OAuth
-client registration, clears Authelia's login sessions and requires fresh 2FA.
-It preserves the onion address and existing device files.
+**New identity** immediately closes all remote connections. It replaces the
+onion address, Tor/device keys, TLS/mTLS trust, Chisel identity, SSH credentials,
+Authelia username/password/TOTP and OAuth registration/signing state. Service
+settings remain. Every client must import the new QR and log in again after
+local 2FA setup. **Revoke sessions** closes live tunnels and requires fresh 2FA
+while preserving the current identity, QR and service settings.
 
 ## Client use
 
-Under **Connections → Add connection**, use **Scan desktop QR with camera**
-or select a saved QR image or encrypted file. The QR carries that same complete
-encrypted bundle; no separate file is needed. Enter
-its file password, then
-complete Authelia password/TOTP login and explicit OAuth consent. The service
-list updates while connected. Toggle **Route locally**, choose a port or leave
-it on **Auto**, and use the displayed address with a normal client:
+Under **Connections → Add connection**, scan the desktop QR with a camera or
+select its saved PNG/JPEG image. Enter its QR password. The app automatically
+opens the branded Authelia login, then OAuth consent. Selecting an existing
+connection opens any required unlock/login step; Remove erases its local
+profile and attempts server token revocation.
+
+The service list updates while connected. Toggle **Route locally**, choose a
+port or leave **Auto**, and use the displayed localhost address with an ordinary
+client. For example, a mapped Llama HTTP service can be used with:
 
 ```sh
 curl http://127.0.0.1:43127/v1/models
-ssh -p 43128 user@127.0.0.1
 ```
 
-Those example ports belong to different mapped services. Ordinary SSH still
-uses the target SSH server's host-key verification and user authentication.
-The tunnel's OAuth login does not replace the SSH account or distribute its
-private login key. TLS on the outer tunnel does not change a local service's
-HTTP/SSH protocol.
+When host SSH is enabled, its separate row maps the bundled stock OpenSSH server.
+The native client fetches per-identity SSH credentials through its authenticated
+OAuth session and shows
+an `ssh -F … torkitten` command. This uses the current host OS user and supports
+native commands, terminals and SFTP. It does not install a system SSH daemon or
+open a public host port. Private key/config files are mode `0600` and removed
+when access closes.
+
+All traffic between machines uses verified HTTPS/WSS with mTLS inside Tor.
+Caddy forwards the encrypted carrier; native local payloads stay unchanged:
+HTTP APIs remain HTTP on client localhost, SSH remains SSH. Host components
+communicate over private Unix sockets, where some use HTTP without TLS.
 
 Access and refresh tokens are stored only inside the password-encrypted local
 profile. They are never supplied to service clients or browser JavaScript.
@@ -121,30 +130,30 @@ The host UI and agents edit the same private `services.json`:
 ```json
 {
   "version": 2,
+  "ssh": false,
   "services": [
     {
       "id": "llama",
       "title": "Llama server",
       "available": true,
-      "ssh": false,
       "endpoint": {"network": "tcp", "address": "127.0.0.1:5090"},
-      "actions": {
-        "load": ["/usr/bin/systemctl", "--user", "start", "my-llama.service"],
-        "reload": ["/usr/bin/systemctl", "--user", "restart", "my-llama.service"],
-        "stop": ["/usr/bin/systemctl", "--user", "stop", "my-llama.service"]
-      }
+      "command": "/opt/llama/bin/llama-server -m '/models/my model.gguf' --port 5090"
     }
   ]
 }
 ```
 
-Use your existing service unit, Podman command or launcher script. These are
-explicit lifecycle commands that hand off to an independent launcher, not
-foreground model-server commands. Each control action waits up to 45 seconds
-for its launcher command; this is not a lifetime limit on the independently
-launched service. No shell is inserted, and no CPU, memory, swap, scheduling or
-restart settings are invented. Omit actions you do not need. Endpoints are
-explicit; the wrapper does not scan or guess ports. A Unix endpoint uses
+Use your foreground service executable or launcher script. TorKitten asks the
+host’s systemd user manager to own it in a separate transient service. Load
+starts it; Stop stops the owned unit; Reload stops and starts it. Unchanged
+units survive wrapper restarts. Removing or changing a launch configuration
+stops the previous owned unit. This process separation does not guarantee
+survival of machine-wide OOM or an ancestor-cgroup kill.
+
+The command supports quoted literal arguments with an absolute executable;
+there is no shell expansion. No CPU, memory, swap, scheduling or restart policy
+is added. Configure such choices in your command/preset. Endpoints are explicit;
+the app does not scan or guess ports. A Unix endpoint uses
 `{"network":"unix","address":"/absolute/path/service.sock"}`.
 
 The file must remain mode `0600`. Valid edits are loaded automatically; an

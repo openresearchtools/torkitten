@@ -4,7 +4,7 @@
 set -euo pipefail
 build_root=${TORKITTEN_BUILD_ROOT:-/run/media/user/Data/TorkittenV2Build}
 bin_dir=$(realpath "$build_root/artifacts/app/bin")
-for executable in torkitten torkitten-native tor caddy authelia; do
+for executable in torkitten torkitten-native tor caddy authelia sshd sshd-session sshd-auth; do
     test -x "$bin_dir/$executable" || { echo "Missing $executable; run tools/build-app.sh" >&2; exit 1; }
 done
 for prerequisite in /usr/bin/openssl /usr/bin/ssh-keygen; do

@@ -51,7 +51,7 @@ func scannerImage(t *testing.T, im image.Image, format string) []byte {
 	return out.Bytes()
 }
 
-func TestScannerReturnsOnlyEncryptedBundleWithoutPassword(t *testing.T) {
+func TestScannerReturnsOnlyRecognitionWithoutPassword(t *testing.T) {
 	const secret = "private-onion-and-device-key"
 	const password = "scanner-test-file-password"
 	ciphertext, err := encrypt(map[string]string{"private": secret}, password)
@@ -76,8 +76,12 @@ func TestScannerReturnsOnlyEncryptedBundleWithoutPassword(t *testing.T) {
 			if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
 				t.Fatal(err)
 			}
-			if len(result) != 2 || result["found"] != true || result["data"] != encoded {
-				t.Fatal("scanner must return only found and unchanged encrypted bytes")
+			if len(result) != 1 || result["found"] != true {
+				t.Fatal("scanner must return only recognition, never credentials or bundle bytes")
+			}
+			decoded, err := decodeQR(frame)
+			if err != nil || !bytes.Equal(decoded, ciphertext) {
+				t.Fatal("decoder changed encrypted QR bytes")
 			}
 			if strings.Contains(w.Body.String(), secret) || strings.Contains(w.Body.String(), password) {
 				t.Fatal("scanner response contains plaintext credentials")

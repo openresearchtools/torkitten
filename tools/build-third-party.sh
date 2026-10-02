@@ -20,6 +20,9 @@ case "$requested_component" in
     age)
         exec "$script_dir/build/age.sh"
         ;;
+    openssh)
+        exec "$script_dir/build/openssh.sh"
+        ;;
     native)
         exec "$script_dir/build/native.sh"
         ;;
@@ -32,10 +35,11 @@ case "$requested_component" in
         "$script_dir/build/authelia.sh"
         "$script_dir/build/chisel.sh"
         "$script_dir/build/age.sh"
+        "$script_dir/build/openssh.sh"
         exec "$script_dir/build/native.sh"
         ;;
     *)
-        echo "usage: $0 [tor|caddy|authelia|chisel|age|native|app|all]" >&2
+        echo "usage: $0 [tor|caddy|authelia|chisel|age|openssh|native|app|all]" >&2
         exit 2
         ;;
 esac
