@@ -27,6 +27,14 @@ The tested GOST configuration supplies that operation. Caddy supplies the HTTPS
 gateway and Authelia authorization before the WebSocket upgrade. This proof
 does not treat Caddy's Unix-socket support as a limitation.
 
+The tested GOST `forward`/WSS mode uses TLS to protect the connection to the
+gateway; it adds no separate SSH encryption between GOST endpoints. This differs
+from Chisel, which runs its own SSH connection inside WebSocket and preserves
+that encryption across a TLS-terminating proxy when its server fingerprint is
+verified. A native OpenSSH connection carried inside either tunnel retains its
+own SSH encryption. The GOST proof does not establish equivalent encryption
+boundaries or settle the transport selection.
+
 Run from any directory, with absolute paths and a fresh output directory:
 
 ```sh

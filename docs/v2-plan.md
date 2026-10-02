@@ -48,7 +48,7 @@ silently substitute a destination.
 | Onion identity, client authorization, Tor routing | C Tor |
 | Private-CA HTTPS, mTLS, exact routes, forward authorization | Caddy |
 | Account, password, 2FA, browser session validity | Authelia |
-| Byte-stream forwarding | Pinned GOST fixed forwarding, pending remaining protocol proofs |
+| Byte-stream forwarding | Upstream transport selection remains open; GOST is a tested candidate |
 | Process lifecycle and launch options | User's presets and their upstream launcher |
 | File encryption | Established age implementation |
 | Host keys and SSH authentication | OpenSSH |
@@ -70,12 +70,27 @@ prove the complete Tor/Caddy/Authelia/native-client chain. The remaining proofs
 below still gate deployment. If one fails, stop and resolve the design; do not
 install a second transport or quietly introduce a custom broker.
 
-This is a feature-fit choice, not a claim that GOST is more secure than Chisel.
-Chisel supports HTTPS/WebSocket tunnels through a SOCKS proxy and can carry
-native SSH. Its current target implementation forwards TCP/UDP, so raw Unix
-stream targets would require another adapter. GOST directly supports both required
-endpoint types. Chisel is an independent upstream with a Fedora-maintained
-package; Fedora packaging does not mean Fedora develops the tunnel protocol.
+The transport comparison must account for independent tunnel encryption.
+Chisel performs its own SSH handshake inside the WebSocket connection, using
+Go's SSH implementation. This encrypts every tunneled service, including plain
+HTTP APIs, between the Chisel client and server. With the Chisel server
+fingerprint verified, that encryption remains intact across Caddy's TLS
+termination. A tunneled OpenSSH connection adds its separate SSH layer inside
+Chisel's SSH layer. Chisel's transport is not an OpenSSH login server.
+
+The tested GOST `forward`/WSS configuration has no corresponding inner SSH
+encryption. Its TLS terminates at Caddy, which can read otherwise-plaintext
+service payloads. A carried OpenSSH connection still has its own end-to-end
+SSH encryption. These configurations are therefore not cryptographically
+equivalent, and Unix support alone does not establish GOST as the better choice.
+
+Chisel supports a SOCKS proxy; its current target implementation forwards
+TCP/UDP, so raw Unix stream targets would require another adapter. GOST directly
+supports both endpoint types. That tradeoff and the documented half-close limit
+remain part of the open transport decision. Chisel is an independent upstream
+with a Fedora-maintained package; Fedora packaging does not mean Fedora
+develops the tunnel protocol. Only one transport will be selected; there is no
+automatic substitution after a failure.
 
 ## Connections and private controls
 
@@ -288,5 +303,6 @@ proofs; unit tests alone do not establish browser or Tor compatibility.
 - [GOST Unix transport](https://gost.run/en/tutorials/unix/)
 - [Chisel transport and packaging](https://github.com/jpillora/chisel)
 - [Chisel target dialing](https://github.com/jpillora/chisel/blob/master/share/tunnel/tunnel_out_ssh.go)
+- [Chisel v1.11.7 SSH handshake over WebSocket](https://github.com/jpillora/chisel/blob/v1.11.7/client/client_connect.go)
 - [age implementation](https://github.com/FiloSottile/age)
 - [WebKit NetworkSession API](https://github.com/WebKit/WebKit/blob/main/Source/WebKit/UIProcess/API/glib/WebKitNetworkSession.h.in)
